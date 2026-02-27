@@ -275,5 +275,5 @@ data/tmp/
 
 # Project specific - Pokemon data outputs (if you want to exclude large generated files)
 # Uncomment the following lines if these files are too large or regenerable:
-# pokemon_big_data_outputs/
-# *.jsonl
+pokemon_big_data_outputs/
+*.jsonl
