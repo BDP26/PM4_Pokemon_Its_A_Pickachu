@@ -266,20 +266,23 @@ $RECYCLE.BIN/
 *.pt
 checkpoints/
 models/
-data/raw/
-data/temp/
-data/tmp/
+data/
 *.csv.gz
 *.parquet
 *.feather
 
-# Project specific - Pokemon data outputs (if you want to exclude large generated files)
-# Uncomment the following lines if these files are too large or regenerable:
-pokemon_big_data_outputs/
-*.jsonl
-data/silver/location_to_area_map.json
-data/silver/unmapped_locations.json
-data/silver/unmapped_locations_detailed.json
-data/bronze/type_chart.csv
-data/silver/unmapped_locations_summary.json
-data/bronze/type_chart.json
+# Project specific - Python cache and temporary files
+**/__pycache__/
+**/*.pyc
+
+# Logs
+*.log
+
+# IDE temporary files and caches
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Project specific - Generated configuration and metadata files
+pipeline_optimized.log
