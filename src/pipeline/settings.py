@@ -6,6 +6,12 @@ BRONZE_DIR = DATA_DIR / "bronze"
 SILVER_DIR = DATA_DIR / "silver"
 GOLD_DIR = DATA_DIR / "gold"
 
+SILVER_SNAPSHOTS_DIRNAME = "snapshots"
+SILVER_MAPPINGS_DIRNAME = "mappings"
+SILVER_REFERENCES_DIRNAME = "references"
+SILVER_DIAGNOSTICS_DIRNAME = "diagnostics"
+SILVER_SIMULATION_DIRNAME = "simulation"
+
 TYPE_CHART_CSV_PATH = BRONZE_DIR / "type_chart.csv"
 TYPE_CHART_JSON_PATH = BRONZE_DIR / "type_chart.json"
 
@@ -20,4 +26,15 @@ KAGGLE_GYM_LEADERS_FILE_PATH = ""
 def ensure_medallion_dirs() -> None:
     for directory in (DATA_DIR, BRONZE_DIR, SILVER_DIR, GOLD_DIR):
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def get_silver_subdirs(base_dir: Path = SILVER_DIR) -> dict[str, Path]:
+    return {
+        "snapshots": base_dir / SILVER_SNAPSHOTS_DIRNAME,
+        "mappings": base_dir / SILVER_MAPPINGS_DIRNAME,
+        "references": base_dir / SILVER_REFERENCES_DIRNAME,
+        "diagnostics": base_dir / SILVER_DIAGNOSTICS_DIRNAME,
+        "simulation": base_dir / SILVER_SIMULATION_DIRNAME,
+    }
+
 

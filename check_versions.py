@@ -1,6 +1,6 @@
 import json
 
-with open('data/silver/location_to_pokemon_map.json', 'r') as f:
+with open('data/silver/mappings/location_to_pokemon_map.json', 'r') as f:
     location_map = json.load(f)
 
 # Check first location with by_version data

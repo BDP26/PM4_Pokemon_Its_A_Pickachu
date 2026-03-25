@@ -3,14 +3,17 @@ from pathlib import Path
 import pandas as pd
 
 from src.pipeline.common.io import read_jsonl, write_json, write_jsonl
-from src.pipeline.settings import GOLD_DIR, SILVER_DIR, ensure_medallion_dirs
+from src.pipeline.settings import GOLD_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 
 
 def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_DIR) -> None:
     ensure_medallion_dirs()
     gold_dir.mkdir(parents=True, exist_ok=True)
 
-    game_files = sorted(silver_dir.glob("*_boss_snapshots.jsonl"))
+    snapshots_dir = get_silver_subdirs(silver_dir)["snapshots"]
+    game_files = sorted(snapshots_dir.glob("*_boss_snapshots.jsonl"))
+    if not game_files:
+        game_files = sorted(silver_dir.glob("*_boss_snapshots.jsonl"))
     if not game_files:
         raise FileNotFoundError(f"No silver files found in {silver_dir}")
 
