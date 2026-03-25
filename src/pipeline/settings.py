@@ -6,10 +6,15 @@ BRONZE_DIR = DATA_DIR / "bronze"
 SILVER_DIR = DATA_DIR / "silver"
 GOLD_DIR = DATA_DIR / "gold"
 
-LEGACY_SILVER_DIR = ROOT_DIR / "pokemon_big_data_outputs"
+TYPE_CHART_CSV_PATH = BRONZE_DIR / "type_chart.csv"
+TYPE_CHART_JSON_PATH = BRONZE_DIR / "type_chart.json"
+
 
 BULBA_API = "https://bulbapedia.bulbagarden.net/w/api.php"
 POKEAPI = "https://pokeapi.co/api/v2"
+
+KAGGLE_GYM_LEADERS_DATASET = "maxiboo/pokemon-gen-1-9-gym-leaders-elite-four"
+KAGGLE_GYM_LEADERS_FILE_PATH = ""
 
 
 def ensure_medallion_dirs() -> None:

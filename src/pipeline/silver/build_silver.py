@@ -1,45 +1,30 @@
 import json
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Optional
 
-from bs4 import BeautifulSoup
-from tqdm import tqdm
-
-from src.pipeline.common.http import build_session
 from src.pipeline.common.io import read_json, read_jsonl, write_json
-from src.pipeline.silver.boss_config import BOSS_ALIASES, CHAMPION_BY_GAME, ELITE_FOUR_BY_GAME
-from src.pipeline.settings import BRONZE_DIR, POKEAPI, SILVER_DIR, ensure_medallion_dirs
+from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs
+from src.pipeline.silver.game_config import get_games_config
+from src.pipeline.silver.kaggle_boss_mapping import (
+    build_boss_mapping_payload,
+    build_harmonized_candidates_by_boss,
+    enrich_boss_records,
+    load_kaggle_rows_by_game,
+)
 from src.pipeline.silver.location_mapper import LocationMapper
-
-def normalize_text(value: str) -> str:
-    value = value.replace("[ edit source ]", " ")
-    value = value.replace("[edit source]", " ")
-    value = value.replace("\xa0", " ")
-    return " ".join(value.split()).strip()
-
-
-def normalize_heading(value: str) -> str:
-    text = normalize_text(value).lower()
-    text = text.replace("’", "'")
-    return f" {text} "
-
-
-def match_boss(game_key: str, heading_text: str, seen_bosses: set[str]) -> Optional[str]:
-    heading = normalize_heading(heading_text)
-    aliases_for_game = BOSS_ALIASES.get(game_key, {})
-
-    for canonical_boss, aliases in aliases_for_game.items():
-        if canonical_boss in seen_bosses:
-            continue
-
-        for alias in aliases:
-            alias_norm = normalize_heading(alias)
-            if alias_norm in heading:
-                return canonical_boss
-
-    return None
+from src.pipeline.silver.location_pokemon_enrichment import (
+    enrich_records_with_location_pokemon,
+    get_location_area_and_pokemon_maps,
+)
+from src.pipeline.silver.parser import extract_game_data
+from src.pipeline.silver.type_matchups import build_type_matchups
+from src.pipeline.silver.battle_seeds import build_battle_seeds
+from src.pipeline.silver.silver_manifest import create_silver_manifest
+from src.pipeline.silver.schema_optimizer import (
+    write_optimized_silver,
+    create_pokemon_reference_index,
+    create_encounter_methods_reference,
+)
 
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
@@ -71,166 +56,6 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
     }
 
 
-def apply_endgame_fallbacks(
-    game_key: str,
-    expected_bosses: list[str],
-    seen_bosses: set[str],
-    boss_encounters: list[dict],
-    fallback_contexts: list[dict],
-) -> None:
-    if not fallback_contexts:
-        return
-
-    elite_four = ELITE_FOUR_BY_GAME.get(game_key, [])
-    champion = CHAMPION_BY_GAME.get(game_key)
-
-    # Use the latest relevant fallback context
-    context = fallback_contexts[-1]
-    reachable = context["reachable_locations"]
-    part = context["part"]
-    heading = context["heading"]
-
-    # Fill remaining Elite Four in canonical order
-    for boss in elite_four:
-        if boss not in seen_bosses and boss in expected_bosses:
-            boss_encounters.append(
-                {
-                    "game": game_key,
-                    "boss_name": boss,
-                    "heading": heading,
-                    "part": part,
-                    "reachable_locations": reachable,
-                    "location_count": len(reachable),
-                }
-            )
-            seen_bosses.add(boss)
-
-    # Fill champion if still missing
-    if champion and champion in expected_bosses and champion not in seen_bosses:
-        boss_encounters.append(
-            {
-                "game": game_key,
-                "boss_name": champion,
-                "heading": heading,
-                "part": part,
-                "reachable_locations": reachable,
-                "location_count": len(reachable),
-            }
-        )
-        seen_bosses.add(champion)
-
-
-def extract_game_data(game_payload: dict, mapper: LocationMapper) -> list[dict]:
-    game_key = game_payload["game_key"]
-    cumulative_slugs: list[str] = []
-    boss_encounters: list[dict] = []
-    seen_bosses: set[str] = set()
-
-    expected_bosses = game_payload.get("bosses", [])
-    heading_debug: list[str] = []
-    fallback_contexts: list[dict] = []
-
-    for part in game_payload.get("parts", []):
-        soup = BeautifulSoup(part.get("html", ""), "lxml")
-        content = soup.find("div", class_="mw-parser-output")
-        if content is None:
-            continue
-
-        for element in content.find_all(["h2", "h3", "a"]):
-            if element.name == "a" and element.get("title"):
-                title = normalize_text(element["title"])
-                if mapper.is_location_title(title):
-                    slug = mapper.resolve(title, game_payload["route_prefix"])
-                    if slug:
-                        cumulative_slugs.append(slug)
-                continue
-
-            if element.name not in {"h2", "h3"}:
-                continue
-
-            heading_text = normalize_text(element.get_text(" ", strip=True))
-            heading_debug.append(heading_text)
-            heading_norm = normalize_heading(heading_text)
-
-            # remember generic endgame sections for later filling
-            if any(token in heading_norm for token in [
-                " elite four ",
-                " the elite four ",
-                " pokemon league ",
-                " pokémon league ",
-                " indigo plateau ",
-                " great hall ",
-                " champion ",
-            ]):
-                fallback_contexts.append(
-                    {
-                        "heading": heading_text,
-                        "part": part["part"],
-                        "reachable_locations": list(dict.fromkeys(cumulative_slugs)),
-                    }
-                )
-
-            canonical_boss = match_boss(game_key, heading_text, seen_bosses)
-            if canonical_boss is None:
-                continue
-
-            reachable = list(dict.fromkeys(cumulative_slugs))
-            boss_encounters.append(
-                {
-                    "game": game_key,
-                    "boss_name": canonical_boss,
-                    "heading": heading_text,
-                    "part": part["part"],
-                    "reachable_locations": reachable,
-                    "location_count": len(reachable),
-                }
-            )
-            seen_bosses.add(canonical_boss)
-
-    # Fill missing endgame bosses from generic league/champion headings
-    apply_endgame_fallbacks(
-        game_key=game_key,
-        expected_bosses=expected_bosses,
-        seen_bosses=seen_bosses,
-        boss_encounters=boss_encounters,
-        fallback_contexts=fallback_contexts,
-    )
-
-    missing_bosses = [boss for boss in expected_bosses if boss not in seen_bosses]
-    if missing_bosses:
-        print(f"[silver] warning {game_key}: missing bosses -> {missing_bosses}")
-        print(f"[silver] headings seen for {game_key}:")
-        for heading in heading_debug:
-            print(f"  - {heading}")
-
-    # keep canonical order from game_config
-    boss_by_name = {record["boss_name"]: record for record in boss_encounters}
-    ordered_records = [boss_by_name[boss] for boss in expected_bosses if boss in boss_by_name]
-
-    return ordered_records
-
-
-def get_location_areas(location_slugs: list[str], throttle_seconds: float = 0.1) -> dict[str, list[str]]:
-    session = build_session()
-    area_map: dict[str, list[str]] = {}
-
-    unique_locations = sorted(set(location_slugs))
-    for slug in tqdm(unique_locations, desc="[silver] mapping location areas"):
-        try:
-            response = session.get(f"{POKEAPI}/location/{slug}", timeout=10)
-            if response.status_code == 200:
-                payload = response.json()
-                area_map[slug] = [entry["name"] for entry in payload.get("areas", [])]
-            else:
-                area_map[slug] = []
-        except Exception:
-            area_map[slug] = []
-
-        time.sleep(throttle_seconds)
-
-    return area_map
-
-
 def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = SILVER_DIR) -> None:
     ensure_medallion_dirs()
     silver_dir.mkdir(parents=True, exist_ok=True)
@@ -243,31 +68,68 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
             "Bronze inputs are missing. Run the bronze step first: python -m pipeline.run_pipeline --layer bronze"
         )
 
+    # Get allowed versions from game config
+    games_config = get_games_config()
+    allowed_versions = {game["game_key"] for game in games_config}
+
     location_index = read_json(location_index_path)
     mapper = LocationMapper(location_index)
+    kaggle_rows_by_game = load_kaggle_rows_by_game(bronze_dir)
 
     all_records: list[dict] = []
     all_slugs: list[str] = []
+    boss_mapping_by_version: dict[str, dict] = {}
+    records_with_game_keys: list[tuple[str, list[dict]]] = []
 
     for game_file in sorted(bulbapedia_dir.glob("*.json")):
         game_payload = read_json(game_file)
         records = extract_game_data(game_payload, mapper)
         game_key = game_payload["game_key"]
+        expected_bosses = game_payload.get("bosses", [])
+
+        harmonized_candidates_by_boss = build_harmonized_candidates_by_boss(
+            game_key=game_key,
+            expected_bosses=expected_bosses,
+            kaggle_rows_by_game=kaggle_rows_by_game,
+        )
+        records = enrich_boss_records(records, expected_bosses, harmonized_candidates_by_boss)
+        boss_mapping_by_version[game_key] = build_boss_mapping_payload(
+            game_key,
+            expected_bosses,
+            harmonized_candidates_by_boss,
+        )
 
         if not records:
             print(f"[silver] skipped {game_file.name}: no boss records extracted")
             continue
 
-        output_path = silver_dir / f"{game_key}_data.jsonl"
-        with output_path.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
         all_records.extend(records)
+        records_with_game_keys.append((game_key, records))
         for record in records:
             all_slugs.extend(record["reachable_locations"])
 
-        print(f"[silver] wrote {output_path.name} with {len(records)} records")
+    area_map, location_pokemon_map = get_location_area_and_pokemon_maps(all_slugs, allowed_versions=allowed_versions)
+    write_json(silver_dir / "location_to_area_map.json", area_map)
+    write_json(silver_dir / "location_to_pokemon_map.json", location_pokemon_map)
+
+    # Clear encounters file if exists (for fresh aggregation)
+    encounters_file = silver_dir / "encounters.jsonl"
+    if encounters_file.exists():
+        encounters_file.unlink()
+    
+    all_pokemon_references = {}
+
+    for game_key, records in records_with_game_keys:
+        enrich_records_with_location_pokemon(records, location_pokemon_map)
+        pokemon_refs = write_optimized_silver(records, silver_dir, game_key)
+        if pokemon_refs:
+            all_pokemon_references.update(pokemon_refs)
+
+        print(f"[silver] wrote {game_key}_boss_snapshots.jsonl with {len(records)} records")
+
+    # Create centralized references
+    create_pokemon_reference_index(all_pokemon_references, silver_dir)
+    create_encounter_methods_reference(all_records, silver_dir)
 
     write_json(silver_dir / "unmapped_locations_detailed.json", mapper.misses)
 
@@ -284,8 +146,31 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
     ]
     write_json(silver_dir / "unmapped_locations.json", compact_unmapped)
 
-    area_map = get_location_areas(all_slugs)
-    write_json(silver_dir / "location_to_area_map.json", area_map)
+    write_json(silver_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
+
+    # Build battle simulation data
+    # Extract teams from boss_mapping
+    teams_data = []
+    for game_version, bosses_dict in boss_mapping_by_version.items():
+        for boss_name, boss_info in bosses_dict.items():
+            if isinstance(boss_info, dict) and "teams" in boss_info:
+                for team_idx, team_info in enumerate(boss_info["teams"]):
+                    team_id = f"TEAM_{game_version}_{boss_name}_{team_idx}"
+                    teams_data.append({
+                        "team_id": team_id,
+                        "boss_name": boss_name,
+                        "game_version": game_version,
+                        "pokemon": team_info.get("pokemon", []),
+                        "level": team_info.get("level", 20),
+                    })
+    
+    # Build type matchups if we have teams
+    if teams_data:
+        build_type_matchups(teams_data, silver_dir, bronze_dir)
+        build_battle_seeds(silver_dir)
+    
+    # Create manifest of available data
+    create_silver_manifest(silver_dir)
 
     print(f"[silver] unmapped location events: {len(mapper.misses)}")
     print(f"[silver] done: {len(all_records)} boss snapshots across {len(set(r['game'] for r in all_records))} games")
@@ -302,9 +187,13 @@ def build_silver_from_existing_files(silver_dir: Path = SILVER_DIR) -> None:
         for locations in dataframe["reachable_locations"]:
             all_slugs.extend(locations)
 
-    area_map = get_location_areas(all_slugs)
+    area_map, location_pokemon_map = get_location_area_and_pokemon_maps(all_slugs)
     write_json(silver_dir / "location_to_area_map.json", area_map)
-    print(f"[silver] refreshed location_to_area_map.json from {len(game_files)} game files")
+    write_json(silver_dir / "location_to_pokemon_map.json", location_pokemon_map)
+    print(
+        f"[silver] refreshed location_to_area_map.json and location_to_pokemon_map.json "
+        f"from {len(game_files)} game files"
+    )
 
 
 if __name__ == "__main__":

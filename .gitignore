@@ -283,6 +283,6 @@ pokemon_big_data_outputs/
 data/silver/location_to_area_map.json
 data/silver/unmapped_locations.json
 data/silver/unmapped_locations_detailed.json
-src/pipeline/bronze/data/reference/type_chart.csv
+data/bronze/type_chart.csv
 data/silver/unmapped_locations_summary.json
-src/pipeline/bronze/data/reference/type_chart.json
+data/bronze/type_chart.json

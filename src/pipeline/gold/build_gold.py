@@ -10,7 +10,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     ensure_medallion_dirs()
     gold_dir.mkdir(parents=True, exist_ok=True)
 
-    game_files = sorted(silver_dir.glob("*_data.jsonl"))
+    game_files = sorted(silver_dir.glob("*_boss_snapshots.jsonl"))
     if not game_files:
         raise FileNotFoundError(f"No silver files found in {silver_dir}")
 
@@ -25,8 +25,8 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
         .groupby("game", as_index=False)
         .agg(
             boss_steps=("boss_name", "count"),
-            final_reachable_locations=("location_count", "last"),
-            max_reachable_locations=("location_count", "max"),
+            final_reachable_locations=("reachable_location_count", "last"),
+            max_reachable_locations=("reachable_location_count", "max"),
         )
         .sort_values("final_reachable_locations", ascending=False)
     )
@@ -50,4 +50,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     write_json(gold_dir / "manifest.json", manifest)
 
     print(f"[gold] wrote {len(manifest['gold_outputs'])} datasets from {len(game_files)} silver files")
+
+if __name__ == "__main__":
+    build_gold_from_silver()
 

@@ -4,6 +4,8 @@ import csv
 import json
 from pathlib import Path
 
+from src.pipeline import settings
+
 
 TYPES = [
     "Normal", "Fighting", "Flying", "Poison", "Ground", "Rock",
@@ -205,8 +207,8 @@ def save_as_json(chart: dict[str, dict[str, float]], output_path: Path) -> None:
 def main() -> None:
     chart = build_type_chart()
 
-    csv_path = Path("data/reference/type_chart.csv")
-    json_path = Path("data/reference/type_chart.json")
+    csv_path = settings.TYPE_CHART_CSV_PATH
+    json_path = settings.TYPE_CHART_JSON_PATH
 
     save_as_csv(chart, csv_path)
     save_as_json(chart, json_path)

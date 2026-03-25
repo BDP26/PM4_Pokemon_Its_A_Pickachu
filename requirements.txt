@@ -6,3 +6,4 @@ RapidFuzz~=3.14.3
 tqdm~=4.67.3
 urllib3~=2.6.3
 lxml
+kagglehub[pandas-datasets]

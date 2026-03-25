@@ -6,6 +6,8 @@ Boss alias and endgame configuration.
 - CHAMPION_BY_GAME: canonical champion per game
 """
 
+import re
+
 BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
     "red": {
         "Brock": ["brock", "pewter gym", "pewter city"],
@@ -220,3 +222,58 @@ CHAMPION_BY_GAME: dict[str, str] = {
     "x": "Diantha",
     "y": "Diantha",
 }
+
+
+def boss_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def boss_id(version: str, canonical_boss: str) -> str:
+    return f"{version}:{boss_slug(canonical_boss)}"
+
+
+def dataset_game_name(version: str) -> str:
+    return version.upper() if len(version) == 1 else version.capitalize()
+
+
+def _normalize_alias(alias: str) -> str:
+    cleaned = " ".join(alias.replace("&", " & ").split())
+    words = [w if w.isupper() else w.capitalize() for w in cleaned.split(" ")]
+    return " ".join(words)
+
+
+def _looks_like_person_alias(alias: str) -> bool:
+    alias_l = alias.lower()
+    blocked_tokens = (
+        "gym",
+        "city",
+        "town",
+        "route",
+        "island",
+        "plateau",
+        "hall",
+        "castle",
+        "temple",
+    )
+    return not any(token in alias_l for token in blocked_tokens)
+
+
+def dataset_boss_candidates(version: str, canonical_boss: str) -> list[str]:
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def add_candidate(value: str) -> None:
+        if value not in seen:
+            seen.add(value)
+            candidates.append(value)
+
+    add_candidate(canonical_boss)
+
+    for alias in BOSS_ALIASES.get(version, {}).get(canonical_boss, []):
+        if not _looks_like_person_alias(alias):
+            continue
+
+        add_candidate(alias)
+        add_candidate(_normalize_alias(alias))
+
+    return candidates

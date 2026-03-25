@@ -1,4 +1,5 @@
 import re
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -6,9 +7,18 @@ from bs4 import BeautifulSoup
 
 from src.pipeline.common.http import build_session
 from src.pipeline.common.io import write_json
-from src.pipeline.settings import BRONZE_DIR, BULBA_API, POKEAPI, ensure_medallion_dirs
+from src.pipeline.settings import (
+    BRONZE_DIR,
+    BULBA_API,
+    KAGGLE_GYM_LEADERS_DATASET,
+    KAGGLE_GYM_LEADERS_FILE_PATH,
+    POKEAPI,
+    ensure_medallion_dirs,
+)
 from src.pipeline.silver.game_config import get_games_config
 
+import kagglehub
+from kagglehub import KaggleDatasetAdapter
 
 _TITLE_EXISTS_CACHE: dict[str, bool] = {}
 
@@ -32,7 +42,6 @@ def page_exists(session, title: str) -> bool:
         response = r.json()
 
         print(f"[debug] title={title!r}")
-        print(f"[debug] response={response}")
 
         pages = response.get("query", {}).get("pages", [])
         exists = bool(pages) and not pages[0].get("missing", False)
@@ -74,7 +83,67 @@ def get_walkthrough_parts(session, root_title: str) -> list[dict]:
     return sorted(parts, key=lambda item: item["part"])
 
 
-def fetch_bronze_sources(output_dir: Optional[Path] = None) -> None:
+def _copy_kaggle_raw_files(dataset_dir: Path, output_dir: Path) -> list[str]:
+    copied_files: list[str] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source_file in dataset_dir.rglob("*"):
+        if not source_file.is_file():
+            continue
+        relative_path = source_file.relative_to(dataset_dir)
+        target_path = output_dir / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, target_path)
+        copied_files.append(str(relative_path))
+    return sorted(copied_files)
+
+
+def fetch_kaggle_gym_leaders_dataset(
+    output_dir: Optional[Path] = None,
+    dataset_handle: str = KAGGLE_GYM_LEADERS_DATASET,
+    file_path: str = KAGGLE_GYM_LEADERS_FILE_PATH,
+) -> None:
+    kaggle_output_dir = (output_dir or BRONZE_DIR) / "kagglehub"
+
+    dataset_dir = Path(kagglehub.dataset_download(dataset_handle))
+    copied_files = _copy_kaggle_raw_files(dataset_dir, kaggle_output_dir / "raw")
+
+    selected_file = file_path
+    if not selected_file:
+        preferred_suffixes = (".csv", ".json", ".parquet")
+        for candidate in copied_files:
+            if candidate.lower().endswith(preferred_suffixes):
+                selected_file = candidate
+                break
+
+    table_output_path = None
+    row_count = None
+    columns = None
+    if selected_file:
+        dataframe = kagglehub.load_dataset(
+            KaggleDatasetAdapter.PANDAS,
+            dataset_handle,
+            selected_file,
+        )
+        table_output_path = kaggle_output_dir / "gym_leaders_elite_four.csv"
+        dataframe.to_csv(table_output_path, index=False)
+        row_count = int(len(dataframe))
+        columns = list(dataframe.columns)
+    else:
+        print("[bronze] warning: No tabular file detected in Kaggle dataset; skipped dataframe export")
+
+    metadata = {
+        "dataset_handle": dataset_handle,
+        "selected_file": selected_file,
+        "raw_files": copied_files,
+        "dataframe_export": str(table_output_path.relative_to(kaggle_output_dir)) if table_output_path else None,
+        "row_count": row_count,
+        "columns": columns,
+    }
+    write_json(kaggle_output_dir / "manifest.json", metadata)
+    print(f"[bronze] wrote Kaggle dataset artifacts to {kaggle_output_dir}")
+
+
+def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool = True) -> None:
     ensure_medallion_dirs()
     output = output_dir or BRONZE_DIR
     output.mkdir(parents=True, exist_ok=True)
@@ -126,6 +195,9 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None) -> None:
         }
         write_json(bulbapedia_dir / f"{game_key}.json", payload)
         print(f"[bronze] wrote {game_key}.json with {len(records)} parts")
+
+    if include_kaggle:
+        fetch_kaggle_gym_leaders_dataset(output)
 
 if __name__ == "__main__":
     fetch_bronze_sources()
