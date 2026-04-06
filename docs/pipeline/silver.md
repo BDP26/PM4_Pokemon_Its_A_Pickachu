@@ -12,7 +12,7 @@ The Silver layer transforms raw Bronze payloads into cleaned, mapped, and enrich
 ## Entrypoint
 
 - Function: `build_silver_from_bronze`
-- File: `src/pipeline/silver/build_silver.py`
+- File: `src/pipeline/silver/orchestration/build_silver.py`
 - Orchestration: `src/pipeline/run_pipeline.py` (`all` or `layers silver`)
 
 ## Required Inputs
@@ -36,7 +36,7 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Encounter methods reference
    - Boss mapping by version
    - Unmapped location diagnostics (detailed, summary, compact)
-8. Optionally derive deterministic sequential team battle simulations and battle seeds from available teams.
+8. Extract simulation inputs (`teams.parquet`, `teams.jsonl`) from available boss/team data.
 9. Generate Silver manifest.
 
 ## Outputs
@@ -55,14 +55,14 @@ Primary outputs in `data/silver/`:
 - `diagnostics/unmapped_locations.json`
 - `manifest.json`
 
-Optional simulation-oriented outputs (generated when boss team data is available):
+Optional simulation inputs (generated when boss team data is available):
 
 - `simulation/teams.parquet` (primary)
-- `simulation/team_battle_simulations.parquet` (primary)
-- `simulation/battle_seeds.parquet` (primary)
-- `simulation/monte_carlo_results.parquet` (primary)
+- `simulation/teams.jsonl` (line-delimited view)
 
-Validate simulation artifacts after a Silver run:
+Gold consumes the Silver simulation inputs and writes the battle matrix, seeds, and Monte-Carlo outputs into `data/gold/simulation/`.
+
+Validate Gold simulation artifacts after a full run:
 
 - `PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation`
 

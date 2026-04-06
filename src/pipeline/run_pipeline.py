@@ -3,10 +3,10 @@ import logging
 import sys
 import time
 
-from src.pipeline.bronze.fetch_sources import fetch_bronze_sources
-from src.pipeline.gold.build_gold import build_gold_from_silver
-from src.pipeline.silver.build_silver import build_silver_from_bronze
-from src.pipeline.silver.validate_simulation import main as validate_simulation_main
+from src.pipeline.bronze.orchestration.fetch_sources import fetch_bronze_sources
+from src.pipeline.gold.orchestration.build_gold import build_gold_from_silver
+from src.pipeline.gold.simulation.validate_simulation import main as validate_simulation_main
+from src.pipeline.silver.orchestration.build_silver import build_silver_from_bronze
 
 
 logging.basicConfig(
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser(
         "validate-simulation",
-        help="Run smoke checks for data/silver/simulation artifacts",
+        help="Run smoke checks for data/gold/simulation artifacts",
     )
     return parser.parse_args()
 

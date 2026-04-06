@@ -7,9 +7,9 @@ The pipeline follows a **Bronze → Silver → Gold** medallion structure:
 
 | Layer | Folder | Content |
 |-------|--------|---------|
-| **Bronze** | `data/bronze/` | Raw API responses (Bulbapedia + PokéAPI) plus optional KaggleHub snapshot for gym leaders / elite four. Large files; excluded from git. |
-| **Silver** | `data/silver/` | Cleaned & validated data in structured folders: snapshots (`snapshots/*.jsonl`), mappings (`mappings/*.json`), references (`references/*`), diagnostics (`diagnostics/*`), optional simulation (`simulation/*.jsonl`), plus `manifest.json`. |
-| **Gold** | `data/gold/` | Analytics-ready datasets: game progression summary (CSV) and cross-game location popularity ranking (JSONL). |
+| **Bronze** | `data/bronze/` | Raw API responses (Bulbapedia + PokéAPI), Kaggle snapshot, plus config snapshots under `config/`. Large files; excluded from git. |
+| **Silver** | `data/silver/` | Cleaned & validated data in structured folders: snapshots (`snapshots/*.jsonl`), mappings (`mappings/*.json`), references (`references/*`), diagnostics (`diagnostics/*`), simulation inputs (`simulation/*.parquet`, `simulation/*.jsonl`), plus `manifest.json`. |
+| **Gold** | `data/gold/` | Analytics-ready datasets: game progression summary (`.csv`), location popularity (`.parquet`), team recommendations (`.parquet` / `.csv`), walkthrough payload (`.json`), and simulation outputs in `simulation/`. |
 
 ## Project Structure
 
@@ -19,14 +19,20 @@ PM4_Pokemon_Its_A_Pickachu/
 │   ├── bronze/                  # raw API dumps (git-ignored)
 │   │   ├── bulbapedia/          # {game_key}.json per game
 │   │   ├── pokeapi/             # location_index.json
-│   │   └── kagglehub/           # optional Kaggle raw files + manifest + CSV export
+│   │   ├── config/              # config snapshots + optional overrides
+│   │   ├── inputs/              # input builders (e.g. type chart)
+│   │   └── orchestration/       # bronze fetch / snapshot runners
 │   ├── silver/
 │   │   ├── snapshots/           # per-game boss snapshots
 │   │   ├── mappings/            # location and boss mapping artifacts
 │   │   ├── references/          # normalized lookup/reference files
 │   │   ├── diagnostics/         # unmapped-location audit outputs
-│   │   └── simulation/          # optional battle simulation artifacts
-│   └── gold/                    # aggregated analytics outputs
+│   │   ├── simulation/          # simulation inputs (teams / JSONL view)
+│   │   └── orchestration/       # silver build runner
+│   └── gold/                    # aggregated analytics + simulation outputs
+│       ├── orchestration/       # gold build runner
+│       ├── reporting/           # web payload / exports
+│       └── simulation/          # simulation outputs and validators
 │
 ├── src/
 │   └── pipeline/
@@ -36,15 +42,28 @@ PM4_Pokemon_Its_A_Pickachu/
 │       │   ├── http.py          # shared retry session
 │       │   └── io.py            # JSON / JSONL helpers
 │       ├── bronze/
-│       │   └── fetch_sources.py # ingest Bulbapedia + PokéAPI → bronze
+│       │   ├── inputs/
+│       │   │   └── create_type_chart.py # build type chart input
+│       │   └── orchestration/
+│       │       ├── config_snapshot.py # bronze config snapshot
+│       │       └── fetch_sources.py   # ingest Bulbapedia + PokéAPI → bronze
 │       ├── silver/
-│       │   ├── game_config.py   # game metadata (versions, bosses, route prefixes)
-│       │   ├── location_mapper.py # LocationMapper class
-│       │   ├── build_silver.py  # bronze → silver transformation
+│       │   ├── inputs/          # parsing, configs, kaggle input contracts
+│       │   ├── enrichment/      # normalization and enrichment logic
+│       │   ├── simulation/      # simulation core + validation
+│       │   ├── reporting/       # manifest/report builders
+│       │   └── orchestration/
+│       │       └── build_silver.py  # bronze → silver transformation
 │       └── gold/
-│           └── build_gold.py    # silver → gold aggregations
+│           ├── orchestration/
+│           │   └── build_gold.py    # silver → gold aggregations
+│           ├── reporting/
+│           │   └── build_walkthrough_web.py # web payload builder
+│           └── simulation/
+│               ├── run_gold_simulation.py
+│               └── validate_simulation.py
 │
-├── Scripts/
+├── notebooks/
 │   └── loading_location.ipynb  # original exploration notebook (reference only)
 └── requirements.txt
 ```
@@ -76,7 +95,7 @@ Der Kaggle-Download wird im aktuellen Code standardmaessig in Bronze ausgefuehrt
 
 ## Simulation Smoke Check
 
-After running the Silver layer, validate simulation outputs with:
+After running Silver and Gold, validate simulation outputs with:
 
 ```bash
 PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
@@ -84,9 +103,10 @@ PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
 
 The check validates file presence, required fields, score ranges, and cross-file references for:
 
-- `data/silver/simulation/teams.jsonl`
-- `data/silver/simulation/type_matchups.jsonl`
-- `data/silver/simulation/battle_seeds.jsonl`
+- `data/gold/simulation/teams.parquet`
+- `data/gold/simulation/team_battle_simulations.parquet`
+- `data/gold/simulation/battle_seeds.parquet`
+- `data/gold/simulation/monte_carlo_results.parquet`
 
 Die Matchup-Bewertung ist schadensbasiert: Fuer jedes Pokemon werden nur bis zum Kampf natuerlich erlernte Moves (Level-up), ohne TM/HM, verwendet. Die erwartete Schadensformel folgt der vereinfachten Pokemon-Gleichung mit Level, Angriff/Spezial-Angriff, Verteidigung/Spezial-Verteidigung, Basisstaerke, STAB, Typen-Effekt und Zufalls-/Krit-Modifikator.
 
@@ -153,13 +173,13 @@ Minimaler Join-Ansatz:
 | File | Description |
 |------|-------------|
 | `game_progression_summary.csv` | Per-game: boss steps, final & max reachable location counts |
-| `location_popularity.jsonl` | Per location slug: how many games include it, total mentions |
-| `team_recommendations.jsonl` | (Optional) Ranked player teams by Monte-Carlo win rate across scenarios |
-| `best_team_by_boss.jsonl` | (Optional) Best-performing team suggestion per boss matchup |
-| `team_rankings_by_boss_version.jsonl` | (Optional) Ranked teams per boss with same-version constraint |
-| `best_team_by_boss_version.jsonl` | (Optional) Best team per boss and game version |
-| `best_team_by_boss_version.csv` | (Optional) CSV export of best team per boss and game version |
-| `walkthrough_best_teams.json` | (Optional) Web payload for walkthrough team recommendations |
+| `location_popularity.parquet` | Per location slug: how many games include it, total mentions |
+| `team_recommendations.parquet` | Ranked player teams by Monte-Carlo win rate across scenarios |
+| `best_team_by_boss.parquet` | Best-performing team suggestion per boss matchup |
+| `team_rankings_by_boss_version.parquet` | Ranked teams per boss with same-version constraint |
+| `best_team_by_boss_version.parquet` | Best team per boss and game version |
+| `best_team_by_boss_version.csv` | CSV export of best team per boss and game version |
+| `walkthrough_best_teams.json` | Web payload for walkthrough team recommendations |
 | `manifest.json` | Provenance metadata for the gold build |
 
 ## Walkthrough Web Overview

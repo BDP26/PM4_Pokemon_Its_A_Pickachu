@@ -6,12 +6,13 @@ The Bronze layer ingests raw external data with minimal transformation.
 
 - Preserve upstream payloads from Bulbapedia and PokeAPI.
 - Store a reproducible Kaggle snapshot for boss/team enrichment.
+- Snapshot the effective pipeline config and manual override folder.
 - Provide stable raw inputs for Silver without business-level filtering.
 
 ## Entrypoint
 
 - Function: `fetch_bronze_sources`
-- File: `src/pipeline/bronze/fetch_sources.py`
+- File: `src/pipeline/bronze/orchestration/fetch_sources.py`
 - Orchestration: `src/pipeline/run_pipeline.py` (`all` or `layers bronze`)
 
 ## Input Sources
@@ -30,7 +31,8 @@ The Bronze layer ingests raw external data with minimal transformation.
    - Fetch each part HTML payload.
    - Write one raw game JSON file.
 4. Download Kaggle dataset files, copy raw files, and export a normalized CSV.
-5. Write a Kaggle manifest with provenance metadata.
+5. Snapshot the effective Bronze config and create a config manifest.
+6. Write a Kaggle manifest with provenance metadata.
 
 ## Outputs
 
@@ -39,6 +41,9 @@ The Bronze layer ingests raw external data with minimal transformation.
 - `data/bronze/kagglehub/raw/*`
 - `data/bronze/kagglehub/gym_leaders_elite_four.csv`
 - `data/bronze/kagglehub/manifest.json`
+- `data/bronze/config/games_config.json`
+- `data/bronze/config/manifest.json`
+- `data/bronze/config/overrides/*` (optional, manual overrides)
 
 ## Notes and Constraints
 
