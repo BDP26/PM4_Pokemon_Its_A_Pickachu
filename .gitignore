@@ -286,3 +286,12 @@ data/
 
 # Project specific - Generated configuration and metadata files
 pipeline_optimized.log
+pokemon_big_data_outputs/black-white_data.jsonl
+pokemon_big_data_outputs/diamond-pearl_data.jsonl
+pokemon_big_data_outputs/location_to_area_map.json
+pokemon_big_data_outputs/gold-silver_data.jsonl
+pokemon_big_data_outputs/PokemonGymLeaders.csv
+pokemon_big_data_outputs/red-blue_data.jsonl
+pokemon_big_data_outputs/ruby-sapphire_data.jsonl
+pokemon_big_data_outputs/unmapped_locations.json
+pokemon_big_data_outputs/x-y_data.jsonl
