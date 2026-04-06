@@ -36,7 +36,7 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Encounter methods reference
    - Boss mapping by version
    - Unmapped location diagnostics (detailed, summary, compact)
-8. Optionally derive battle simulation seeds and type matchups from available teams.
+8. Optionally derive deterministic sequential team battle simulations and battle seeds from available teams.
 9. Generate Silver manifest.
 
 ## Outputs
@@ -55,7 +55,16 @@ Primary outputs in `data/silver/`:
 - `diagnostics/unmapped_locations.json`
 - `manifest.json`
 
-Additional simulation-oriented outputs may be generated when team data is available.
+Optional simulation-oriented outputs (generated when boss team data is available):
+
+- `simulation/teams.parquet` (primary)
+- `simulation/team_battle_simulations.parquet` (primary)
+- `simulation/battle_seeds.parquet` (primary)
+- `simulation/monte_carlo_results.parquet` (primary)
+
+Validate simulation artifacts after a Silver run:
+
+- `PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation`
 
 ## Notes and Constraints
 

@@ -21,7 +21,7 @@ class LocationMapper:
 
     def __init__(self, location_index: dict):
         self.valid_slugs = {item["name"] for item in location_index["results"]}
-        self.cache: dict[str, Optional[str]] = {}
+        self.cache: dict[tuple[str, str], Optional[str]] = {}
         self.misses: list[dict] = []
 
         self.blacklist = [
@@ -40,7 +40,7 @@ class LocationMapper:
             "link trade",
             "day care",
             "hall of fame",
-            "cave",
+            "tower tycoon",
         ]
 
         self.hard_map = {
@@ -60,6 +60,8 @@ class LocationMapper:
             "mt-moon-square": "mt-moon",
             "ilex-forest-shrine": "ilex-forest",
             "victory-road": "kanto-victory-road-1",
+            "tin-tower": "bell-tower",
+            "kanto-radio-tower": "radio-tower",
         }
 
     def is_location_title(self, title: str) -> bool:
@@ -71,7 +73,36 @@ class LocationMapper:
         cleaned = re.sub(r"(?i)edit section's source code:\s*", "", title)
         if "Underground Path" not in cleaned:
             cleaned = re.sub(r"\(.*?\)", "", cleaned)
+        cleaned = re.sub(r"(?i)^(back to|return to|outside|inside|via(?: the)?)\s+", "", cleaned).strip()
+        cleaned = re.sub(r"(?i),\s*second visit$", "", cleaned).strip()
+
+        # Prefer a deterministic canonical side when a heading references multiple places.
+        if "/" in cleaned:
+            cleaned = cleaned.split("/", 1)[0].strip()
+
+        if cleaned.lower().startswith("gate to "):
+            cleaned = cleaned[8:].strip()
         return cleaned.strip()
+
+    @staticmethod
+    def _special_slug(clean_name: str, raw_title: str, route_prefix: str) -> Optional[str]:
+        clean_lower = clean_name.lower()
+        region = route_prefix.split("-", 1)[0]
+
+        if clean_lower == "safari zone":
+            return f"{region}-safari-zone"
+
+        if clean_lower == "goldenrod radio tower":
+            return "radio-tower"
+
+        if clean_lower == "seaside cycling road" and route_prefix == "hoenn-route":
+            return "hoenn-route-110"
+
+        title_for_match = raw_title.lower().replace("é", "e")
+        if clean_lower == "ghost" and "pokemon tower" in title_for_match:
+            return "pokemon-tower"
+
+        return None
 
     @staticmethod
     def _slugify(text: str) -> str:
@@ -98,16 +129,18 @@ class LocationMapper:
         )
 
     def resolve(self, raw_title: str, route_prefix: str) -> Optional[str]:
-        title_lower = raw_title.lower().strip()
+        cache_key = (raw_title, route_prefix)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
 
-        if raw_title in self.cache:
-            return self.cache[raw_title]
+        clean_name = self._clean_title(raw_title)
+        title_lower = clean_name.lower().strip()
 
         if title_lower == "cave":
-            self.cache[raw_title] = None
+            self.cache[cache_key] = None
             self._record_miss(
                 raw_title=raw_title,
-                clean_name=raw_title.strip(),
+                clean_name=clean_name,
                 route_prefix=route_prefix,
                 tried_slug=None,
                 reason="generic_title_cave",
@@ -116,41 +149,47 @@ class LocationMapper:
 
         matched_blacklist = next((bad for bad in self.blacklist if bad in title_lower), None)
         if matched_blacklist:
-            self.cache[raw_title] = None
+            self.cache[cache_key] = None
             self._record_miss(
                 raw_title=raw_title,
-                clean_name=raw_title.strip(),
+                clean_name=clean_name,
                 route_prefix=route_prefix,
                 tried_slug=None,
                 reason=f"blacklisted:{matched_blacklist}",
             )
             return None
 
-        clean_name = self._clean_title(raw_title)
-
-        route_match = re.search(r"Route\s+(\d+)", clean_name, re.IGNORECASE)
+        route_match = re.search(r"Routes?\s+(\d+)", clean_name, re.IGNORECASE)
         if route_match:
             route_number = route_match.group(1)
             if "Kanto" in raw_title:
                 slug = f"kanto-route-{route_number}"
             elif "Johto" in raw_title:
                 slug = f"johto-route-{route_number}"
+            elif route_prefix == "johto-route" and int(route_number) <= 28:
+                # Gold/Silver late-game routes in this range are Kanto routes in PokeAPI.
+                slug = f"kanto-route-{route_number}"
             else:
                 slug = f"{route_prefix}-{route_number}"
             slug_source = "route_rule"
         else:
-            slug = self._slugify(clean_name)
-            slug_source = "slugify"
+            special_slug = self._special_slug(clean_name, raw_title, route_prefix)
+            if special_slug is not None:
+                slug = special_slug
+                slug_source = "special_rule"
+            else:
+                slug = self._slugify(clean_name)
+                slug_source = "slugify"
 
         mapped_slug = self.hard_map.get(slug, slug)
         if mapped_slug != slug:
             slug_source = f"{slug_source}+hard_map"
 
         if mapped_slug in self.valid_slugs:
-            self.cache[raw_title] = mapped_slug
+            self.cache[cache_key] = mapped_slug
             return mapped_slug
 
-        self.cache[raw_title] = None
+        self.cache[cache_key] = None
         self._record_miss(
             raw_title=raw_title,
             clean_name=clean_name,

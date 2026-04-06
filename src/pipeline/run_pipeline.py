@@ -1,8 +1,19 @@
 import argparse
+import logging
+import sys
+import time
 
 from src.pipeline.bronze.fetch_sources import fetch_bronze_sources
 from src.pipeline.gold.build_gold import build_gold_from_silver
 from src.pipeline.silver.build_silver import build_silver_from_bronze
+from src.pipeline.silver.validate_simulation import main as validate_simulation_main
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,11 +35,21 @@ def parse_args() -> argparse.Namespace:
         choices=["bronze", "silver", "gold"],
         help="Layer names to execute in the provided order",
     )
+
+    subparsers.add_parser(
+        "validate-simulation",
+        help="Run smoke checks for data/silver/simulation artifacts",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    logger.info("[pipeline] mode=%s", args.mode)
+
+    if args.mode == "validate-simulation":
+        sys.exit(validate_simulation_main())
+
     layer_runners = {
         "bronze": fetch_bronze_sources,
         "silver": build_silver_from_bronze,
@@ -40,8 +61,14 @@ def main() -> None:
     else:
         selected_layers = args.names
 
-    for layer in dict.fromkeys(selected_layers):
+    deduped_layers = list(dict.fromkeys(selected_layers))
+    total = len(deduped_layers)
+    for index, layer in enumerate(deduped_layers, start=1):
+        started_at = time.perf_counter()
+        logger.info("[pipeline] (%s/%s) starting layer=%s", index, total, layer)
         layer_runners[layer]()
+        elapsed = time.perf_counter() - started_at
+        logger.info("[pipeline] (%s/%s) finished layer=%s in %.2fs", index, total, layer, elapsed)
 
 
 

@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Walkthrough Teams</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #fafafa; color: #1f2937; }
+    h1 { margin-bottom: 8px; }
+    .muted { color: #6b7280; margin-bottom: 16px; }
+    .hint { margin: 0 0 16px; padding: 10px 12px; background: #ecfeff; border: 1px solid #a5f3fc; border-radius: 8px; color: #155e75; font-size: 14px; }
+    .controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    .control { display: flex; flex-direction: column; gap: 6px; }
+    select { padding: 8px; min-width: 220px; }
+    .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+    .title { font-weight: 700; margin-bottom: 6px; }
+    .meta { color: #374151; font-size: 14px; margin-bottom: 8px; }
+    .team { font-size: 14px; }
+    .team-choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+    .team-choice { border: 1px solid #d1d5db; border-radius: 10px; padding: 8px 10px; background: #ffffff; cursor: pointer; }
+    .team-choice.active { border-color: #2563eb; background: #eff6ff; }
+    .team-choice-title { font-weight: 700; font-size: 13px; }
+    .team-choice-meta { font-size: 12px; color: #4b5563; margin-top: 4px; }
+    .pokemon-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 10px; }
+    .pokemon-card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; background: #fcfcff; display: flex; gap: 10px; align-items: flex-start; }
+    .sprite { width: 72px; height: 72px; image-rendering: pixelated; object-fit: contain; background: #f8fafc; border-radius: 10px; border: 1px solid #e5e7eb; flex: 0 0 auto; }
+    .pokemon-meta { min-width: 0; }
+    .pokemon-name { font-weight: 700; margin-bottom: 2px; }
+    .pokemon-moves { color: #4b5563; font-size: 12px; line-height: 1.35; word-break: break-word; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 12px; margin-right: 6px; }
+    .section { margin-top: 12px; padding-top: 8px; border-top: 1px solid #e5e7eb; }
+    .starter-box { display: flex; gap: 12px; align-items: center; padding: 10px 12px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; margin: 14px 0; }
+    .starter-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 12px; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Bestes Team pro Boss und Version</h1>
+  <div class="muted">Walkthrough-Reihenfolge aus Silver + Monte-Carlo Teamempfehlung aus Gold.</div>
+  <div class="hint">Die Empfehlungen stammen aus einer schadensbasierten Simulation: Es werden nur bis zum Kampf natuerlich gelernte Moves (Level-up) beruecksichtigt; TM/HM-Moves bleiben ausgeschlossen.</div>
+
+  <div class="controls">
+    <div class="control">
+      <label for="versionSelect">Version</label>
+      <select id="versionSelect"></select>
+    </div>
+    <div class="control">
+      <label for="bossSelect">Boss</label>
+      <select id="bossSelect"></select>
+    </div>
+    <div class="control">
+      <label for="starterSelect">Starter</label>
+      <select id="starterSelect"></select>
+    </div>
+  </div>
+
+  <div id="content"></div>
+
+  <script>
+            const selectedTeamByBoss = {};
+    const spriteCache = new Map();
+    let renderToken = 0;
+
+    const DATA_PATH = "../data/gold/walkthrough_best_teams.json";
+    const POKEMON_REFERENCE_PATH = "../data/silver/references/pokemon_reference.json";
+
+    function fmtPct(value) {
+      if (value === null || value === undefined) return "-";
+      return (Number(value) * 100).toFixed(1) + "%";
+    }
+
+    function normName(value) {
+      return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    }
+
+    function safeText(value) {
+      return value === null || value === undefined ? "-" : String(value);
+    }
+
+    async function spriteFromReference(name, references) {
+      const ref = references[normName(name)];
+      if (!ref || !ref.url) return null;
+
+      const pokemonUrl = String(ref.url);
+      if (spriteCache.has(pokemonUrl)) {
+        return spriteCache.get(pokemonUrl);
+      }
+
+      try {
+        const response = await fetch(pokemonUrl);
+        if (!response.ok) {
+          spriteCache.set(pokemonUrl, null);
+          return null;
+        }
+        const payload = await response.json();
+        const spriteUrl = payload && payload.sprites ? payload.sprites.front_default : null;
+        const resolved = spriteUrl ? String(spriteUrl) : null;
+        spriteCache.set(pokemonUrl, resolved);
+        return resolved;
+      } catch (_) {
+        spriteCache.set(pokemonUrl, null);
+        return null;
+      }
+    }
+
+    function placeholderSprite() {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" rx="10" fill="#f8fafc"/><text x="36" y="40" font-size="10" text-anchor="middle" fill="#94a3b8">no sprite</text></svg>';
+      return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+    }
+
+    function uniqueBosses(rows) {
+      const seen = new Set();
+      const result = [];
+      rows.forEach((row) => {
+        const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push({ ...row, boss_key: key });
+      });
+      return result;
+    }
+
+    function starterChoices(version, payload) {
+      const mapping = payload.starter_choices_by_version || {};
+      return mapping[version] || [];
+    }
+
+    function starterFamilyMembers(version, starter, payload) {
+      const allFamilies = payload.starter_family_members_by_version || {};
+      const forVersion = allFamilies[version] || {};
+      return forVersion[starter] || [starter];
+    }
+
+    function teamStatsHtml(team) {
+      if (!team) return "<div class='team'>Keine Team-Empfehlung gefunden.</div>";
+      return `
+        <div class='team'>
+          <div>
+            <span class='pill'>Win Rate ${fmtPct(team.mc_win_rate)}</span>
+            <span class='pill'>${safeText(team.wins)}/${safeText(team.n_trials)} Wins</span>
+            <span class='pill'>Avg Lv ${safeText(team.avg_level)}</span>
+          </div>
+          <div class="section">
+            <div><b>Team-ID:</b> ${safeText(team.team_id)}</div>
+            <div style='margin-top:4px; color:#6b7280; font-size:13px;'>Movesets: nur Level-up-Moves, ohne TM/HM.</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function teamContainsStarterFamily(team, version, starter, payload) {
+      if (!team || !starter) return true;
+      const familyMembers = new Set(starterFamilyMembers(version, starter, payload).map((m) => normName(m)));
+      const mons = Array.isArray(team.pokemon) ? team.pokemon : [];
+      return mons.some((mon) => familyMembers.has(normName(mon && mon.name ? mon.name : "")));
+    }
+
+    function topTeamsForBoss(row, version, starter, payload) {
+      const rawTop = Array.isArray(row.top_teams) ? row.top_teams : [];
+      const filtered = rawTop.filter((team) => teamContainsStarterFamily(team, version, starter, payload));
+      if (filtered.length > 0) return filtered.slice(0, 5);
+      if (rawTop.length > 0) return rawTop.slice(0, 5);
+      return row.recommended_team ? [row.recommended_team] : [];
+    }
+
+    async function pokemonCardHtml(pokemon, references) {
+      const sprite = await spriteFromReference(pokemon.name, references);
+      const moves = Array.isArray(pokemon.moves) ? pokemon.moves : [];
+      const movesText = moves.map((m) => (m && m.name ? m.name : m)).filter(Boolean).join(", ");
+      const fallbackSprite = placeholderSprite();
+      return `
+        <div class="pokemon-card">
+          <img class="sprite" src="${sprite || fallbackSprite}" alt="${pokemon.name} Sprite" onerror="this.onerror=null;this.src='${fallbackSprite}'" />
+          <div class="pokemon-meta">
+            <div class="pokemon-name">${pokemon.name}</div>
+            <div class="pokemon-moves">Lv ${safeText(pokemon.level)}${movesText ? `<br/>${movesText}` : ''}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function starterBoxHtml(starter, references) {
+      if (!starter) return "";
+      const sprite = (await spriteFromReference(starter, references)) || placeholderSprite();
+      return `
+        <div class="starter-box">
+          <img class="sprite" src="${sprite}" alt="${starter} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
+          <div>
+            <div class="starter-badge">Starter für diesen Walkthrough</div>
+            <div class="pokemon-name">${starter}</div>
+            <div class="pokemon-moves">Einmal ausgewählt und dann konsistent für die gesamte Version verwendet.</div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function render(version, bossKey, starter, data, references) {
+      const currentToken = ++renderToken;
+      const container = document.getElementById("content");
+      const rows = uniqueBosses((data.walkthroughs && data.walkthroughs[version]) || []);
+      const selected = bossKey ? rows.find((row) => (row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`) === bossKey) : rows[0];
+
+      if (!selected) {
+        container.innerHTML = "<div class='card'>Keine Boss-Daten fuer die ausgewaehlte Version gefunden.</div>";
+        return;
+      }
+
+      const teams = topTeamsForBoss(selected, version, starter, data);
+      const bossStorageKey = selected.boss_key || `${selected.boss_order}:${normName(selected.boss_name)}`;
+      if (!(bossStorageKey in selectedTeamByBoss)) {
+        selectedTeamByBoss[bossStorageKey] = 0;
+      }
+      if (selectedTeamByBoss[bossStorageKey] >= teams.length) {
+        selectedTeamByBoss[bossStorageKey] = 0;
+      }
+      const team = teams[selectedTeamByBoss[bossStorageKey]] || selected.recommended_team;
+      const pokemonCards = Array.isArray(team && team.pokemon)
+        ? (await Promise.all(team.pokemon.map((pokemon) => pokemonCardHtml(pokemon, references)))).join("")
+        : "";
+      const starterBox = await starterBoxHtml(starter, references);
+
+      if (currentToken !== renderToken) {
+        return;
+      }
+
+      const teamChoices = teams.map((candidate, idx) => `
+        <button class="team-choice ${idx === selectedTeamByBoss[bossStorageKey] ? 'active' : ''}" data-team-choice="${idx}" data-boss-key="${bossStorageKey}">
+          <div class="team-choice-title">Top ${safeText(candidate.rank_in_boss_version || (idx + 1))}</div>
+          <div class="team-choice-meta">Win Rate ${fmtPct(candidate.mc_win_rate)}</div>
+          <div class="team-choice-meta">Avg Lv ${safeText(candidate.avg_level)}</div>
+        </button>
+      `).join("");
+
+      container.innerHTML = `
+        <div class='card'>
+          <div class='title'>#${safeText(selected.boss_order)} - ${safeText(selected.boss_name)}</div>
+          <div class='meta'>Part ${safeText(selected.part)}${selected.location_count ? ` · Reachable Locations: ${selected.location_count}` : ""}</div>
+          ${starterBox}
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>Top 5 Teams (deine Auswahl)</div>
+            <div class='team-choice-grid'>${teamChoices || "<div class='team'>Keine Team-Rankings gefunden.</div>"}</div>
+          </div>
+          ${teamStatsHtml(team)}
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>Team mit Sprites</div>
+            <div class='pokemon-grid'>${pokemonCards || "<div class='team'>Keine Pokemon-Details</div>"}</div>
+          </div>
+        </div>
+      `;
+
+      container.querySelectorAll("[data-team-choice]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const idx = Number(button.getAttribute("data-team-choice"));
+          const key = button.getAttribute("data-boss-key");
+          if (!Number.isNaN(idx) && key) {
+            selectedTeamByBoss[key] = idx;
+            void render(version, bossKey, starter, data, references);
+          }
+        });
+      });
+    }
+
+    async function boot() {
+      const [response, refResponse] = await Promise.all([fetch(DATA_PATH), fetch(POKEMON_REFERENCE_PATH)]);
+      if (!response.ok) {
+        document.getElementById("content").innerHTML = "Fehler: walkthrough_best_teams.json nicht gefunden. Bitte Gold-Layer neu bauen.";
+        return;
+      }
+      const data = await response.json();
+      const references = refResponse.ok ? await refResponse.json() : {};
+      const select = document.getElementById("versionSelect");
+      const bossSelect = document.getElementById("bossSelect");
+      const starterSelect = document.getElementById("starterSelect");
+      const versions = data.versions || [];
+      select.innerHTML = versions.map(v => `<option value='${v}'>${v}</option>`).join("");
+
+      function refreshStarters(version, preferredStarter = null) {
+          const starters = starterChoices(version, data);
+        starterSelect.innerHTML = starters.map((starter) => `<option value='${starter}'>${starter}</option>`).join("");
+        if (preferredStarter && starters.includes(preferredStarter)) {
+          starterSelect.value = preferredStarter;
+        }
+        if (!starterSelect.value && starters.length > 0) {
+          starterSelect.value = starters[0];
+        }
+      }
+
+      function refreshBosses(version, preferredBossKey = null) {
+        const rows = uniqueBosses((data.walkthroughs && data.walkthroughs[version]) || []);
+        bossSelect.innerHTML = rows.map((row) => {
+          const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
+          return `<option value='${key}'>#${safeText(row.boss_order)} - ${safeText(row.boss_name)}</option>`;
+        }).join("");
+        if (preferredBossKey && rows.some((row) => (row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`) === preferredBossKey)) {
+          bossSelect.value = preferredBossKey;
+        }
+        if (!bossSelect.value && rows.length > 0) {
+          bossSelect.value = rows[0].boss_key || `${rows[0].boss_order}:${normName(rows[0].boss_name)}`;
+        }
+      }
+
+      if (versions.length > 0) {
+        refreshStarters(versions[0]);
+        refreshBosses(versions[0]);
+        void render(versions[0], bossSelect.value, starterSelect.value, data, references);
+      }
+
+      select.addEventListener("change", () => {
+        refreshStarters(select.value);
+        refreshBosses(select.value);
+        void render(select.value, bossSelect.value, starterSelect.value, data, references);
+      });
+
+      bossSelect.addEventListener("change", () => void render(select.value, bossSelect.value, starterSelect.value, data, references));
+      starterSelect.addEventListener("change", () => void render(select.value, bossSelect.value, starterSelect.value, data, references));
+    }
+
+    boot().catch((err) => {
+      document.getElementById("content").innerText = "Fehler beim Laden: " + err;
+    });
+  </script>
+</body>
+</html>
+

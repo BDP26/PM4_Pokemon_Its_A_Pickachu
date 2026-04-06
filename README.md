@@ -8,7 +8,7 @@ The pipeline follows a **Bronze → Silver → Gold** medallion structure:
 | Layer | Folder | Content |
 |-------|--------|---------|
 | **Bronze** | `data/bronze/` | Raw API responses (Bulbapedia + PokéAPI) plus optional KaggleHub snapshot for gym leaders / elite four. Large files; excluded from git. |
-| **Silver** | `data/silver/` | Cleaned & validated data in structured folders: snapshots (`snapshots/*.jsonl`), mappings (`mappings/*.json`), references (`references/*`), diagnostics (`diagnostics/*`), plus `manifest.json`. |
+| **Silver** | `data/silver/` | Cleaned & validated data in structured folders: snapshots (`snapshots/*.jsonl`), mappings (`mappings/*.json`), references (`references/*`), diagnostics (`diagnostics/*`), optional simulation (`simulation/*.jsonl`), plus `manifest.json`. |
 | **Gold** | `data/gold/` | Analytics-ready datasets: game progression summary (CSV) and cross-game location popularity ranking (JSONL). |
 
 ## Project Structure
@@ -74,6 +74,22 @@ PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze silver gold
 Kaggle-Quelle in Bronze ist fest konfiguriert auf `maxiboo/pokemon-gen-1-9-gym-leaders-elite-four`.
 Der Kaggle-Download wird im aktuellen Code standardmaessig in Bronze ausgefuehrt und unter `data/bronze/kagglehub/` gespeichert.
 
+## Simulation Smoke Check
+
+After running the Silver layer, validate simulation outputs with:
+
+```bash
+PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
+```
+
+The check validates file presence, required fields, score ranges, and cross-file references for:
+
+- `data/silver/simulation/teams.jsonl`
+- `data/silver/simulation/type_matchups.jsonl`
+- `data/silver/simulation/battle_seeds.jsonl`
+
+Die Matchup-Bewertung ist schadensbasiert: Fuer jedes Pokemon werden nur bis zum Kampf natuerlich erlernte Moves (Level-up), ohne TM/HM, verwendet. Die erwartete Schadensformel folgt der vereinfachten Pokemon-Gleichung mit Level, Angriff/Spezial-Angriff, Verteidigung/Spezial-Verteidigung, Basisstaerke, STAB, Typen-Effekt und Zufalls-/Krit-Modifikator.
+
 ## Silver Schema (`*_boss_snapshots.jsonl`)
 
 Each line is one boss-fight snapshot:
@@ -138,4 +154,25 @@ Minimaler Join-Ansatz:
 |------|-------------|
 | `game_progression_summary.csv` | Per-game: boss steps, final & max reachable location counts |
 | `location_popularity.jsonl` | Per location slug: how many games include it, total mentions |
+| `team_recommendations.jsonl` | (Optional) Ranked player teams by Monte-Carlo win rate across scenarios |
+| `best_team_by_boss.jsonl` | (Optional) Best-performing team suggestion per boss matchup |
+| `team_rankings_by_boss_version.jsonl` | (Optional) Ranked teams per boss with same-version constraint |
+| `best_team_by_boss_version.jsonl` | (Optional) Best team per boss and game version |
+| `best_team_by_boss_version.csv` | (Optional) CSV export of best team per boss and game version |
+| `walkthrough_best_teams.json` | (Optional) Web payload for walkthrough team recommendations |
 | `manifest.json` | Provenance metadata for the gold build |
+
+## Walkthrough Web Overview
+
+A small static page is available at:
+
+- `docs/walkthrough_teams.html`
+
+It renders the best team per boss for a selected version and lets you also pick a starter for the whole walkthrough. The starter choice stays fixed within that version.
+
+It uses:
+
+- `data/gold/walkthrough_best_teams.json`
+
+Tip: Serve the repository root with a local web server so `fetch(...)` can load JSON files.
+

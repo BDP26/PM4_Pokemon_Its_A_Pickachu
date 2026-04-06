@@ -9,10 +9,81 @@ Handles:
 - Level calculation based on boss order and game progression
 - Type diversity and team balance
 - Integration of Pokemon stats and moves
+- Starter locking across a walkthrough
+- One evolution family per team
 """
 
-from typing import Optional
+from functools import lru_cache
+from typing import Any, Optional
 import random
+
+import pokebase as pb
+
+from src.pipeline.silver.game_config import get_starter_choices
+
+
+def _norm_species(value: str) -> str:
+    return value.strip().lower().replace(" ", "-")
+
+
+@lru_cache(maxsize=2048)
+def get_evolution_family_root(species: str) -> str:
+    """Return the root species of an evolution family (e.g. raichu -> pikachu).
+
+    Falls back to the normalized species name if PokeAPI lookup fails.
+    """
+    species_name = _norm_species(species)
+    try:
+        current = pb.pokemon_species(species_name)
+        while getattr(current, "evolves_from_species", None):
+            current = current.evolves_from_species
+        root_name = getattr(current, "name", "") or species_name
+        return _norm_species(root_name)
+    except Exception:
+        return species_name
+
+
+def _dedupe_species_by_family(species_list: list[str]) -> list[str]:
+    seen_families: set[str] = set()
+    result: list[str] = []
+    for species in species_list:
+        family_root = get_evolution_family_root(species)
+        if family_root in seen_families:
+            continue
+        seen_families.add(family_root)
+        result.append(species)
+    return result
+
+
+def get_walkthrough_starter_choices(game_version: str) -> list[str]:
+    return get_starter_choices(game_version)
+
+
+def choose_walkthrough_starter(
+    game_version: str,
+    available_pokemon: list[str],
+    preferred_starter: Optional[str] = None,
+) -> Optional[str]:
+    """Pick one starter for the whole walkthrough and keep it stable.
+
+    Preference order:
+    1. preferred_starter if provided and available
+    2. first starter choice for the version that is available
+    3. the first starter choice for the version
+    """
+    starter_pool = get_walkthrough_starter_choices(game_version)
+    available_set = {_norm_species(species) for species in available_pokemon}
+
+    if preferred_starter:
+        preferred = _norm_species(preferred_starter)
+        if preferred in available_set:
+            return preferred
+
+    for starter in starter_pool:
+        if _norm_species(starter) in available_set:
+            return _norm_species(starter)
+
+    return _norm_species(preferred_starter) if preferred_starter else (starter_pool[0] if starter_pool else None)
 
 
 def calculate_boss_team_level(boss_order: int, total_bosses: int) -> int:
@@ -40,6 +111,7 @@ def build_team_from_species(
     levels: Optional[list[int]] = None,
     total_bosses: int = 13,
     boss_order: int = 1,
+    starter_species: Optional[str] = None,
 ) -> list[dict]:
     """
     Build a team from a list of Pokemon species.
@@ -57,14 +129,18 @@ def build_team_from_species(
         avg_level = calculate_boss_team_level(boss_order, total_bosses)
         levels = [max(1, avg_level - 2 + (i % 3)) for i in range(len(species_list))]
     
+    starter_family = get_evolution_family_root(starter_species) if starter_species else None
     team = []
     for i, species in enumerate(species_list):
         level = levels[i] if i < len(levels) else levels[-1]
+        family_root = get_evolution_family_root(species)
         team.append({
             "slot": i + 1,  # 1-indexed slot in team
             "species": species,
             "level": min(100, max(1, level)),  # Clamp level to valid range
             "position_in_team": i,
+            "family_root": family_root,
+            "is_starter": starter_family is not None and family_root == starter_family,
         })
     
     return team
@@ -75,6 +151,8 @@ def generate_team_from_available_pokemon(
     team_size: int = 6,
     avg_level: int = 30,
     seed: Optional[int] = None,
+    starter_species: Optional[str] = None,
+    game_version: Optional[str] = None,
 ) -> list[dict]:
     """
     Generate a diverse team from available Pokemon in reachable locations.
@@ -91,21 +169,36 @@ def generate_team_from_available_pokemon(
     """
     if seed is not None:
         random.seed(seed)
-    
-    # If we don't have enough Pokemon, use what we have
-    if len(available_pokemon) <= team_size:
-        selected = available_pokemon
+
+    selected_pool = _dedupe_species_by_family([_norm_species(species) for species in available_pokemon])
+    if game_version and starter_species is None:
+        starter_species = choose_walkthrough_starter(game_version, selected_pool)
+    if starter_species:
+        starter_species = _norm_species(starter_species)
+        starter_family = get_evolution_family_root(starter_species)
+        selected_pool = [species for species in selected_pool if get_evolution_family_root(species) != starter_family]
+        selected = [starter_species]
+        remaining_slots = max(team_size - 1, 0)
+        if remaining_slots > 0:
+            if len(selected_pool) <= remaining_slots:
+                selected.extend(selected_pool)
+            else:
+                selected.extend(random.sample(selected_pool, remaining_slots))
     else:
-        # Try to select diverse Pokemon (basic random selection)
-        selected = random.sample(available_pokemon, team_size)
-    
+        # If we don't have enough Pokemon, use what we have
+        if len(selected_pool) <= team_size:
+            selected = selected_pool
+        else:
+            # Try to select diverse Pokemon (basic random selection)
+            selected = random.sample(selected_pool, team_size)
+
     # Generate levels with slight variance
     levels = [
         max(1, avg_level - 2 + random.randint(0, 4))
         for _ in range(len(selected))
     ]
     
-    return build_team_from_species(selected, levels)
+    return build_team_from_species(selected, levels, starter_species=starter_species)
 
 
 class TeamBuilder:

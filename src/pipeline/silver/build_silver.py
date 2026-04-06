@@ -1,9 +1,11 @@
 from collections import Counter, defaultdict
+import logging
 from pathlib import Path
 from typing import Any, cast
 
-from src.pipeline.common.io import read_json, read_jsonl, write_json
+from src.pipeline.common.io import read_json, read_jsonl, write_json, write_jsonl, write_parquet
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
+from src.pipeline.bronze.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.game_config import get_games_config
 from src.pipeline.silver.kaggle_boss_mapping import (
     build_boss_mapping_payload,
@@ -19,12 +21,17 @@ from src.pipeline.silver.location_pokemon_enrichment import (
 from src.pipeline.silver.parser import extract_game_data
 from src.pipeline.silver.type_matchups import build_type_matchups
 from src.pipeline.silver.battle_seeds import build_battle_seeds
+from src.pipeline.silver.kaggle_teams import extract_kaggle_teams
+from src.pipeline.silver.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 from src.pipeline.silver.silver_manifest import create_silver_manifest
 from src.pipeline.silver.schema_normalizer import (
     write_normalized_silver,
     create_pokemon_reference_index,
     create_encounter_methods_reference,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
@@ -58,6 +65,17 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
 
 def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = SILVER_DIR) -> None:
     ensure_medallion_dirs()
+    logger.info("[silver] build start bronze_dir=%s silver_dir=%s", bronze_dir, silver_dir)
+
+    # Ensure type chart is available
+    type_chart_path = bronze_dir / "type_chart.json"
+    if not type_chart_path.exists():
+        logger.info("[silver] type_chart.json missing, generating...")
+        chart = build_type_chart()
+        save_as_json(chart, type_chart_path)
+    else:
+        logger.info("[silver] type_chart.json found")
+
     silver_dir.mkdir(parents=True, exist_ok=True)
     silver_subdirs = get_silver_subdirs(silver_dir)
     for directory in silver_subdirs.values():
@@ -77,6 +95,8 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
             "Bronze inputs are missing. Run the bronze step first: python -m pipeline.run_pipeline --layer bronze"
         )
 
+    logger.info("[silver] loading bronze inputs")
+
     # Get allowed versions from game config
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
@@ -90,7 +110,11 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
     boss_mapping_by_version: dict[str, dict] = {}
     records_with_game_keys: list[tuple[str, list[dict]]] = []
 
-    for game_file in sorted(bulbapedia_dir.glob("*.json")):
+    game_files = sorted(bulbapedia_dir.glob("*.json"))
+    logger.info("[silver] processing %s bulbapedia game files", len(game_files))
+
+    for game_index, game_file in enumerate(game_files, start=1):
+        logger.info("[silver] (%s/%s) parsing %s", game_index, len(game_files), game_file.name)
         game_payload = cast(dict[str, Any], read_json(game_file))
         records = extract_game_data(game_payload, mapper)
         game_key = game_payload["game_key"]
@@ -109,7 +133,7 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
         )
 
         if not records:
-            print(f"[silver] skipped {game_file.name}: no boss records extracted")
+            logger.warning("[silver] skipped %s: no boss records extracted", game_file.name)
             continue
 
         all_records.extend(records)
@@ -118,6 +142,11 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
             all_slugs.extend(record["reachable_locations"])
 
     area_map, location_pokemon_map = get_location_area_and_pokemon_maps(all_slugs, allowed_versions=allowed_versions)
+    logger.info(
+        "[silver] resolved mappings: locations=%s pokemon_locations=%s",
+        len(area_map),
+        len(location_pokemon_map),
+    )
     write_json(mappings_dir / "location_to_area_map.json", area_map)
     write_json(mappings_dir / "location_to_pokemon_map.json", location_pokemon_map)
 
@@ -129,6 +158,7 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
     all_pokemon_references = {}
 
     for game_key, records in records_with_game_keys:
+        logger.info("[silver] normalizing game=%s records=%s", game_key, len(records))
         enrich_records_with_location_pokemon(records, location_pokemon_map)
         pokemon_refs = write_normalized_silver(
             records=records,
@@ -139,7 +169,7 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
         if pokemon_refs:
             all_pokemon_references.update(pokemon_refs)
 
-        print(f"[silver] wrote {game_key}_boss_snapshots.jsonl with {len(records)} records")
+        logger.info("[silver] wrote %s_boss_snapshots.jsonl records=%s", game_key, len(records))
 
     # Create centralized references
     create_pokemon_reference_index(all_pokemon_references, references_dir)
@@ -163,31 +193,51 @@ def build_silver_from_bronze(bronze_dir: Path = BRONZE_DIR, silver_dir: Path = S
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
     # Build battle simulation data
-    # Extract teams from boss_mapping
-    teams_data = []
-    for game_version, bosses_dict in boss_mapping_by_version.items():
-        for boss_name, boss_info in bosses_dict.items():
-            if isinstance(boss_info, dict) and "teams" in boss_info:
-                for team_idx, team_info in enumerate(boss_info["teams"]):
-                    team_id = f"TEAM_{game_version}_{boss_name}_{team_idx}"
-                    teams_data.append({
-                        "team_id": team_id,
-                        "boss_name": boss_name,
-                        "game_version": game_version,
-                        "pokemon": team_info.get("pokemon", []),
-                        "level": team_info.get("level", 20),
-                    })
-    
-    # Build type matchups if we have teams
+    # Extract teams from Kaggle dataset (primary source)
+    logger.info("[silver] extracting teams for simulation")
+    teams_data = extract_kaggle_teams(
+        bronze_dir,
+        simulation_dir,
+        allowed_versions=allowed_versions,
+    )
+
+    # If no Kaggle teams, try to extract from boss_mapping (fallback)
+    if not teams_data:
+        for game_version, bosses_dict in boss_mapping_by_version.items():
+            for boss_name, boss_info in bosses_dict.items():
+                if isinstance(boss_info, dict) and "teams" in boss_info:
+                    for team_idx, team_info in enumerate(boss_info["teams"]):
+                        team_id = f"TEAM_{game_version}_{boss_name}_{team_idx}"
+                        teams_data.append({
+                            "team_id": team_id,
+                            "boss_name": boss_name,
+                            "game_version": game_version,
+                            "pokemon": team_info.get("pokemon", []),
+                            "level": team_info.get("level", 20),
+                        })
+
     if teams_data:
-        build_type_matchups(teams_data, simulation_dir, bronze_dir)
-        build_battle_seeds(simulation_dir)
-    
+        write_parquet(simulation_dir / "teams.parquet", teams_data)
+        write_jsonl(simulation_dir / "teams.jsonl", teams_data)
+        logger.info("[silver] wrote teams.parquet + teams.jsonl teams=%s", len(teams_data))
+    else:
+        logger.warning("[silver] no teams found; simulation outputs will be skipped")
+
+    # Build sequential team battle simulations if we have teams
+    if teams_data:
+        logger.info("[silver] running team battle simulations")
+        build_type_matchups(teams_data, silver_dir, bronze_dir)
+        logger.info("[silver] building battle seeds")
+        build_battle_seeds(silver_dir)
+        logger.info("[silver] running monte carlo optimizer")
+        run_monte_carlo_team_optimizer(silver_dir)
+
     # Create manifest of available data
+    logger.info("[silver] creating manifest")
     create_silver_manifest(silver_dir)
 
-    print(f"[silver] unmapped location events: {len(mapper.misses)}")
-    print(f"[silver] done: {len(all_records)} boss snapshots across {len(set(r['game'] for r in all_records))} games")
+    logger.info("[silver] unmapped location events=%s", len(mapper.misses))
+    logger.info("[silver] done snapshots=%s games=%s", len(all_records), len(set(r["game"] for r in all_records)))
 
 
 def build_silver_from_existing_files(silver_dir: Path = SILVER_DIR) -> None:
