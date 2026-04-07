@@ -9,11 +9,12 @@ from src.pipeline.settings import POKEAPI
 
 
 def _extract_area_species_by_version(area_payload: dict[str, Any]) -> dict[str, set[str]]:
-    by_version: dict[str, set[str]] = defaultdict(set)
+    by_version = defaultdict[str, set[str]](set)
     for encounter in area_payload.get("pokemon_encounters", []):
-        species_name = (encounter.get("pokemon") or {}).get("name")
-        if not species_name:
+        species_name_raw = (encounter.get("pokemon") or {}).get("name")
+        if not isinstance(species_name_raw, str) or not species_name_raw:
             continue
+        species_name = species_name_raw
 
         version_details = encounter.get("version_details", [])
         if not version_details:
@@ -31,7 +32,7 @@ def _extract_area_species_by_version(area_payload: dict[str, Any]) -> dict[str, 
 def _aggregate_area_encounters_by_version(
     area_payload: dict[str, Any],
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    by_version: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    by_version = defaultdict[str, dict[str, dict[str, Any]]](dict)
 
     for encounter in area_payload.get("pokemon_encounters", []):
         pokemon = encounter.get("pokemon") or {}
@@ -57,6 +58,9 @@ def _aggregate_area_encounters_by_version(
                     "pokemon_url": pokemon_url,
                     "level_min": None,
                     "level_max": None,
+                    "encounter_chance_min": None,
+                    "encounter_chance_max": None,
+                    "capture_rate": None,
                     "encounter_methods": set(),
                     "encounter_method_urls": set(),
                 },
@@ -68,6 +72,9 @@ def _aggregate_area_encounters_by_version(
                     "pokemon_url": pokemon_url,
                     "level_min": None,
                     "level_max": None,
+                    "encounter_chance_min": None,
+                    "encounter_chance_max": None,
+                    "capture_rate": None,
                     "encounter_methods": set(),
                     "encounter_method_urls": set(),
                 },
@@ -76,6 +83,7 @@ def _aggregate_area_encounters_by_version(
             for detail in details:
                 min_level = detail.get("min_level")
                 max_level = detail.get("max_level")
+                chance = detail.get("chance")
                 method = detail.get("method") or {}
                 method_name = (method.get("name") or "").strip()
                 method_url = (method.get("url") or "").strip()
@@ -87,6 +95,11 @@ def _aggregate_area_encounters_by_version(
                     if isinstance(max_level, int):
                         if target["level_max"] is None or max_level > target["level_max"]:
                             target["level_max"] = max_level
+                    if isinstance(chance, int):
+                        if target["encounter_chance_min"] is None or chance < target["encounter_chance_min"]:
+                            target["encounter_chance_min"] = chance
+                        if target["encounter_chance_max"] is None or chance > target["encounter_chance_max"]:
+                            target["encounter_chance_max"] = chance
                     if method_name:
                         target["encounter_methods"].add(method_name)
                     if method_url:
@@ -101,9 +114,38 @@ def _serialize_encounter_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "pokemon_url": entry["pokemon_url"],
         "level_min": entry["level_min"],
         "level_max": entry["level_max"],
+        "encounter_chance_min": entry.get("encounter_chance_min"),
+        "encounter_chance_max": entry.get("encounter_chance_max"),
+        "capture_rate": entry.get("capture_rate"),
         "encounter_methods": sorted(entry["encounter_methods"]),
         "encounter_method_urls": sorted(entry["encounter_method_urls"]),
     }
+
+
+def _fetch_capture_rate(
+    session: Any,
+    pokemon_url: str,
+    capture_rate_cache: dict[str, int | None],
+) -> int | None:
+    if not pokemon_url:
+        return None
+    if pokemon_url in capture_rate_cache:
+        return capture_rate_cache[pokemon_url]
+
+    try:
+        pokemon_id = pokemon_url.rstrip("/").split("/")[-1]
+        species_url = f"{POKEAPI}/pokemon-species/{pokemon_id}"
+        response = session.get(species_url, timeout=10)
+        if response.status_code == 200:
+            payload = response.json()
+            value = payload.get("capture_rate")
+            capture_rate_cache[pokemon_url] = int(value) if isinstance(value, int) else None
+        else:
+            capture_rate_cache[pokemon_url] = None
+    except Exception:
+        capture_rate_cache[pokemon_url] = None
+
+    return capture_rate_cache[pokemon_url]
 
 
 def _pick_species_for_version(version_to_species: dict[str, list[str]], game_version: str) -> list[str]:
@@ -145,13 +187,14 @@ def get_location_area_and_pokemon_maps(
     allowed_versions: set[str] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
     session = build_session()
+    capture_rate_cache: dict[str, int | None] = {}
     area_map: dict[str, list[str]] = {}
     location_pokemon_map: dict[str, dict[str, Any]] = {}
 
     unique_locations = sorted(set(location_slugs))
     for slug in tqdm(unique_locations, desc="[silver] mapping locations + pokemon"):
-        version_species: dict[str, set[str]] = defaultdict(set)
-        version_encounters_by_species: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+        version_species = defaultdict[str, set[str]](set)
+        version_encounters_by_species = defaultdict[str, dict[str, dict[str, Any]]](dict)
         area_names: list[str] = []
 
         try:
@@ -189,12 +232,25 @@ def get_location_area_and_pokemon_maps(
                             existing["level_max"] = entry["level_max"]
                         existing["encounter_methods"].update(entry["encounter_methods"])
                         existing["encounter_method_urls"].update(entry["encounter_method_urls"])
+                        if entry.get("encounter_chance_min") is not None:
+                            if existing.get("encounter_chance_min") is None or entry["encounter_chance_min"] < existing["encounter_chance_min"]:
+                                existing["encounter_chance_min"] = entry["encounter_chance_min"]
+                        if entry.get("encounter_chance_max") is not None:
+                            if existing.get("encounter_chance_max") is None or entry["encounter_chance_max"] > existing["encounter_chance_max"]:
+                                existing["encounter_chance_max"] = entry["encounter_chance_max"]
+                        if existing.get("capture_rate") is None:
+                            existing["capture_rate"] = entry.get("capture_rate")
             except Exception:
                 continue
 
             time.sleep(throttle_seconds)
 
         area_map[slug] = area_names
+
+        for species_map in version_encounters_by_species.values():
+            for entry in species_map.values():
+                if entry.get("capture_rate") is None:
+                    entry["capture_rate"] = _fetch_capture_rate(session, str(entry.get("pokemon_url") or ""), capture_rate_cache)
 
         # Filter versions to only include allowed_versions if specified
         filtered_versions = version_species.keys()
@@ -234,7 +290,7 @@ def enrich_records_with_location_pokemon(
     location_pokemon_map: dict[str, dict[str, Any]],
 ) -> None:
     for record in records:
-        version = record.get("version") or record.get("game")
+        version = str(record.get("version") or record.get("game") or "")
         location_to_species: dict[str, list[str]] = {}
         location_to_encounters: dict[str, list[dict[str, Any]]] = {}
         unique_species: set[str] = set()
@@ -256,7 +312,4 @@ def enrich_records_with_location_pokemon(
         record["reachable_location_pokemon"] = location_to_species
         record["reachable_location_encounters"] = location_to_encounters
         record["reachable_pokemon_count"] = len(unique_species)
-
-
-
 

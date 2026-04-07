@@ -23,6 +23,27 @@ _MOVE_CACHE_FILENAME = "move_profiles.json"
 _LOCAL_POKEMON_PROFILES: dict[str, dict[str, Any]] = {}
 _LOCAL_MOVE_PROFILES: dict[str, MoveProfile] = {}
 _LOCAL_CACHE_PATHS: tuple[Path, Path] | None = None
+_QUIET_FALLBACK_MOVES = {"struggle"}
+_NON_LEVEL_LEARN_METHODS = {"machine", "tm", "hm", "tutor", "egg"}
+_HEURISTIC_MOVE_POWER: dict[str, int] = {
+    "return": 80,
+    "frustration": 70,
+    "hidden-power": 60,
+    "magnitude": 70,
+    "sonic-boom": 20,
+    "dragon-rage": 40,
+    "seismic-toss": 50,
+    "night-shade": 50,
+    "psywave": 50,
+}
+_FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "meowstic": ("meowstic-male", "meowstic-female"),
+    "pyroar": ("pyroar-male", "pyroar-female"),
+    "jellicent": ("jellicent-male", "jellicent-female"),
+    "gourgeist": ("gourgeist-average", "gourgeist-small", "gourgeist-large", "gourgeist-super"),
+    "aegislash": ("aegislash-shield", "aegislash-blade"),
+}
+_GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
 
 class MoveProfile(TypedDict):
@@ -162,10 +183,35 @@ def _persist_lookup_cache_to_disk() -> None:
     )
 
 
+def _species_lookup_candidates(species_id: str) -> list[str]:
+    candidates = [species_id]
+    candidates.extend(_FORM_LOOKUP_FALLBACKS.get(species_id, ()))
+    for suffix in _GENERIC_FORM_SUFFIXES:
+        candidates.append(f"{species_id}-{suffix}")
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
 def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bool, str | None]:
-    try:
-        poke = pb.pokemon(species_id)
-    except Exception as exc:  # pragma: no cover - network/api failure path
+    poke = None
+    resolved_species_id = species_id
+    last_exc: Exception | None = None
+    for candidate in _species_lookup_candidates(species_id):
+        try:
+            poke = pb.pokemon(candidate)
+            resolved_species_id = candidate
+            break
+        except Exception as exc:  # pragma: no cover - network/api failure path
+            last_exc = exc
+
+    if poke is None:
+        exc = last_exc if last_exc is not None else Exception("lookup failed")
         warning = f"Pokemon lookup failed for '{species_id}': {exc}"
         return (
             {
@@ -176,6 +222,13 @@ def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bo
             },
             True,
             warning,
+        )
+
+    if resolved_species_id != species_id:
+        logger.info(
+            "[type_matchups] species form fallback original=%s resolved=%s",
+            species_id,
+            resolved_species_id,
         )
 
     stats: dict[str, int] = _default_stats()
@@ -225,6 +278,19 @@ def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bo
 
 
 def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str | None]:
+    if move_name in _QUIET_FALLBACK_MOVES:
+        # Expected special-case move: skip network lookup and warning noise.
+        fallback_move: MoveProfile = {
+            "name": move_name,
+            "type": "Normal",
+            "power": 50,
+            "damage_class": "physical",
+            "level_learned_at": 0,
+            "version_group": "fallback",
+            "degraded_data": True,
+        }
+        return fallback_move, True, None
+
     try:
         move = pb.move(move_name)
     except Exception as exc:  # pragma: no cover - network/api failure path
@@ -247,6 +313,8 @@ def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str
     power = int(getattr(move, "power", 0) or 0)
     damage_class = getattr(getattr(move, "damage_class", None), "name", "physical") or "physical"
     move_type = getattr(getattr(move, "type", None), "name", "Normal") or "Normal"
+    if power <= 0 and damage_class in {"physical", "special"}:
+        power = _HEURISTIC_MOVE_POWER.get(move_name, 0)
     resolved_move: MoveProfile = {
         "name": getattr(move, "name", move_name),
         "type": move_type.title(),
@@ -434,7 +502,7 @@ def _get_move_profile_cached(move_name: str) -> tuple[MoveProfile, bool, str | N
 
 def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveProfile, bool]:
     profile, degraded, warning = _get_move_profile_cached(move_name)
-    if warning:
+    if warning and move_name not in _QUIET_FALLBACK_MOVES:
         warnings.warn(f"Move lookup failed (move='{move_name}') -> fallback move profile")
     return profile, degraded
 
@@ -462,7 +530,7 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
             species = entry.get("name") or entry.get("species")
             if not isinstance(species, str) or not species:
                 continue
-            raw_moves = _to_iterable(entry.get("moves", []))
+            raw_moves = _to_iterable(entry.get("required_moves", entry.get("moves", [])))
             moves = [
                 normalized
                 for normalized in (_normalize_move_name(str(move)) for move in raw_moves if isinstance(move, str))
@@ -485,7 +553,7 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
                 species = entry.get("name") or entry.get("species")
                 if not isinstance(species, str) or not species:
                     continue
-                raw_moves = _to_iterable(entry.get("moves", []))
+                raw_moves = _to_iterable(entry.get("required_moves", entry.get("moves", [])))
                 moves = [
                     normalized
                     for normalized in (_normalize_move_name(str(move)) for move in raw_moves if isinstance(move, str))
@@ -560,15 +628,15 @@ def _legal_moves_for_pokemon(
             )
             seen_moves.add(normalized_move)
 
-        if not legal_moves:
-            degraded = True
-            warnings.warn(
-                f"No damaging member moves for '{species_id}' at level {level}; using struggle"
-            )
-            legal_moves.append(cast(MoveProfile, cast(object, dict(_STRUGGLE_MOVE))))
-        return legal_moves, degraded
+        if legal_moves:
+            return legal_moves, degraded
 
-    def _collect(allow_any_version: bool) -> None:
+        degraded = True
+        warnings.warn(
+            f"No damaging preferred moves for '{species_id}' at level {level}; trying learnset fallback"
+        )
+
+    def _collect(allow_any_version: bool, allow_any_method: bool) -> None:
         nonlocal degraded
         for move_slot in profile.get("moves", []):
             move_name = move_slot.get("move_name")
@@ -578,11 +646,15 @@ def _legal_moves_for_pokemon(
             for detail in move_slot.get("version_group_details", []):
                 if not isinstance(detail, dict):
                     continue
-                if detail.get("learn_method") != "level-up":
+                learn_method = str(detail.get("learn_method", "") or "")
+                if allow_any_method:
+                    if learn_method != "level-up" and learn_method not in _NON_LEVEL_LEARN_METHODS:
+                        continue
+                elif learn_method != "level-up":
                     continue
 
                 learned_at = int(detail.get("level_learned_at", 0) or 0)
-                if learned_at > level:
+                if learn_method == "level-up" and learned_at > level:
                     continue
 
                 detail_group = str(detail.get("version_group", "") or "")
@@ -609,14 +681,30 @@ def _legal_moves_for_pokemon(
                 seen_moves.add(move_name)
                 break
 
-    _collect(allow_any_version=False)
+    _collect(allow_any_version=False, allow_any_method=False)
 
     if not legal_moves:
-        _collect(allow_any_version=True)
+        _collect(allow_any_version=True, allow_any_method=False)
         if legal_moves:
             degraded = True
             warnings.warn(
                 f"No level-up moves in version group '{version_group}' for '{species_id}' at level {level}; used cross-version fallback"
+            )
+
+    if not legal_moves:
+        _collect(allow_any_version=False, allow_any_method=True)
+        if legal_moves:
+            degraded = True
+            warnings.warn(
+                f"No level-up damaging moves for '{species_id}' at level {level}; used non-level learn-method fallback"
+            )
+
+    if not legal_moves:
+        _collect(allow_any_version=True, allow_any_method=True)
+        if legal_moves:
+            degraded = True
+            warnings.warn(
+                f"No version-matched damaging moves for '{species_id}' at level {level}; used broad learnset fallback"
             )
 
     if not legal_moves:
@@ -800,6 +888,42 @@ def _simulation_score(
     return round(sign * (100.0 + 20.0 * abs(pokemon_delta) + 0.1 * abs(hp_delta)), 3)
 
 
+def _is_player_candidate_team(team: dict[str, Any]) -> bool:
+    if bool(team.get("is_player_candidate")):
+        return True
+    team_id = str(team.get("team_id") or "")
+    return team_id.startswith("STARTER_")
+
+
+def _is_boss_team(team: dict[str, Any]) -> bool:
+    boss_name = team.get("boss_name")
+    return isinstance(boss_name, str) and bool(boss_name.strip())
+
+
+def _boss_level_cap(team: dict[str, Any]) -> int | None:
+    levels: list[int] = []
+    for member in _team_members(team):
+        try:
+            levels.append(max(1, int(member.get("level", 1) or 1)))
+        except Exception:
+            continue
+
+    if levels:
+        return max(levels)
+
+    avg = team.get("avg_level")
+    if isinstance(avg, (int, float)):
+        return max(1, int(avg))
+    return None
+
+
+def _member_level_with_cap(member: dict[str, Any], default_level: int, level_cap: int | None) -> int:
+    level = max(1, int(member.get("level", default_level) or default_level))
+    if level_cap is not None:
+        return min(level, max(1, level_cap))
+    return level
+
+
 def simulate_team_battle(
     attacker_team: dict[str, Any],
     defender_team: dict[str, Any],
@@ -817,10 +941,26 @@ def simulate_team_battle(
     attacker_members = _team_members(attacker_team)
     defender_members = _team_members(defender_team)
 
+    attacker_level_cap: int | None = None
+    defender_level_cap: int | None = None
+    if _is_player_candidate_team(attacker_team) and _is_boss_team(defender_team):
+        attacker_level_cap = _boss_level_cap(defender_team)
+    if _is_player_candidate_team(defender_team) and _is_boss_team(attacker_team):
+        defender_level_cap = _boss_level_cap(attacker_team)
+
+    if attacker_level_cap is not None:
+        warnings.warn(
+            f"Applied attacker level cap={attacker_level_cap} against boss team '{defender_team.get('team_id')}'"
+        )
+    if defender_level_cap is not None:
+        warnings.warn(
+            f"Applied defender level cap={defender_level_cap} against boss team '{attacker_team.get('team_id')}'"
+        )
+
     attacker_profiles: list[CombatProfile] = [
         get_pokemon_combat_profile(
             species=str(member.get("species", "")),
-            level=max(1, int(member.get("level", 20) or 20)),
+            level=_member_level_with_cap(member, 20, attacker_level_cap),
             game_version=attacker_game_version,
             warnings=warnings,
             moves=cast(list[str] | None, member.get("moves")),
@@ -830,7 +970,7 @@ def simulate_team_battle(
     defender_profiles: list[CombatProfile] = [
         get_pokemon_combat_profile(
             species=str(member.get("species", "")),
-            level=max(1, int(member.get("level", 20) or 20)),
+            level=_member_level_with_cap(member, 20, defender_level_cap),
             game_version=defender_game_version,
             warnings=warnings,
             moves=cast(list[str] | None, member.get("moves")),

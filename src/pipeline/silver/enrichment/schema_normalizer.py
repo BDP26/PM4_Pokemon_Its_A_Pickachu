@@ -8,6 +8,33 @@ from pathlib import Path
 from typing import Any
 
 
+def _snapshot_identity(snapshot: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a stable identity key to avoid writing duplicate snapshot rows."""
+    return (
+        snapshot.get("boss_id"),
+        snapshot.get("game"),
+        snapshot.get("version"),
+        snapshot.get("boss_order"),
+        snapshot.get("part"),
+        snapshot.get("heading"),
+        tuple(snapshot.get("reachable_locations", [])),
+        snapshot.get("reachable_pokemon_count"),
+    )
+
+
+def dedupe_boss_snapshots(boss_snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop exact logical duplicates while preserving first-seen order."""
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for snapshot in boss_snapshots:
+        key = _snapshot_identity(snapshot)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(snapshot)
+    return deduped
+
+
 def normalize_boss_records(records: list[dict]) -> tuple[list[dict], dict[str, Any], list[dict]]:
     """
     Convert denormalized boss records to normalized storage structure.
@@ -87,13 +114,15 @@ def write_normalized_silver(
     - pokemon_reference.json: Centralized pokemon info (once per dataset)
     """
     boss_snapshots, pokemon_reference, encounters = normalize_boss_records(records)
+    boss_snapshots = dedupe_boss_snapshots(boss_snapshots)
 
     # Write boss snapshots
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     encounters_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     boss_output = snapshots_dir / f"{game_key}_boss_snapshots.jsonl"
-    with boss_output.open("a", encoding="utf-8") as f:
+    # Overwrite per-game snapshots to keep silver runs idempotent.
+    with boss_output.open("w", encoding="utf-8") as f:
         for snapshot in boss_snapshots:
             f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
 

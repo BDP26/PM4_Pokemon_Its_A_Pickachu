@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -31,12 +31,23 @@
     .section { margin-top: 12px; padding-top: 8px; border-top: 1px solid #e5e7eb; }
     .starter-box { display: flex; gap: 12px; align-items: center; padding: 10px 12px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; margin: 14px 0; }
     .starter-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 12px; margin-bottom: 6px; }
+    .catch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 10px; }
+    .catch-card { border: 1px solid #dbeafe; border-radius: 12px; padding: 10px; background: #f8fbff; display: flex; gap: 10px; align-items: center; }
+    .catch-meta { min-width: 0; }
+    .catch-name { font-weight: 700; }
+    .catch-score { color: #1d4ed8; font-size: 12px; }
+    .rank-card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; background: #ffffff; margin-top: 10px; }
+    .sprite-strip { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0; }
+    .sprite-sm { width: 52px; height: 52px; image-rendering: pixelated; object-fit: contain; background: #f8fafc; border-radius: 8px; border: 1px solid #e5e7eb; flex: 0 0 auto; }
+    .sprite-label { font-size: 11px; color: #4b5563; text-align: center; max-width: 58px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sprite-item { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    .sprite-moves { font-size: 10px; color: #6b7280; text-align: center; max-width: 96px; line-height: 1.2; }
   </style>
 </head>
 <body>
-  <h1>Bestes Team pro Boss und Version</h1>
-  <div class="muted">Walkthrough-Reihenfolge aus Silver + Monte-Carlo Teamempfehlung aus Gold.</div>
-  <div class="hint">Die Empfehlungen stammen aus einer schadensbasierten Simulation: Es werden nur bis zum Kampf natuerlich gelernte Moves (Level-up) beruecksichtigt; TM/HM-Moves bleiben ausgeschlossen.</div>
+  <h1>Best Team by Boss and Version</h1>
+  <div class="muted">Walkthrough order from Silver + Monte Carlo team recommendations from Gold.</div>
+  <div class="hint">Recommendations are based on damage simulation: only naturally learned level-up moves are considered; TM/HM moves are excluded.</div>
 
   <div class="controls">
     <div class="control">
@@ -56,7 +67,6 @@
   <div id="content"></div>
 
   <script>
-            const selectedTeamByBoss = {};
     const spriteCache = new Map();
     let renderToken = 0;
 
@@ -76,11 +86,31 @@
       return value === null || value === undefined ? "-" : String(value);
     }
 
-    async function spriteFromReference(name, references) {
-      const ref = references[normName(name)];
-      if (!ref || !ref.url) return null;
+    function speciesSlug(value) {
+      return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    }
 
-      const pokemonUrl = String(ref.url);
+    function extractPokeIdFromUrl(url) {
+      const match = String(url || "").match(/\/pokemon\/(\d+)\/?/);
+      return match ? Number(match[1]) : null;
+    }
+
+    function spriteFromPokeId(pokeid) {
+      const id = Number(pokeid);
+      if (!Number.isFinite(id) || id <= 0) return null;
+      return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
+    }
+
+    async function spriteFromReference(name, references) {
+      const normalized = speciesSlug(name);
+      const ref = references[normName(name)] || references[normalized];
+      const refPokeId = ref && ref.url ? extractPokeIdFromUrl(ref.url) : null;
+      const idSprite = spriteFromPokeId(refPokeId);
+      if (idSprite) {
+        return idSprite;
+      }
+
+      const pokemonUrl = (ref && ref.url) ? String(ref.url) : `https://pokeapi.co/api/v2/pokemon/${normalized}/`;
       if (spriteCache.has(pokemonUrl)) {
         return spriteCache.get(pokemonUrl);
       }
@@ -92,7 +122,8 @@
           return null;
         }
         const payload = await response.json();
-        const spriteUrl = payload && payload.sprites ? payload.sprites.front_default : null;
+        const payloadIdSprite = payload && payload.id ? spriteFromPokeId(payload.id) : null;
+        const spriteUrl = payloadIdSprite || (payload && payload.sprites ? payload.sprites.front_default : null);
         const resolved = spriteUrl ? String(spriteUrl) : null;
         spriteCache.set(pokemonUrl, resolved);
         return resolved;
@@ -131,7 +162,7 @@
     }
 
     function teamStatsHtml(team) {
-      if (!team) return "<div class='team'>Keine Team-Empfehlung gefunden.</div>";
+      if (!team) return "<div class='team'>No team recommendation found.</div>";
       return `
         <div class='team'>
           <div>
@@ -140,8 +171,210 @@
             <span class='pill'>Avg Lv ${safeText(team.avg_level)}</span>
           </div>
           <div class="section">
-            <div><b>Team-ID:</b> ${safeText(team.team_id)}</div>
-            <div style='margin-top:4px; color:#6b7280; font-size:13px;'>Movesets: nur Level-up-Moves, ohne TM/HM.</div>
+            <div><b>Team ID:</b> ${safeText(team.team_id)}</div>
+            <div style='margin-top:4px; color:#6b7280; font-size:13px;'>Movesets: level-up moves only, no TM/HM.</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function prettyLocation(slug) {
+      return String(slug || "")
+        .split("-")
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    }
+
+    function catchLocationsForPokemon(pokemon, row) {
+      const map = row && row.reachable_location_pokemon ? row.reachable_location_pokemon : {};
+      const name = pokemonName(pokemon);
+      const speciesKey = speciesSlug((pokemon && pokemon.species_slug) || name);
+      const results = [];
+      Object.entries(map).forEach(([location, speciesList]) => {
+        if (!Array.isArray(speciesList)) return;
+        const hasSpecies = speciesList.some((entry) => speciesSlug(entry) === speciesKey);
+        if (hasSpecies) results.push(location);
+      });
+      return results;
+    }
+
+    function encounterStatsForPokemon(pokemon, row) {
+      const byLocation = row && row.reachable_location_encounters ? row.reachable_location_encounters : {};
+      const speciesKey = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+      let chanceMin = null;
+      let chanceMax = null;
+      let captureRate = null;
+
+      Object.values(byLocation).forEach((encounters) => {
+        if (!Array.isArray(encounters)) return;
+        encounters.forEach((entry) => {
+          if (!entry) return;
+          const entrySpecies = speciesSlug(entry.species || "");
+          if (entrySpecies !== speciesKey) return;
+
+          const localMin = Number(entry.encounter_chance_min);
+          const localMax = Number(entry.encounter_chance_max);
+          if (Number.isFinite(localMin)) {
+            chanceMin = chanceMin === null ? localMin : Math.min(chanceMin, localMin);
+          }
+          if (Number.isFinite(localMax)) {
+            chanceMax = chanceMax === null ? localMax : Math.max(chanceMax, localMax);
+          }
+
+          const localCaptureRate = Number(entry.capture_rate);
+          if (captureRate === null && Number.isFinite(localCaptureRate)) {
+            captureRate = localCaptureRate;
+          }
+        });
+      });
+
+      return { chanceMin, chanceMax, captureRate };
+    }
+
+    function rarityLabel(chanceMax) {
+      if (chanceMax === null || chanceMax === undefined || Number.isNaN(Number(chanceMax))) return "Unknown";
+      const value = Number(chanceMax);
+      if (value >= 35) return "Common";
+      if (value >= 20) return "Uncommon";
+      if (value >= 10) return "Rare";
+      return "Very rare";
+    }
+
+    function pokemonName(pokemon) {
+      return pokemon && pokemon.name ? String(pokemon.name) : "unknown";
+    }
+
+    async function spriteUrlForPokemon(pokemon, references) {
+      const idSprite = spriteFromPokeId(pokemon && pokemon.pokeid ? pokemon.pokeid : null);
+      if (idSprite) return idSprite;
+      const payloadSprite = pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null;
+      if (payloadSprite) return payloadSprite;
+      return await spriteFromReference(pokemonName(pokemon), references);
+    }
+
+    function buildCatchRecommendations(teams, row, version, starter, payload) {
+      const byName = new Map();
+      const starterFamily = new Set((starter && starterFamilyMembers(version, starter, payload) || []).map((v) => normName(v)));
+      teams.forEach((team, idx) => {
+        const rank = Number(team && team.rank_in_boss_version ? team.rank_in_boss_version : (idx + 1));
+        const weight = Math.max(1, 6 - rank);
+        const mons = Array.isArray(team && team.pokemon) ? team.pokemon : [];
+        mons.forEach((pokemon) => {
+          const name = pokemonName(pokemon);
+          if (starterFamily.has(normName(name))) {
+            return;
+          }
+          const variantKey = pokemon && pokemon.species_slug
+            ? `slug:${pokemon.species_slug}`
+            : (pokemon && pokemon.pokeid ? `id:${pokemon.pokeid}` : `name:${normName(name)}`);
+          if (!byName.has(variantKey)) {
+            byName.set(variantKey, {
+              name,
+              count: 0,
+              score: 0,
+              pokeid: pokemon && pokemon.pokeid ? Number(pokemon.pokeid) : null,
+              species_slug: pokemon && pokemon.species_slug ? String(pokemon.species_slug) : speciesSlug(name),
+              sprite_url: pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null,
+              catch_locations: catchLocationsForPokemon(pokemon, row),
+              encounter_stats: encounterStatsForPokemon(pokemon, row),
+            });
+          }
+          const item = byName.get(variantKey);
+          item.count += 1;
+          item.score += weight;
+          if (!item.pokeid && pokemon && pokemon.pokeid) item.pokeid = Number(pokemon.pokeid);
+          if (!item.species_slug && pokemon && pokemon.species_slug) item.species_slug = String(pokemon.species_slug);
+          if (!item.sprite_url && pokemon && pokemon.sprite_url) item.sprite_url = String(pokemon.sprite_url);
+          if ((!item.catch_locations || item.catch_locations.length === 0) && pokemon) {
+            item.catch_locations = catchLocationsForPokemon(pokemon, row);
+          }
+          if ((!item.encounter_stats || item.encounter_stats.chanceMax === null) && pokemon) {
+            item.encounter_stats = encounterStatsForPokemon(pokemon, row);
+          }
+        });
+      });
+
+      return Array.from(byName.values())
+        .sort((a, b) => (b.score - a.score) || (b.count - a.count) || a.name.localeCompare(b.name))
+        .slice(0, 10);
+    }
+
+    async function catchRecommendationHtml(rec, references) {
+      const sprite = spriteFromPokeId(rec.pokeid) || rec.sprite_url || (await spriteFromReference(rec.name, references)) || placeholderSprite();
+      const locations = Array.isArray(rec.catch_locations) ? rec.catch_locations : [];
+      const stats = rec.encounter_stats || {};
+      const rarity = rarityLabel(stats.chanceMax);
+      const shown = locations.slice(0, 3).map(prettyLocation).join(", ");
+      const locationLine = locations.length > 0
+        ? `<div class="catch-score">Catch at: ${shown}${locations.length > 3 ? ` (+${locations.length - 3} more)` : ""}</div>`
+        : `<div class="catch-score">Catch location unknown for this step.</div>`;
+      const rarityLine = `<div class="catch-score">Encounter rarity: ${rarity}${stats.chanceMax !== null && stats.chanceMax !== undefined ? ` (max chance ${safeText(stats.chanceMax)}%)` : ""}</div>`;
+      const catchRateLine = `<div class="catch-score">Catch rate: ${stats.captureRate !== null && stats.captureRate !== undefined ? safeText(stats.captureRate) : "Unknown"}</div>`;
+      return `
+        <div class="catch-card">
+          <img class="sprite" src="${sprite}" alt="${rec.name} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
+          <div class="catch-meta">
+            <div class="catch-name">${safeText(rec.name)}</div>
+            <div class="catch-score">Priority ${safeText(rec.score)} · In ${safeText(rec.count)}/5 teams</div>
+            ${locationLine}
+            ${rarityLine}
+            ${catchRateLine}
+          </div>
+        </div>
+      `;
+    }
+
+    async function bossTeamHtml(bossTeam, references) {
+      if (!bossTeam) return "<div class='team'>Boss team details unavailable.</div>";
+      const strip = await teamSpriteStripHtml(bossTeam, references);
+      return `
+        <div class="rank-card">
+          <div class='title' style='margin-bottom:10px;'>Boss team you are fighting</div>
+          ${teamStatsHtml({
+            ...bossTeam,
+            mc_win_rate: null,
+            wins: null,
+            n_trials: null,
+          })}
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>Boss team Pokemon</div>
+            ${strip}
+          </div>
+        </div>
+      `;
+    }
+
+    async function teamSpriteStripHtml(team, references) {
+      const mons = Array.isArray(team && team.pokemon) ? team.pokemon : [];
+      if (mons.length === 0) return "<div class='team'>No Pokemon details available.</div>";
+      const parts = await Promise.all(mons.map(async (pokemon) => {
+        const sprite = (await spriteUrlForPokemon(pokemon, references)) || placeholderSprite();
+        const requiredMoves = Array.isArray(pokemon && pokemon.required_moves)
+          ? pokemon.required_moves
+          : (Array.isArray(pokemon && pokemon.moves) ? pokemon.moves : []);
+        const movesPreview = requiredMoves.slice(0, 2).join(", ");
+        return `
+          <div class="sprite-item">
+            <img class="sprite-sm" src="${sprite}" alt="${pokemonName(pokemon)} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
+            <div class="sprite-label">${safeText(pokemonName(pokemon))}</div>
+            <div class="sprite-moves">${movesPreview ? `Req: ${safeText(movesPreview)}` : "Req moves n/a"}</div>
+          </div>
+        `;
+      }));
+      return `<div class="sprite-strip">${parts.join("")}</div>`;
+    }
+
+    async function rankedTeamHtml(team, idx, references) {
+      const spriteStrip = await teamSpriteStripHtml(team, references);
+      const rank = safeText(team && team.rank_in_boss_version ? team.rank_in_boss_version : (idx + 1));
+      return `
+        <div class="rank-card">
+          <div class='title' style='margin-bottom:10px;'>Rank #${rank}</div>
+          ${teamStatsHtml(team)}
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>Recommended Team (Sprite Overview)</div>
+            ${spriteStrip}
           </div>
         </div>
       `;
@@ -155,15 +388,20 @@
     }
 
     function topTeamsForBoss(row, version, starter, payload) {
+      const byStarter = row && row.top_teams_by_starter ? row.top_teams_by_starter : null;
+      if (starter && byStarter && Array.isArray(byStarter[starter])) {
+        return byStarter[starter].slice(0, 5);
+      }
       const rawTop = Array.isArray(row.top_teams) ? row.top_teams : [];
       const filtered = rawTop.filter((team) => teamContainsStarterFamily(team, version, starter, payload));
       if (filtered.length > 0) return filtered.slice(0, 5);
-      if (rawTop.length > 0) return rawTop.slice(0, 5);
-      return row.recommended_team ? [row.recommended_team] : [];
+      if (!starter && rawTop.length > 0) return rawTop.slice(0, 5);
+      return (!starter && row.recommended_team) ? [row.recommended_team] : [];
     }
 
     async function pokemonCardHtml(pokemon, references) {
-      const sprite = await spriteFromReference(pokemon.name, references);
+      const payloadSprite = pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null;
+      const sprite = payloadSprite || (await spriteFromReference(pokemon.name, references));
       const moves = Array.isArray(pokemon.moves) ? pokemon.moves : [];
       const movesText = moves.map((m) => (m && m.name ? m.name : m)).filter(Boolean).join(", ");
       const fallbackSprite = placeholderSprite();
@@ -185,9 +423,9 @@
         <div class="starter-box">
           <img class="sprite" src="${sprite}" alt="${starter} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
           <div>
-            <div class="starter-badge">Starter für diesen Walkthrough</div>
+            <div class="starter-badge">Starter locked for this walkthrough</div>
             <div class="pokemon-name">${starter}</div>
-            <div class="pokemon-moves">Einmal ausgewählt und dann konsistent für die gesamte Version verwendet.</div>
+            <div class="pokemon-moves">Chosen once and reused consistently for this version.</div>
           </div>
         </div>
       `;
@@ -200,35 +438,27 @@
       const selected = bossKey ? rows.find((row) => (row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`) === bossKey) : rows[0];
 
       if (!selected) {
-        container.innerHTML = "<div class='card'>Keine Boss-Daten fuer die ausgewaehlte Version gefunden.</div>";
+        container.innerHTML = "<div class='card'>No boss data found for the selected version.</div>";
         return;
       }
 
       const teams = topTeamsForBoss(selected, version, starter, data);
-      const bossStorageKey = selected.boss_key || `${selected.boss_order}:${normName(selected.boss_name)}`;
-      if (!(bossStorageKey in selectedTeamByBoss)) {
-        selectedTeamByBoss[bossStorageKey] = 0;
-      }
-      if (selectedTeamByBoss[bossStorageKey] >= teams.length) {
-        selectedTeamByBoss[bossStorageKey] = 0;
-      }
-      const team = teams[selectedTeamByBoss[bossStorageKey]] || selected.recommended_team;
-      const pokemonCards = Array.isArray(team && team.pokemon)
-        ? (await Promise.all(team.pokemon.map((pokemon) => pokemonCardHtml(pokemon, references)))).join("")
-        : "";
+      const recommendations = buildCatchRecommendations(teams, selected, version, starter, data);
+      const recommendationsHtml = recommendations.length > 0
+        ? (await Promise.all(recommendations.map((rec) => catchRecommendationHtml(rec, references)))).join("")
+        : "<div class='team'>No catch recommendations available.</div>";
+      const rankedTeamsHtml = teams.length > 0
+        ? (await Promise.all(teams.map((team, idx) => rankedTeamHtml(team, idx, references)))).join("")
+        : "<div class='team'>No team rankings found.</div>";
       const starterBox = await starterBoxHtml(starter, references);
+      const bossTeamSection = await bossTeamHtml(selected.boss_team, references);
+      const reasonText = selected.recommended_team && selected.recommended_team.win_reason
+        ? String(selected.recommended_team.win_reason)
+        : "Selected by top simulation performance against the boss team.";
 
       if (currentToken !== renderToken) {
         return;
       }
-
-      const teamChoices = teams.map((candidate, idx) => `
-        <button class="team-choice ${idx === selectedTeamByBoss[bossStorageKey] ? 'active' : ''}" data-team-choice="${idx}" data-boss-key="${bossStorageKey}">
-          <div class="team-choice-title">Top ${safeText(candidate.rank_in_boss_version || (idx + 1))}</div>
-          <div class="team-choice-meta">Win Rate ${fmtPct(candidate.mc_win_rate)}</div>
-          <div class="team-choice-meta">Avg Lv ${safeText(candidate.avg_level)}</div>
-        </button>
-      `).join("");
 
       container.innerHTML = `
         <div class='card'>
@@ -236,33 +466,28 @@
           <div class='meta'>Part ${safeText(selected.part)}${selected.location_count ? ` · Reachable Locations: ${selected.location_count}` : ""}</div>
           ${starterBox}
           <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Top 5 Teams (deine Auswahl)</div>
-            <div class='team-choice-grid'>${teamChoices || "<div class='team'>Keine Team-Rankings gefunden.</div>"}</div>
+            <div class='title' style='margin-bottom:10px;'>Why this recommendation can win</div>
+            <div class='team'>${safeText(reasonText)}</div>
           </div>
-          ${teamStatsHtml(team)}
           <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Team mit Sprites</div>
-            <div class='pokemon-grid'>${pokemonCards || "<div class='team'>Keine Pokemon-Details</div>"}</div>
+            ${bossTeamSection}
+          </div>
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>What should I catch? (sprite-first view)</div>
+            <div class='catch-grid'>${recommendationsHtml}</div>
+          </div>
+          <div class="section">
+            <div class='title' style='margin-bottom:10px;'>Top 5 teams per starter, boss, and game</div>
+            ${rankedTeamsHtml}
           </div>
         </div>
       `;
-
-      container.querySelectorAll("[data-team-choice]").forEach((button) => {
-        button.addEventListener("click", () => {
-          const idx = Number(button.getAttribute("data-team-choice"));
-          const key = button.getAttribute("data-boss-key");
-          if (!Number.isNaN(idx) && key) {
-            selectedTeamByBoss[key] = idx;
-            void render(version, bossKey, starter, data, references);
-          }
-        });
-      });
     }
 
     async function boot() {
       const [response, refResponse] = await Promise.all([fetch(DATA_PATH), fetch(POKEMON_REFERENCE_PATH)]);
       if (!response.ok) {
-        document.getElementById("content").innerHTML = "Fehler: walkthrough_best_teams.json nicht gefunden. Bitte Gold-Layer neu bauen.";
+        document.getElementById("content").innerHTML = "Error: walkthrough_best_teams.json not found. Please rebuild the Gold layer.";
         return;
       }
       const data = await response.json();
@@ -315,7 +540,7 @@
     }
 
     boot().catch((err) => {
-      document.getElementById("content").innerText = "Fehler beim Laden: " + err;
+      document.getElementById("content").innerText = "Load error: " + err;
     });
   </script>
 </body>

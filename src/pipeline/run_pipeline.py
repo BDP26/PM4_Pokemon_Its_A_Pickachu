@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
         "all",
         help="Run all layers in order: bronze -> silver -> gold",
     )
+    all_parser = subparsers.choices["all"]
+    all_parser.add_argument(
+        "--hard-cleanup",
+        action="store_true",
+        help="When silver runs, remove deprecated artifacts before building outputs",
+    )
 
     layer_parser = subparsers.add_parser(
         "layers",
@@ -34,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         choices=["bronze", "silver", "gold"],
         help="Layer names to execute in the provided order",
+    )
+    layer_parser.add_argument(
+        "--hard-cleanup",
+        action="store_true",
+        help="When silver is selected, remove deprecated artifacts before building outputs",
     )
 
     subparsers.add_parser(
@@ -50,9 +61,10 @@ def main() -> None:
     if args.mode == "validate-simulation":
         sys.exit(validate_simulation_main())
 
+    hard_cleanup = bool(getattr(args, "hard_cleanup", False))
     layer_runners = {
         "bronze": fetch_bronze_sources,
-        "silver": build_silver_from_bronze,
+        "silver": lambda: build_silver_from_bronze(hard_cleanup=hard_cleanup),
         "gold": build_gold_from_silver,
     }
 

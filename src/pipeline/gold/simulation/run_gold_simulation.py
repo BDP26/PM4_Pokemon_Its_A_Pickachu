@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,9 +29,11 @@ def run_gold_simulation_from_silver(
     rng_seed: int = 42,
 ) -> None:
     """Run full battle simulation pipeline in gold using silver prepared team inputs."""
+    started_at = time.perf_counter()
     silver_simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     gold_simulation_dir = gold_dir / GOLD_SIMULATION_DIRNAME
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
 
     teams_path = silver_simulation_dir / "teams.parquet"
     if not teams_path.exists():
@@ -45,7 +48,9 @@ def run_gold_simulation_from_silver(
 
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
     write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
+    logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
 
+    sims_started_at = time.perf_counter()
     logger.info("[gold/simulation] running team battle simulations with pyspark")
     build_team_battle_simulations(
         teams_data=teams_data,
@@ -53,19 +58,25 @@ def run_gold_simulation_from_silver(
         bronze_dir=bronze_dir,
         force_spark=True,
     )
+    logger.info("[gold/simulation] team battle simulations done elapsed_s=%.2f", time.perf_counter() - sims_started_at)
 
+    seeds_started_at = time.perf_counter()
     logger.info("[gold/simulation] building battle seeds")
     build_battle_seeds(
         silver_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
     )
+    logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
-    logger.info("[gold/simulation] running monte carlo optimizer")
+    mc_started_at = time.perf_counter()
+    logger.info("[gold/simulation] running monte carlo optimizer trials=%s seed=%s", n_trials, rng_seed)
     run_monte_carlo_team_optimizer(
         silver_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
+    logger.info("[gold/simulation] monte carlo optimizer done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
+    logger.info("[gold/simulation] finished elapsed_s=%.2f", time.perf_counter() - started_at)
 
 

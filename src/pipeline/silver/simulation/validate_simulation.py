@@ -79,6 +79,22 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
         if avg_level is not None and not _is_numeric(avg_level):
             issues.append(f"teams.parquet row {idx}: avg_level must be numeric")
 
+        details = team.get("details")
+        detail_items = cast(list[Any] | tuple[Any, ...] | np.ndarray, details) if _is_sequence_like(details) else []
+        for member_idx, member in enumerate(detail_items, start=1):
+            if not isinstance(member, dict):
+                continue
+            required_moves = member.get("required_moves")
+            required_items = (
+                cast(list[Any] | tuple[Any, ...] | np.ndarray, required_moves)
+                if _is_sequence_like(required_moves)
+                else []
+            )
+            if len(required_items) == 0:
+                issues.append(
+                    f"teams.parquet row {idx} member {member_idx}: required_moves must be a non-empty sequence"
+                )
+
     matchup_pairs: set[tuple[str, str]] = set()
     for idx, matchup in enumerate(team_battles, start=1):
         atk = matchup.get("team_id_attacker")

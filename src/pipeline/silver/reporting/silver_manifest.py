@@ -97,23 +97,6 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Line-delimited view of prepared team compositions"
         }
 
-    for filename, dataset_name, description in [
-        ("team_battle_simulations.parquet", "team_battle_simulations", "Deterministic team-vs-team battle matrix"),
-        ("battle_seeds.parquet", "battle_seeds", "Monte-Carlo seed scenarios derived from battle matrix"),
-        ("monte_carlo_results.parquet", "monte_carlo_results", "Monte-Carlo simulation outcomes and win rates"),
-    ]:
-        file_path = simulation_dir / filename
-        if file_path.exists():
-            try:
-                row_count = len(read_parquet(file_path))
-            except Exception:
-                row_count = 0
-            manifest["datasets"][dataset_name] = {
-                "file": _relative_to(silver_dir, file_path),
-                "count": row_count,
-                "format": "Parquet",
-                "description": description,
-            }
 
     # Location maps
     location_area_file = mappings_dir / "location_to_area_map.json"
