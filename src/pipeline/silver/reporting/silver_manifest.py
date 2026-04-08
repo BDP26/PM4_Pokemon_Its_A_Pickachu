@@ -1,7 +1,7 @@
 """Silver Layer manifest for harmonized and enriched intermediate data."""
 from pathlib import Path
 
-from src.pipeline.common.io import read_jsonl, read_parquet, write_json
+from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json
 from src.pipeline.settings import SILVER_DIR, get_silver_subdirs
 
 
@@ -20,8 +20,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
 
     manifest = {
         "layer": "silver",
-        "purpose": "Harmonized intermediate data and simulation inputs for gold",
-        "datasets": {}
+        "purpose": "Harmonized intermediate data with reusable team and move contracts for gold",
+        "datasets": {},
     }
 
     # Boss records
@@ -72,6 +72,31 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Deduplicated encounter-method lookup table"
         }
 
+    for reference_name, description in [
+        ("games.parquet", "Game dimension with region, generation, and version groups"),
+        ("bosses.parquet", "Boss dimension with canonical names and deterministic IDs"),
+        ("locations.parquet", "Location dimension with mapping status"),
+        ("encounters.parquet", "Encounter fact table normalized by location and species"),
+        ("snapshot_available_pokemon.parquet", "Pokemon availability fact per boss snapshot"),
+        ("move_reference.parquet", "Move reference dimension"),
+        ("learnable_moves.parquet", "Learnable moves fact by game and species"),
+        ("pokemon_learnable_moves.parquet", "Explicit pokemon->learnable moves table by game version"),
+    ]:
+        path = references_dir / reference_name
+        if not path.exists():
+            continue
+        count = 0
+        try:
+            count = len(read_parquet(path))
+        except Exception:
+            count = 0
+        manifest["datasets"][reference_name.replace(".parquet", "")] = {
+            "file": _relative_to(silver_dir, path),
+            "count": count,
+            "format": "Parquet",
+            "description": description,
+        }
+
     # Teams
     teams_file = simulation_dir / "teams.parquet"
     if teams_file.exists():
@@ -80,7 +105,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "file": _relative_to(silver_dir, teams_file),
             "count": len(teams),
             "format": "Parquet",
-            "description": "Prepared team compositions consumed by gold simulation"
+            "description": "Partitioned team compositions consumed by gold"
         }
 
     teams_jsonl_file = simulation_dir / "teams.jsonl"
@@ -94,7 +119,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "file": _relative_to(silver_dir, teams_jsonl_file),
             "count": teams_jsonl_count,
             "format": "JSONL",
-            "description": "Line-delimited view of prepared team compositions"
+            "description": "Line-delimited view of normalized team compositions"
         }
 
     boss_teams_file = simulation_dir / "boss_teams.parquet"
@@ -125,18 +150,37 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Player-candidate teams separated from boss teams"
         }
 
-    member_movesets_file = simulation_dir / "member_movesets.parquet"
-    if member_movesets_file.exists():
+    move_data_file = simulation_dir / "move_data.json"
+    if move_data_file.exists():
         try:
-            member_movesets = read_parquet(member_movesets_file)
-            member_movesets_count = len(member_movesets)
+            move_data = read_json(move_data_file)
+            move_count = len(move_data) if isinstance(move_data, dict) else 0
         except Exception:
-            member_movesets_count = 0
-        manifest["datasets"]["simulation_member_movesets"] = {
-            "file": _relative_to(silver_dir, member_movesets_file),
-            "count": member_movesets_count,
+            move_count = 0
+        manifest["datasets"]["move_data"] = {
+            "file": _relative_to(silver_dir, move_data_file),
+            "count": move_count,
+            "format": "JSON",
+            "description": "Validated move metadata stored separately from team records",
+        }
+
+    for simulation_name, description in [
+        ("team_members.parquet", "Team member fact table (one row per team slot)"),
+        ("team_member_moves.parquet", "Team-member move fact table (one row per move slot)"),
+    ]:
+        path = simulation_dir / simulation_name
+        if not path.exists():
+            continue
+        count = 0
+        try:
+            count = len(read_parquet(path))
+        except Exception:
+            count = 0
+        manifest["datasets"][simulation_name.replace(".parquet", "")] = {
+            "file": _relative_to(silver_dir, path),
+            "count": count,
             "format": "Parquet",
-            "description": "All combinatorial 4-move sets per pokemon per team"
+            "description": description,
         }
 
 
@@ -164,6 +208,14 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "file": _relative_to(silver_dir, boss_mapping_file),
             "format": "JSON",
             "description": "Boss team configurations per game version"
+        }
+
+    relational_validation_file = silver_subdirs["diagnostics"] / "relational_validation.json"
+    if relational_validation_file.exists():
+        manifest["datasets"]["relational_validation"] = {
+            "file": _relative_to(silver_dir, relational_validation_file),
+            "format": "JSON",
+            "description": "FK/PK validation report for normalized silver tables",
         }
 
     write_json(silver_dir / "manifest.json", manifest)

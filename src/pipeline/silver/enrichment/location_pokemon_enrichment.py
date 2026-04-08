@@ -1,11 +1,14 @@
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from src.pipeline.common.http import build_session
+from src.pipeline.common.io import read_json, write_json
 from src.pipeline.settings import POKEAPI
+from src.pipeline.settings import SILVER_DIR
 
 
 def _extract_area_species_by_version(area_payload: dict[str, Any]) -> dict[str, set[str]]:
@@ -181,18 +184,50 @@ def _pick_encounters_for_version(
     return version_to_encounters.get("all", [])
 
 
+def _load_location_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
+    if not cache_path.exists():
+        return {}
+    try:
+        loaded = read_json(cache_path)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_location_cache(cache_path: Path, payload: dict[str, dict[str, Any]]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(cache_path, payload)
+
+
 def get_location_area_and_pokemon_maps(
     location_slugs: list[str],
     throttle_seconds: float = 0.1,
     allowed_versions: set[str] | None = None,
+    silver_dir: Path = SILVER_DIR,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
     session = build_session()
-    capture_rate_cache: dict[str, int | None] = {}
+    state_dir = silver_dir / "_state"
+    location_cache_path = state_dir / "location_pokemon_cache.json"
+    capture_rate_cache_path = state_dir / "capture_rate_cache.json"
+
+    location_cache = _load_location_cache(location_cache_path)
+    loaded_capture_rate_cache = _load_location_cache(capture_rate_cache_path)
+    capture_rate_cache: dict[str, int | None] = {
+        str(key): (int(value) if isinstance(value, int) else None)
+        for key, value in loaded_capture_rate_cache.items()
+    }
+
     area_map: dict[str, list[str]] = {}
     location_pokemon_map: dict[str, dict[str, Any]] = {}
 
     unique_locations = sorted(set(location_slugs))
     for slug in tqdm(unique_locations, desc="[silver] mapping locations + pokemon"):
+        cached_location = location_cache.get(slug)
+        if isinstance(cached_location, dict):
+            area_map[slug] = list(cached_location.get("area_names", []))
+            location_pokemon_map[slug] = dict(cached_location.get("payload", {}))
+            continue
+
         version_species = defaultdict[str, set[str]](set)
         version_encounters_by_species = defaultdict[str, dict[str, dict[str, Any]]](dict)
         area_names: list[str] = []
@@ -280,7 +315,15 @@ def get_location_area_and_pokemon_maps(
             "by_version_encounters": by_version_encounters,
         }
 
+        location_cache[slug] = {
+            "area_names": area_map[slug],
+            "payload": location_pokemon_map[slug],
+        }
+
         time.sleep(throttle_seconds)
+
+    _save_location_cache(location_cache_path, location_cache)
+    _save_location_cache(capture_rate_cache_path, {k: v for k, v in capture_rate_cache.items() if k})
 
     return area_map, location_pokemon_map
 

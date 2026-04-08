@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.pipeline.silver.schemas.contracts import BossSnapshotContract
+
 
 def _snapshot_identity(snapshot: dict[str, Any]) -> tuple[Any, ...]:
     """Build a stable identity key to avoid writing duplicate snapshot rows."""
@@ -50,19 +52,7 @@ def normalize_boss_records(records: list[dict]) -> tuple[list[dict], dict[str, A
 
     for record in records:
         # Extract boss-level metadata (lightweight)
-        boss_snapshot = {
-            "boss_id": record["boss_id"],
-            "boss_slug": record["boss_slug"],
-            "boss_name": record["boss_name_canonical"],
-            "game": record["game"],
-            "version": record["version"],
-            "boss_order": record["boss_order"],
-            "heading": record["heading"],
-            "part": record["part"],
-            "reachable_location_count": record["location_count"],
-            "reachable_locations": record["reachable_locations"],
-            "reachable_pokemon_count": record["reachable_pokemon_count"],
-        }
+        boss_snapshot = BossSnapshotContract.from_record(record).as_dict()
         boss_snapshots.append(boss_snapshot)
 
         # Normalize encounters and extract pokemon references
@@ -115,6 +105,9 @@ def write_normalized_silver(
     """
     boss_snapshots, pokemon_reference, encounters = normalize_boss_records(records)
     boss_snapshots = dedupe_boss_snapshots(boss_snapshots)
+    boss_snapshots = [BossSnapshotContract.from_record(snapshot).as_dict() for snapshot in boss_snapshots]
+    for snapshot in boss_snapshots:
+        BossSnapshotContract.from_record(snapshot).validate()
 
     # Write boss snapshots
     snapshots_dir.mkdir(parents=True, exist_ok=True)

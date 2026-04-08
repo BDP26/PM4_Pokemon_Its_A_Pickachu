@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from src.pipeline.silver.inputs.boss_config import BOSS_ALIASES, boss_id, boss_slug, dataset_boss_candidates, dataset_game_name
+from src.pipeline.silver.config.boss_config import BOSS_ALIASES, boss_id, boss_slug, dataset_boss_candidates, dataset_game_name
 
 
 def normalize_join_key(value: str) -> str:

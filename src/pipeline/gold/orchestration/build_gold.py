@@ -2,13 +2,14 @@ from pathlib import Path
 import importlib
 import logging
 import math
+from typing import Any
 
 import pandas as pd
 
-from src.pipeline.common.io import read_jsonl, read_parquet, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
-from src.pipeline.silver.inputs.game_config import get_games_config
+from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.settings import (
     GOLD_DIR,
     SILVER_DIR,
@@ -19,6 +20,65 @@ from src.pipeline.settings import (
 
 
 logger = logging.getLogger(__name__)
+
+# Keep recommendations plausible relative to the current boss level.
+MAX_PLAYER_OVERLEVEL_GAP = 2
+MAX_PLAYER_UNDERLEVEL_GAP = 10
+
+
+def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    required = {"player_avg_level", "boss_avg_level"}
+    if not required.issubset(df.columns):
+        return df
+
+    level_mask = (
+        df["player_avg_level"].notna()
+        & df["boss_avg_level"].notna()
+        & (df["player_avg_level"] <= df["boss_avg_level"] + MAX_PLAYER_OVERLEVEL_GAP)
+        & (df["player_avg_level"] >= df["boss_avg_level"] - MAX_PLAYER_UNDERLEVEL_GAP)
+    )
+    filtered = df[level_mask].copy()
+    # Fallback to the original frame if constraints remove all rows.
+    return filtered if not filtered.empty else df
+
+
+def _load_silver_manifest(silver_dir: Path) -> dict[str, Any] | None:
+    manifest_path = silver_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = read_json(manifest_path)
+    except Exception:
+        logger.warning("[gold] failed to read silver manifest path=%s", manifest_path, exc_info=True)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _resolve_snapshot_files_from_manifest(silver_dir: Path, manifest: dict[str, Any] | None) -> list[Path]:
+    if not isinstance(manifest, dict):
+        return []
+    datasets = manifest.get("datasets")
+    if not isinstance(datasets, dict):
+        return []
+    boss_records = datasets.get("boss_records")
+    if not isinstance(boss_records, dict):
+        return []
+    files = boss_records.get("files")
+    if not isinstance(files, list):
+        return []
+
+    resolved: list[Path] = []
+    for rel in files:
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        path = silver_dir / rel
+        if path.exists():
+            resolved.append(path)
+        else:
+            logger.warning("[gold] snapshot listed in silver manifest is missing path=%s", path)
+    return sorted(set(resolved))
 
 
 def _boss_order_lookup() -> dict[tuple[str, str], tuple[int, int]]:
@@ -43,12 +103,15 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
     if monte_carlo_df.empty or teams_df.empty:
         return []
 
-    player_context = teams_df[["team_id", "game_version", "starter_base", "starter_evolved_species"]].rename(
+    player_context = teams_df[["team_id", "game_version", "starter_base", "starter_evolved_species", "avg_level"]].rename(
         columns={"team_id": "player_team_id", "game_version": "player_game_version"}
     )
-    boss_context = teams_df[["team_id", "boss_name", "game_version"]].rename(
+    boss_context = teams_df[["team_id", "boss_name", "game_version", "avg_level"]].rename(
         columns={"team_id": "boss_team_id", "game_version": "boss_game_version"}
     )
+
+    player_context = player_context.rename(columns={"avg_level": "player_avg_level"})
+    boss_context = boss_context.rename(columns={"avg_level": "boss_avg_level"})
 
     joined = monte_carlo_df.merge(player_context, on="player_team_id", how="left")
     joined = joined.merge(boss_context, on="boss_team_id", how="left", suffixes=("", "_team"))
@@ -71,6 +134,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
 
     joined["boss_stage"] = joined.apply(_resolve_stage, axis=1)
     joined = joined[joined["starter_base"].notna() & joined["effective_game_version"].notna()].copy()
+    joined = _apply_level_plausibility_filter(joined)
     if joined.empty:
         return []
 
@@ -111,7 +175,10 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
                     F.avg("mc_win_rate").alias("avg_mc_win_rate"),
                     F.avg("wins").alias("avg_wins"),
                     F.avg("losses").alias("avg_losses"),
+                    F.avg("n_trials").alias("avg_n_trials"),
                     F.count("scenario_id").alias("scenario_rows"),
+                    F.avg("player_avg_level").alias("player_avg_level"),
+                    F.avg("boss_avg_level").alias("boss_avg_level"),
                 )
             )
             boss_window = Window.partitionBy("effective_game_version", "effective_boss_name", "starter_base").orderBy(
@@ -168,7 +235,10 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             avg_mc_win_rate=("mc_win_rate", "mean"),
             avg_wins=("wins", "mean"),
             avg_losses=("losses", "mean"),
+            avg_n_trials=("n_trials", "mean"),
             scenario_rows=("scenario_id", "count"),
+            player_avg_level=("player_avg_level", "mean"),
+            boss_avg_level=("boss_avg_level", "mean"),
         )
         .sort_values(
             ["effective_game_version", "effective_boss_name", "starter_base", "avg_mc_win_rate", "avg_wins"],
@@ -295,10 +365,18 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     gold_simulation_dir = gold_subdirs["simulation"]
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
 
+    silver_manifest = _load_silver_manifest(silver_dir)
+    manifest_snapshot_files = _resolve_snapshot_files_from_manifest(silver_dir, silver_manifest)
+    used_manifest_inputs = bool(manifest_snapshot_files)
+    if used_manifest_inputs:
+        logger.info("[gold] using silver manifest snapshot inputs count=%s", len(manifest_snapshot_files))
+    else:
+        logger.info("[gold] no usable snapshot list from silver manifest; fallback to filesystem discovery")
+
     run_gold_simulation_from_silver(silver_dir=silver_dir, gold_dir=gold_dir)
 
     snapshots_dir = silver_subdirs["snapshots"]
-    game_files = sorted(snapshots_dir.glob("*_boss_snapshots.jsonl"))
+    game_files = manifest_snapshot_files or sorted(snapshots_dir.glob("*_boss_snapshots.jsonl"))
     if not game_files:
         game_files = sorted(silver_dir.glob("*_boss_snapshots.jsonl"))
     if not game_files:
@@ -395,19 +473,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
                     monte_carlo_df["player_game_version"] == monte_carlo_df["game_version"]
                 ].copy()
                 if not same_version_df.empty:
-                    # Keep recommendations level-plausible for the current boss.
-                    # Allow slightly higher teams (+3) but avoid extreme overlevel picks.
-                    if {"player_avg_level", "boss_avg_level"}.issubset(same_version_df.columns):
-                        level_mask = (
-                            same_version_df["player_avg_level"].notna()
-                            & same_version_df["boss_avg_level"].notna()
-                            & (same_version_df["player_avg_level"] <= same_version_df["boss_avg_level"] + 3)
-                            & (same_version_df["player_avg_level"] >= same_version_df["boss_avg_level"] - 10)
-                        )
-                        level_reasonable_df = same_version_df[level_mask].copy()
-                        # Fallback to unconstrained version-only view if filtering removes everything.
-                        if not level_reasonable_df.empty:
-                            same_version_df = level_reasonable_df
+                    same_version_df = _apply_level_plausibility_filter(same_version_df)
 
                     rankings = same_version_df.sort_values(
                         ["game_version", "boss_name", "boss_team_id", "mc_win_rate", "wins"],
@@ -481,6 +547,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     manifest = {
         "silver_game_files": [path.name for path in game_files],
         "silver_records": int(len(silver_df)),
+        "silver_manifest_used": used_manifest_inputs,
         "gold_simulation_dir": str(gold_simulation_dir.relative_to(gold_dir)),
         "gold_outputs": gold_outputs,
     }

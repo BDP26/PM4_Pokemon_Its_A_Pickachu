@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.pipeline.common.io import write_json
-from src.pipeline.silver.inputs.game_config import get_games_config
+from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.settings import BRONZE_DIR, get_bronze_subdirs
 
 

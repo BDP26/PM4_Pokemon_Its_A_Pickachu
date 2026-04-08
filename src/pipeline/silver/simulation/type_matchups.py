@@ -547,6 +547,35 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
             return members[:6]
 
     pokemon_entries = _to_iterable(team.get("pokemon", []))
+    level_entries = _to_iterable(team.get("levels", []))
+    move_entries = _to_iterable(team.get("moves", []))
+    instance_entries = _to_iterable(team.get("pokemon_instance_ids", []))
+    if pokemon_entries:
+        for slot_idx, entry in enumerate(pokemon_entries[:6]):
+            if isinstance(entry, dict):
+                species = entry.get("name") or entry.get("species")
+            else:
+                species = entry
+            if not isinstance(species, str) or not species:
+                continue
+            raw_level = level_entries[slot_idx] if slot_idx < len(level_entries) else team.get("avg_level", 20)
+            raw_moves = move_entries[slot_idx] if slot_idx < len(move_entries) else []
+            moves = [
+                normalized
+                for normalized in (_normalize_move_name(str(move)) for move in _to_iterable(raw_moves) if isinstance(move, str))
+                if normalized
+            ]
+            members.append(
+                {
+                    "species": species,
+                    "level": int(raw_level or team.get("avg_level", 20) or 20),
+                    "moves": moves,
+                    "pokemon_instance_id": instance_entries[slot_idx] if slot_idx < len(instance_entries) else None,
+                }
+            )
+        if members:
+            return members[:6]
+
     if pokemon_entries:
         for entry in pokemon_entries[:6]:
             if isinstance(entry, dict):

@@ -1,0 +1,2 @@
+"""Bronze schema contracts."""
+

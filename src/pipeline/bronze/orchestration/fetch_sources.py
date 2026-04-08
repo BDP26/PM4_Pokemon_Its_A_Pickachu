@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -7,6 +8,9 @@ from bs4 import BeautifulSoup
 from src.pipeline.common.http import build_session
 from src.pipeline.common.io import write_json
 from src.pipeline.bronze.orchestration.config_snapshot import write_bronze_config_snapshot
+from src.pipeline.bronze.reporting.manifest import write_bronze_run_manifest
+from src.pipeline.bronze.schemas.contracts import BronzeSourceState
+from src.pipeline.bronze.writers.state import load_source_state, now_utc_iso, save_source_state, stable_signature
 from src.pipeline.settings import (
     BRONZE_DIR,
     BULBA_API,
@@ -15,12 +19,17 @@ from src.pipeline.settings import (
     POKEAPI,
     ensure_medallion_dirs,
 )
-from src.pipeline.silver.inputs.game_config import get_games_config
+from src.pipeline.silver.config.game_config import get_games_config
 
 import kagglehub
 from kagglehub import KaggleDatasetAdapter
 
 _TITLE_EXISTS_CACHE: dict[str, bool] = {}
+
+
+def _should_write_source(source_state: dict[str, dict[str, object]], source_name: str, signature: str) -> bool:
+    previous = source_state.get(source_name, {})
+    return str(previous.get("signature") or "") != signature
 
 
 def page_exists(session, title: str) -> bool:
@@ -139,6 +148,7 @@ def fetch_kaggle_gym_leaders_dataset(
 
 
 def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool = True) -> None:
+    started_at = now_utc_iso()
     ensure_medallion_dirs()
     output = output_dir or BRONZE_DIR
     output.mkdir(parents=True, exist_ok=True)
@@ -148,16 +158,33 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
     bulbapedia_dir.mkdir(parents=True, exist_ok=True)
     pokeapi_dir.mkdir(parents=True, exist_ok=True)
 
+    source_state = load_source_state(output)
+    updated_sources: list[str] = []
+    unchanged_sources: list[str] = []
+    errors: list[str] = []
+
     session = build_session()
 
     location_index = session.get(f"{POKEAPI}/location", params={"limit": 2000}, timeout=30).json()
-    write_json(pokeapi_dir / "location_index.json", location_index)
+    location_signature = stable_signature(location_index)
+    if _should_write_source(source_state, "pokeapi:location_index", location_signature):
+        write_json(pokeapi_dir / "location_index.json", location_index)
+        source_state["pokeapi:location_index"] = BronzeSourceState(
+            source="pokeapi:location_index",
+            signature=location_signature,
+            updated_at_utc=now_utc_iso(),
+            output_paths=[str((pokeapi_dir / "location_index.json").relative_to(output))],
+        ).as_dict()
+        updated_sources.append("pokeapi:location_index")
+    else:
+        unchanged_sources.append("pokeapi:location_index")
 
     for config in get_games_config():
         game_key = config["game_key"]
         resolved_root_title = resolve_existing_root_title(session, config["candidate_root_titles"])
         if not resolved_root_title:
             print(f"[bronze] skip {game_key}: no matching walkthrough title")
+            errors.append(f"missing walkthrough title: {game_key}")
             continue
 
         parts = get_walkthrough_parts(session, resolved_root_title)
@@ -189,11 +216,54 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
             "resolved_root_title": resolved_root_title,
             "parts": records,
         }
-        write_json(bulbapedia_dir / f"{game_key}.json", payload)
-        print(f"[bronze] wrote {game_key}.json with {len(records)} parts")
+        source_name = f"bulbapedia:{game_key}"
+        signature = stable_signature(payload)
+        if _should_write_source(source_state, source_name, signature):
+            output_path = bulbapedia_dir / f"{game_key}.json"
+            write_json(output_path, payload)
+            source_state[source_name] = BronzeSourceState(
+                source=source_name,
+                signature=signature,
+                updated_at_utc=now_utc_iso(),
+                output_paths=[str(output_path.relative_to(output))],
+            ).as_dict()
+            updated_sources.append(source_name)
+            print(f"[bronze] wrote {game_key}.json with {len(records)} parts")
+        else:
+            unchanged_sources.append(source_name)
 
     if include_kaggle:
+        kaggle_started_at = time.perf_counter()
         fetch_kaggle_gym_leaders_dataset(output)
+        kaggle_manifest_path = output / "kagglehub" / "manifest.json"
+        if kaggle_manifest_path.exists():
+            kaggle_manifest = kaggle_manifest_path.read_text(encoding="utf-8")
+            kaggle_signature = stable_signature(kaggle_manifest)
+            source_name = "kagglehub:gym_leaders"
+            if _should_write_source(source_state, source_name, kaggle_signature):
+                source_state[source_name] = BronzeSourceState(
+                    source=source_name,
+                    signature=kaggle_signature,
+                    updated_at_utc=now_utc_iso(),
+                    output_paths=[
+                        str((output / "kagglehub" / "gym_leaders_elite_four.csv").relative_to(output)),
+                        str(kaggle_manifest_path.relative_to(output)),
+                    ],
+                ).as_dict()
+                updated_sources.append(source_name)
+            else:
+                unchanged_sources.append(source_name)
+            print(f"[bronze] kaggle source processed elapsed_s={time.perf_counter() - kaggle_started_at:.2f}")
+
+    save_source_state(source_state, output)
+    write_bronze_run_manifest(
+        started_at_utc=started_at,
+        finished_at_utc=now_utc_iso(),
+        updated_sources=updated_sources,
+        unchanged_sources=unchanged_sources,
+        errors=errors,
+        bronze_dir=output,
+    )
 
 if __name__ == "__main__":
     fetch_bronze_sources()

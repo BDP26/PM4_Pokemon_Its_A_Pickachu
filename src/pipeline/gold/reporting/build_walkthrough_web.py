@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pokebase as pb
 
-from src.pipeline.common.io import read_jsonl, read_parquet, write_json
-from src.pipeline.silver.inputs.game_config import get_games_config, get_starter_family_members
+from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json
+from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
+from src.pipeline.silver.config.game_config import get_games_config, get_starter_family_members
 from src.pipeline.settings import SILVER_DIR, GOLD_DIR, get_silver_subdirs
 
 
@@ -193,27 +195,167 @@ def _starter_name_from_team_id(team_id: str) -> str | None:
     return starter_match.group(1) if starter_match else None
 
 
+def _to_common_starter_ranking_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize starter-ranking rows to the generic ranking schema used by payload builders."""
+    return {
+        "player_team_id": row.get("player_team_id"),
+        "mc_win_rate": row.get("avg_mc_win_rate", row.get("mc_win_rate")),
+        "wins": row.get("avg_wins", row.get("wins")),
+        "losses": row.get("avg_losses", row.get("losses")),
+        "n_trials": row.get("avg_n_trials", row.get("n_trials", row.get("scenario_rows"))),
+        "rank_in_boss_version": row.get("rank_in_boss_starter", row.get("rank_in_boss_version")),
+        "player_avg_level": row.get("player_avg_level"),
+        "boss_avg_level": row.get("boss_avg_level"),
+    }
+
+
+def _coerce_location_pokemon_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for location, species_list in value.items():
+        if not isinstance(species_list, list):
+            continue
+        cleaned = [str(species).strip().lower() for species in species_list if str(species).strip()]
+        if cleaned:
+            out[str(location).strip().lower()] = cleaned
+    return out
+
+
+def _coerce_location_encounters_map(value: Any) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for location, entries in value.items():
+        if not isinstance(entries, list):
+            continue
+        cleaned = [entry for entry in entries if isinstance(entry, dict)]
+        if cleaned:
+            out[str(location).strip().lower()] = cleaned
+    return out
+
+
+def _load_silver_manifest(silver_dir: Path) -> dict[str, Any] | None:
+    manifest_path = silver_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = read_json(manifest_path)
+    except Exception:
+        logger.warning("[gold][web] failed to read silver manifest path=%s", manifest_path, exc_info=True)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _dataset_path_from_manifest(silver_dir: Path, silver_manifest: dict[str, Any] | None, dataset_key: str) -> Path | None:
+    if not isinstance(silver_manifest, dict):
+        return None
+    datasets = silver_manifest.get("datasets")
+    if not isinstance(datasets, dict):
+        return None
+    dataset = datasets.get(dataset_key)
+    if not isinstance(dataset, dict):
+        return None
+    rel_path = dataset.get("file")
+    if not isinstance(rel_path, str) or not rel_path.strip():
+        return None
+    path = silver_dir / rel_path
+    return path if path.exists() else None
+
+
+def _snapshot_files_from_manifest(silver_dir: Path, silver_manifest: dict[str, Any] | None) -> list[Path]:
+    if not isinstance(silver_manifest, dict):
+        return []
+    datasets = silver_manifest.get("datasets")
+    if not isinstance(datasets, dict):
+        return []
+    boss_records = datasets.get("boss_records")
+    if not isinstance(boss_records, dict):
+        return []
+    files = boss_records.get("files")
+    if not isinstance(files, list):
+        return []
+
+    resolved: list[Path] = []
+    for rel_path in files:
+        if not isinstance(rel_path, str) or not rel_path.strip():
+            continue
+        path = silver_dir / rel_path
+        if path.exists():
+            resolved.append(path)
+    return sorted(set(resolved))
+
+
+def _fallback_snapshot_maps_by_boss(snapshot_available_path: Path) -> tuple[dict[tuple[str, str], dict[str, list[str]]], dict[tuple[str, str], dict[str, list[dict[str, Any]]]]]:
+    if not snapshot_available_path.exists():
+        return {}, {}
+
+    try:
+        snapshot_df = read_parquet(snapshot_available_path)
+    except Exception:
+        logger.warning("[gold][web] failed to load snapshot_available_pokemon parquet for catch fallback", exc_info=True)
+        return {}, {}
+
+    if snapshot_df.empty:
+        return {}, {}
+
+    pokemon_by_boss: dict[tuple[str, str], dict[str, list[str]]] = {}
+    encounters_by_boss: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = {}
+
+    for row in snapshot_df.to_dict(orient="records"):
+        version = str(row.get("game_version") or "").strip().lower()
+        boss_id = str(row.get("boss_id") or "").strip().lower()
+        species = str(row.get("pokemon_species") or "").strip().lower()
+        location_id = str(row.get("first_available_location_id") or "").strip().lower()
+        if not version or not boss_id or not species or not location_id:
+            continue
+
+        _, _, location_slug = location_id.partition(":")
+        location_slug = location_slug or location_id
+        key = (version, boss_id)
+
+        loc_species = pokemon_by_boss.setdefault(key, {}).setdefault(location_slug, [])
+        if species not in loc_species:
+            loc_species.append(species)
+
+        encounter_rows = encounters_by_boss.setdefault(key, {}).setdefault(location_slug, [])
+        encounter_rows.append(
+            {
+                "species": species,
+                "level_min": row.get("min_level"),
+                "level_max": row.get("max_level"),
+                "encounter_chance_max": None,
+                "capture_rate": None,
+                "encounter_methods": [row.get("encounter_method")] if row.get("encounter_method") else [],
+            }
+        )
+
+    return pokemon_by_boss, encounters_by_boss
+
+
 def build_walkthrough_best_teams_payload(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
 ) -> Path | None:
     silver_subdirs = get_silver_subdirs(silver_dir)
     snapshots_dir = silver_subdirs["snapshots"]
-    simulation_dir = silver_subdirs["simulation"]
 
     best_by_boss_file = gold_dir / "best_team_by_boss_version.parquet"
     rankings_file = gold_dir / "team_rankings_by_boss_version.parquet"
-    teams_file = simulation_dir / "teams.parquet"
-    teams_jsonl_file = simulation_dir / "teams.jsonl"
-
-    if not best_by_boss_file.exists() or not teams_file.exists():
+    rankings_starter_file = gold_dir / "team_rankings_by_boss_version_starter.parquet"
+    if not best_by_boss_file.exists():
         return None
 
     best_df = read_parquet(best_by_boss_file)
-    teams_df = read_parquet(teams_file)
+    teams_df = pd.DataFrame(load_reconstructed_teams_from_silver(silver_dir=silver_dir))
     rankings_df = (
         read_parquet(rankings_file)
         if rankings_file.exists()
+        else None
+    )
+    rankings_starter_df = (
+        read_parquet(rankings_starter_file)
+        if rankings_starter_file.exists()
         else None
     )
 
@@ -222,20 +364,11 @@ def build_walkthrough_best_teams_payload(
 
     team_by_id: dict[str, dict[str, Any]] = {}
     team_by_id_normalized: dict[str, dict[str, Any]] = {}
-    # Parquet is fast to load but can lose nested structures depending on engine/version.
-    # Merge in JSONL rows (if available) to recover full pokemon details for web sprites.
     merged_team_rows = {
         str(row.get("team_id")): row
         for row in teams_df.to_dict(orient="records")
         if isinstance(row.get("team_id"), str)
     }
-    if teams_jsonl_file.exists():
-        teams_jsonl_df = read_jsonl(teams_jsonl_file)
-        if not teams_jsonl_df.empty:
-            for row in teams_jsonl_df.to_dict(orient="records"):
-                team_id = row.get("team_id")
-                if isinstance(team_id, str):
-                    merged_team_rows[team_id] = row
 
     for row in merged_team_rows.values():
         team_id = row.get("team_id")
@@ -264,9 +397,47 @@ def build_walkthrough_best_teams_payload(
             key = (version, _norm_name(boss_name))
             rankings_by_key.setdefault(key, []).append(row)
 
+    starter_rankings_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    if rankings_starter_df is not None and not rankings_starter_df.empty:
+        starter_version_col = "effective_game_version" if "effective_game_version" in rankings_starter_df.columns else "game_version"
+        starter_boss_col = "effective_boss_name" if "effective_boss_name" in rankings_starter_df.columns else "boss_name"
+        starter_rank_col = "rank_in_boss_starter" if "rank_in_boss_starter" in rankings_starter_df.columns else "rank_in_boss_version"
+        starter_rows = rankings_starter_df.sort_values(
+            [starter_version_col, starter_boss_col, "starter_base", starter_rank_col],
+            ascending=[True, True, True, True],
+        ).to_dict(orient="records")
+        for row in starter_rows:
+            version = row.get(starter_version_col)
+            boss_name = row.get(starter_boss_col)
+            starter_base = row.get("starter_base")
+            if not isinstance(version, str) or not isinstance(boss_name, str) or not isinstance(starter_base, str):
+                continue
+            key = (version, _norm_name(boss_name), starter_base)
+            starter_rankings_by_key.setdefault(key, []).append(row)
+
     def _team_payload_from_row(ranking_row: dict[str, Any]) -> dict[str, Any] | None:
         team_id = ranking_row.get("player_team_id")
         return _team_payload_for_id(team_id=team_id, ranking_row=ranking_row, include_reason=True)
+
+    def _dedupe_team_payloads(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for payload in team_payloads:
+            team_id = payload.get("team_id")
+            if isinstance(team_id, str):
+                key = _normalized_team_id(team_id)
+            else:
+                names = [
+                    _norm_name(str(member.get("name", "")))
+                    for member in payload.get("pokemon", [])
+                    if isinstance(member, dict)
+                ]
+                key = "pokemon:" + ",".join(sorted(name for name in names if name))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(payload)
+        return deduped
 
     def _team_payload_for_id(
         team_id: Any,
@@ -286,31 +457,6 @@ def build_walkthrough_best_teams_payload(
             return None
 
         enriched_pokemon = _enrich_team_pokemon(team_details)
-        if isinstance(team_id, str):
-            starter_name = _starter_name_from_team_id(team_id)
-            if starter_name:
-                starter_norm = _norm_name(starter_name)
-                starter_family = {
-                    _norm_name(member)
-                    for member in get_starter_family_members(starter_name)
-                }
-                cleaned_pokemon: list[dict[str, Any]] = []
-                starter_kept = False
-                for member in enriched_pokemon:
-                    member_name = _norm_name(str(member.get("name", "")))
-                    if member_name in starter_family:
-                        if member_name == starter_norm and not starter_kept:
-                            cleaned_pokemon.append(member)
-                            starter_kept = True
-                        continue
-                    cleaned_pokemon.append(member)
-                enriched_pokemon = cleaned_pokemon
-
-                has_starter = any(_norm_name(str(member.get("name", ""))) == starter_norm for member in enriched_pokemon)
-                if not has_starter:
-                    starter_entry = _with_sprite_fields({"name": starter_name})
-                    enriched_pokemon = [starter_entry, *enriched_pokemon]
-
         payload = {
             "team_id": team_id,
             "mc_win_rate": ranking_row.get("mc_win_rate") if ranking_row else None,
@@ -348,9 +494,20 @@ def build_walkthrough_best_teams_payload(
         for row in get_games_config()
     }
 
+    silver_manifest = _load_silver_manifest(silver_dir)
+    snapshot_paths = _snapshot_files_from_manifest(silver_dir, silver_manifest)
+    if not snapshot_paths:
+        snapshot_paths = sorted(snapshots_dir.glob("*_boss_snapshots.jsonl"))
+
+    snapshot_available_path = (
+        _dataset_path_from_manifest(silver_dir, silver_manifest, "snapshot_available_pokemon")
+        or silver_subdirs["references"] / "snapshot_available_pokemon.parquet"
+    )
+    fallback_location_map_by_boss, fallback_encounters_by_boss = _fallback_snapshot_maps_by_boss(snapshot_available_path)
+
     walkthroughs: dict[str, list[dict[str, Any]]] = {}
 
-    for snapshot_path in sorted(snapshots_dir.glob("*_boss_snapshots.jsonl")):
+    for snapshot_path in snapshot_paths:
         version = snapshot_path.stem.replace("_boss_snapshots", "")
         snapshot_df = read_jsonl(snapshot_path)
         if snapshot_df.empty:
@@ -378,15 +535,29 @@ def build_walkthrough_best_teams_payload(
                 if payload is not None:
                     all_ranked_teams.append(payload)
 
+            all_ranked_teams = _dedupe_team_payloads(all_ranked_teams)
+
             top_teams_by_starter: dict[str, list[dict[str, Any]]] = {}
             for starter in starter_choices_by_version.get(version, []):
-                starter_teams = [
-                    team_payload
-                    for team_payload in all_ranked_teams
-                    if isinstance(team_payload.get("team_id"), str)
-                    and _starter_name_from_team_id(str(team_payload.get("team_id"))) == starter
-                ]
-                top_teams_by_starter[starter] = starter_teams[:5]
+                starter_rank_rows = starter_rankings_by_key.get((version, _norm_name(boss_name), starter), [])
+                starter_teams: list[dict[str, Any]] = []
+                if starter_rank_rows:
+                    for starter_row in starter_rank_rows:
+                        payload = _team_payload_from_row(_to_common_starter_ranking_row(starter_row))
+                        if payload is not None:
+                            starter_teams.append(payload)
+                else:
+                    starter_family_norm = {_norm_name(member) for member in get_starter_family_members(starter)}
+                    starter_teams = [
+                        team_payload
+                        for team_payload in all_ranked_teams
+                        if any(
+                            _norm_name(str(member.get("name", ""))) in starter_family_norm
+                            for member in team_payload.get("pokemon", [])
+                            if isinstance(member, dict)
+                        )
+                    ]
+                top_teams_by_starter[starter] = _dedupe_team_payloads(starter_teams)[:5]
 
             row = {
                 "boss_key": boss_key,
@@ -396,13 +567,20 @@ def build_walkthrough_best_teams_payload(
                 "part": snap.get("part"),
                 "boss_name": boss_name,
                 "location_count": snap.get("reachable_location_count"),
-                "reachable_location_pokemon": snap.get("reachable_location_pokemon", {}),
-                "reachable_location_encounters": snap.get("reachable_location_encounters", {}),
+                "reachable_location_pokemon": _coerce_location_pokemon_map(snap.get("reachable_location_pokemon")),
+                "reachable_location_encounters": _coerce_location_encounters_map(snap.get("reachable_location_encounters")),
                 "boss_team": boss_team,
                 "recommended_team": recommended_team,
                 "top_teams": all_ranked_teams[:5],
                 "top_teams_by_starter": top_teams_by_starter,
             }
+
+            if isinstance(row.get("boss_id"), str):
+                fallback_key = (version, str(row["boss_id"]).strip().lower())
+                if not row["reachable_location_pokemon"]:
+                    row["reachable_location_pokemon"] = fallback_location_map_by_boss.get(fallback_key, {})
+                if not row["reachable_location_encounters"]:
+                    row["reachable_location_encounters"] = fallback_encounters_by_boss.get(fallback_key, {})
 
             existing = rows_by_key.get(boss_key)
             if existing is None or (row.get("part") or 0) < (existing.get("part") or 0):

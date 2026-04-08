@@ -36,8 +36,11 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Encounter methods reference
    - Boss mapping by version
    - Unmapped location diagnostics (detailed, summary, compact)
-8. Extract simulation inputs (`teams.parquet`, `teams.jsonl`) from available boss/team data.
-   - Also materialize combinatorial 4-move sets per pokemon per team.
+8. Extract normalized team and move inputs from Kaggle + PokeAPI:
+   - Team header (`teams`)
+   - Team members (`team_members`)
+   - Team member move slots (`team_member_moves`)
+   - Separate move metadata (`move_data` / `move_reference` / `learnable_moves`)
 9. Generate Silver manifest.
 
 ## Outputs
@@ -54,13 +57,60 @@ Primary outputs in `data/silver/`:
 - `diagnostics/unmapped_locations_detailed.json`
 - `diagnostics/unmapped_locations_summary.json`
 - `diagnostics/unmapped_locations.json`
+- `diagnostics/relational_validation.json`
 - `manifest.json`
 
-Optional simulation inputs (generated when boss team data is available):
+Normalized reference/fact tables in `data/silver/references/`:
 
-- `simulation/teams.parquet` (primary)
+- `games.parquet`
+- `bosses.parquet`
+- `locations.parquet`
+- `encounters.parquet`
+- `snapshot_available_pokemon.parquet`
+- `move_reference.parquet`
+- `learnable_moves.parquet`
+
+Team tables in `data/silver/simulation/`:
+
+- `simulation/teams.parquet` (combined boss and player teams, lean structure)
 - `simulation/teams.jsonl` (line-delimited view)
-- `simulation/member_movesets.parquet` (all combinatorial 4-move sets per pokemon per team)
+- `simulation/boss_teams.parquet` (boss teams only)
+- `simulation/player_teams.parquet` (player teams only)
+- `simulation/team_members.parquet` (one row per team slot)
+- `simulation/team_member_moves.parquet` (one row per move slot)
+- `simulation/move_data.json` (detailed move info: power, damage_class per move)
+
+**Team Structure (lean)**:
+```json
+{
+  "team_id": "KAGGLE_red_brock_0",
+  "game_version": "red",
+  "pokemon": ["geodude", "onix"],
+  "levels": [12, 14],
+  "moves": [["rock-throw", "defense-curl"], ["bind", "rock-throw"]],
+  "avg_level": 13,
+  "team_role": "boss",
+  "boss_name": "Brock",
+  "is_player_candidate": false
+}
+```
+
+**Move Data Structure** (stored separately in `move_data.json`):
+```javascript
+{
+  "red:geodude:12": {
+    "species": "geodude",
+    "level": 12,
+    "game_version": "red",
+    "provided_moves": ["rock-throw", "defense-curl"],
+    "learnable_moves": ["rock-throw", "defense-curl", "magnitude", "bulldoze"],
+    "move_details": {
+      "rock-throw": {"power": 50, "damage_class": "physical"},
+      "defense-curl": {"power": 0, "damage_class": "status"}
+    }
+  }
+}
+```
 
 Gold consumes the Silver simulation inputs and writes the battle matrix, seeds, and Monte-Carlo outputs into `data/gold/simulation/`.
 
@@ -73,6 +123,8 @@ Validate Gold simulation artifacts after a full run:
 - Location mapping quality is measurable via unmapped diagnostics.
 - Kaggle enrichment improves joinability but does not overwrite canonical boss identity keys.
 - Silver keeps a balance between normalized references and per-game snapshots.
+- Silver erzeugt keine vollständigen Moveset-Kombinationen mehr (Verantwortung von Gold).
+- Silver validiert FK/PK-Beziehungen über normalisierte Tabellen und bricht bei Fehlern ab.
 
 
 

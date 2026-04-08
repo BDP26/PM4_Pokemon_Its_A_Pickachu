@@ -7,6 +7,8 @@ SILVER_DIR = DATA_DIR / "silver"
 GOLD_DIR = DATA_DIR / "gold"
 
 BRONZE_CONFIG_DIRNAME = "config"
+BRONZE_MANIFESTS_DIRNAME = "manifests"
+BRONZE_STATE_DIRNAME = "_state"
 SILVER_SNAPSHOTS_DIRNAME = "snapshots"
 SILVER_MAPPINGS_DIRNAME = "mappings"
 SILVER_REFERENCES_DIRNAME = "references"
@@ -33,6 +35,8 @@ def ensure_medallion_dirs() -> None:
 def get_bronze_subdirs(base_dir: Path = BRONZE_DIR) -> dict[str, Path]:
     return {
         "config": base_dir / BRONZE_CONFIG_DIRNAME,
+        "manifests": base_dir / BRONZE_MANIFESTS_DIRNAME,
+        "state": base_dir / BRONZE_STATE_DIRNAME,
     }
 
 

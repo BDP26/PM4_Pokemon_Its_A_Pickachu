@@ -2,7 +2,7 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from src.pipeline.silver.inputs.boss_config import BOSS_ALIASES, CHAMPION_BY_GAME, ELITE_FOUR_BY_GAME
+from src.pipeline.silver.config.boss_config import BOSS_ALIASES, CHAMPION_BY_GAME, ELITE_FOUR_BY_GAME
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
 
 
