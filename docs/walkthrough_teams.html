@@ -340,34 +340,81 @@
       return row && row.recommended_team ? [row.recommended_team] : [];
     }
     function locationsForPokemon(pokemon, row) {
-      const map = row && row.reachable_location_pokemon ? row.reachable_location_pokemon : {};
-      const key = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
-      return Object.entries(map).filter(([, list]) => Array.isArray(list) && list.some((v) => speciesSlug(v) === key)).map(([loc]) => loc);
+      const keySlug = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+      const keyNorm = normName((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+
+      function stripGenderToken(v) {
+        return String(v || "").replace(/(?:-)?(?:male|female|m|f)$/i, "");
+      }
+      function speciesMatches(value) {
+        const valueSlug = speciesSlug(value);
+        const valueNorm = normName(value);
+        return (
+          valueSlug === keySlug
+          || valueNorm === keyNorm
+          || stripGenderToken(valueSlug) === stripGenderToken(keySlug)
+          || stripGenderToken(valueNorm) === stripGenderToken(keyNorm)
+        );
+      }
+
+      // Prefer precomputed reverse map from payload when available.
+      const byPokemon = row && row.catchable_locations_by_pokemon ? row.catchable_locations_by_pokemon : {};
+      if (byPokemon && typeof byPokemon === "object") {
+        for (const [speciesKey, locations] of Object.entries(byPokemon)) {
+          if (!speciesMatches(speciesKey)) continue;
+          if (Array.isArray(locations) && locations.length) {
+            return locations.map((loc) => String(loc));
+          }
+        }
+      }
+
+      // Fallback: derive from location->species map.
+      const byLocation = row && row.reachable_location_pokemon ? row.reachable_location_pokemon : {};
+      return Object.entries(byLocation)
+        .filter(([, list]) => Array.isArray(list) && list.some((v) => speciesMatches(v)))
+        .map(([loc]) => String(loc));
     }
     function encounterStatsForPokemon(pokemon, row) {
       const byLoc = row && row.reachable_location_encounters ? row.reachable_location_encounters : {};
-      const key = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
-      let chanceMax = null;
-      let captureRate = null;
-      Object.values(byLoc).forEach((entries) => {
-        if (!Array.isArray(entries)) return;
-        entries.forEach((e) => {
-          if (!e || speciesSlug(e.species || "") !== key) return;
-          const c = Number(e.encounter_chance_max);
-          if (Number.isFinite(c)) chanceMax = chanceMax === null ? c : Math.max(chanceMax, c);
-          const r = Number(e.capture_rate);
-          if (captureRate === null && Number.isFinite(r)) captureRate = r;
-        });
-      });
-      return { chanceMax, captureRate };
-    }
-    function rarityLabel(chanceMax) {
-      if (!Number.isFinite(Number(chanceMax))) return "Unknown";
-      if (chanceMax >= 35) return "Common";
-      if (chanceMax >= 20) return "Uncommon";
-      if (chanceMax >= 10) return "Rare";
+      const keySlug = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+      const keyNorm = normName((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+
+      function stripGenderToken(v) {
+        return String(v || "").replace(/(?:-)?(?:male|female|m|f)$/i, "");
+      }
+      function speciesMatches(value) {
+        const valueSlug = speciesSlug(value);
+        const valueNorm = normName(value);
+        return (
+          valueSlug === keySlug
+          || valueNorm === keyNorm
+          || stripGenderToken(valueSlug) === stripGenderToken(keySlug)
+          || stripGenderToken(valueNorm) === stripGenderToken(keyNorm)
+        );
+      }
+
+       let chanceMax = null;
+       let captureRate = null;
+       Object.values(byLoc).forEach((entries) => {
+         if (!Array.isArray(entries)) return;
+         entries.forEach((e) => {
+           if (!e || !speciesMatches(e.species || "")) return;
+           const c = Number(e.encounter_chance_max);
+           if (Number.isFinite(c)) chanceMax = chanceMax === null ? c : Math.max(chanceMax, c);
+           const r = Number(e.capture_rate);
+           if (captureRate === null && Number.isFinite(r)) captureRate = r;
+         });
+       });
+       return { chanceMax, captureRate };
+     }
+     function rarityLabel(chanceMax) {
+      const value = Number(chanceMax);
+      if (!Number.isFinite(value) || value <= 0) return "Unknown";
+      if (value >= 35) return "Common";
+      if (value >= 20) return "Uncommon";
+      if (value >= 10) return "Rare";
       return "Very rare";
-    }
+     }
     function buildCatchRecommendations(teams, row, version, starter, payload) {
       const starterSet = new Set((starterFamilyMembers(version, starter, payload) || []).map(normName));
       const grouped = new Map();
@@ -455,7 +502,7 @@
       return rows.map((row) => {
         const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
         const active = key === selectedBossKey ? "active" : "";
-        return `<button class="boss-item ${active}" data-boss="${key}"><div><strong>#${safeText(row.boss_order)} ${safeText(row.boss_name)}</strong></div><div class="small">Part ${safeText(row.part)} ${row.location_count ? `- ${row.location_count} locations` : ""}</div></button>`;
+        return `<button class="boss-item ${active}" data-boss="${key}"><div><strong>#${safeText(row.boss_order)} ${safeText(row.boss_name)}</strong></div><div class="small">${row.location_count ? `${row.location_count} locations` : "0 locations"}</div></button>`;
       }).join("");
     }
 
@@ -504,7 +551,18 @@
         ? (await Promise.all(recs.map(async (r) => {
           const sprite = spriteFromPokeId(r.pokeid) || r.sprite_url || (await spriteFromReference(r.name, references)) || placeholderSprite();
           const locLabel = (r.locations || []).slice(0, 2).map(prettyLocation).join(", ");
-          return `<article class="card catch"><img class="sprite" src="${sprite}" alt="${safeText(r.name)} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="meta"><div class="name">${safeText(r.name)}</div><div class="small">Priority ${safeText(r.score)} | In ${safeText(r.count)}/5 teams</div><div class="small">${locLabel ? `Catch: ${locLabel}${r.locations.length > 2 ? ` (+${r.locations.length - 2})` : ""}` : "Catch location unknown"}</div><div class="small ${r.encounter && Number.isFinite(r.encounter.chanceMax) && r.encounter.chanceMax >= 20 ? "good" : "warn"}">Rarity: ${rarityLabel(r.encounter ? r.encounter.chanceMax : null)}${r.encounter && Number.isFinite(r.encounter.chanceMax) ? ` (${r.encounter.chanceMax}% max)` : ""}</div></div></article>`;
+          const reachableLocations = Object.keys(selected.reachable_location_pokemon || {});
+          const possibleLocLabel = reachableLocations.slice(0, 2).map(prettyLocation).join(", ");
+           const locationText = locLabel
+            ? `Catch: ${locLabel}${r.locations.length > 2 ? ` (+${r.locations.length - 2})` : ""}`
+            : (
+              reachableLocations.length
+                ? `Possible in this step: ${possibleLocLabel}${reachableLocations.length > 2 ? ` (+${reachableLocations.length - 2})` : ""}`
+                : "No catch locations available for this boss step"
+            );
+          const chance = Number(r.encounter ? r.encounter.chanceMax : null);
+          const hasChance = Number.isFinite(chance) && chance > 0;
+          return `<article class="card catch"><img class="sprite" src="${sprite}" alt="${safeText(r.name)} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="meta"><div class="name">${safeText(r.name)}</div><div class="small">${locationText}</div><div class="small">Priority ${safeText(r.score)} | In ${safeText(r.count)}/5 teams</div><div class="small ${hasChance && chance >= 20 ? "good" : "warn"}">Rarity: ${rarityLabel(r.encounter ? r.encounter.chanceMax : null)}${hasChance ? ` (${chance}% max)` : ""}</div></div></article>`;
         }))).join("")
         : "<div class='empty'>No catch recommendations match this filter.</div>";
 
@@ -514,7 +572,7 @@
         <section class="panel">
           <div class="kpis">
             <div class="kpi"><div class="label">Selected Boss</div><div class="value">#${safeText(selected.boss_order)} ${safeText(selected.boss_name)}</div></div>
-            <div class="kpi"><div class="label">Part / Locations</div><div class="value">${safeText(selected.part)} / ${safeText(selected.location_count || 0)}</div></div>
+            <div class="kpi"><div class="label">Locations</div><div class="value">${safeText(selected.location_count || 0)}</div></div>
             <div class="kpi"><div class="label">Top Win Rate</div><div class="value">${pct(topTeam && topTeam.mc_win_rate)}</div></div>
             <div class="kpi"><div class="label">Starter Lock</div><div class="value">${safeText(starter || "Any")}</div></div>
           </div>
@@ -531,21 +589,21 @@
         <section class="panel">
           <div class="panel-title">
             <div>
-              <h2>Top Team Matrix</h2>
-              <p>Top 5 Teams fur den gewahlten Boss und Starter-Filter.</p>
-            </div>
-          </div>
-          <div class="team-grid">${teamCards}</div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <div>
               <h2>Catch Radar</h2>
               <p>Priorisiert nach Team-Haufigkeit, Boss-Rang und Verfugbarkeit.</p>
             </div>
           </div>
           <div class="catch-grid">${catchCards}</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>Top Team Matrix</h2>
+              <p>Top 5 Teams fur den gewahlten Boss und Starter-Filter.</p>
+            </div>
+          </div>
+          <div class="team-grid">${teamCards}</div>
         </section>
 
         <section class="panel">

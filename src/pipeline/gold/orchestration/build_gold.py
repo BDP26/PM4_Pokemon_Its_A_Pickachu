@@ -2,7 +2,7 @@ from pathlib import Path
 import importlib
 import logging
 import math
-from typing import Any
+from typing import Any, NoReturn, cast
 
 import pandas as pd
 
@@ -15,7 +15,6 @@ from src.pipeline.settings import (
     SILVER_DIR,
     ensure_medallion_dirs,
     get_gold_subdirs,
-    get_silver_subdirs,
 )
 
 
@@ -24,6 +23,30 @@ logger = logging.getLogger(__name__)
 # Keep recommendations plausible relative to the current boss level.
 MAX_PLAYER_OVERLEVEL_GAP = 2
 MAX_PLAYER_UNDERLEVEL_GAP = 10
+
+
+class GoldContractError(ValueError):
+    """Raised when Silver->Gold manifest contract validation fails."""
+
+
+_REQUIRED_MANIFEST_DATASET_FILES = (
+    "simulation_inputs_teams",
+    "team_members",
+    "team_member_moves",
+    "pokemon_reference",
+    "snapshot_available_pokemon",
+    "encounters",
+)
+
+
+def _raise_contract_error(code: str, message: str, *, dataset: str | None = None, path: Path | None = None) -> NoReturn:
+    details: list[str] = [f"[gold.contract] {code}"]
+    if dataset:
+        details.append(f"dataset={dataset}")
+    if path is not None:
+        details.append(f"path={path}")
+    details.append(f"action=\"{message}\"")
+    raise GoldContractError(" ".join(details))
 
 
 def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -44,41 +67,154 @@ def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
     return filtered if not filtered.empty else df
 
 
-def _load_silver_manifest(silver_dir: Path) -> dict[str, Any] | None:
+def _load_silver_manifest(silver_dir: Path) -> dict[str, Any]:
     manifest_path = silver_dir / "manifest.json"
     if not manifest_path.exists():
-        return None
+        _raise_contract_error(
+            "missing_manifest",
+            "Run Silver first to generate manifest.json.",
+            path=manifest_path,
+        )
     try:
         payload = read_json(manifest_path)
-    except Exception:
-        logger.warning("[gold] failed to read silver manifest path=%s", manifest_path, exc_info=True)
-        return None
-    return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        _raise_contract_error(
+            "invalid_manifest_json",
+            f"manifest.json is unreadable ({exc}). Rebuild Silver outputs.",
+            path=manifest_path,
+        )
+    if not isinstance(payload, dict):
+        _raise_contract_error(
+            "invalid_manifest_shape",
+            "manifest.json must be a JSON object.",
+            path=manifest_path,
+        )
+    return cast(dict[str, Any], payload)
 
 
-def _resolve_snapshot_files_from_manifest(silver_dir: Path, manifest: dict[str, Any] | None) -> list[Path]:
-    if not isinstance(manifest, dict):
-        return []
+def _manifest_datasets(manifest: dict[str, Any]) -> dict[str, Any]:
     datasets = manifest.get("datasets")
     if not isinstance(datasets, dict):
-        return []
+        _raise_contract_error(
+            "missing_manifest_datasets",
+            "manifest.json requires a top-level datasets object.",
+        )
+    return cast(dict[str, Any], datasets)
+
+
+def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], dataset_key: str) -> Path:
+    datasets = _manifest_datasets(manifest)
+    dataset_entry = datasets.get(dataset_key)
+    if not isinstance(dataset_entry, dict):
+        _raise_contract_error(
+            "missing_dataset_entry",
+            f"Add datasets.{dataset_key} to silver/manifest.json.",
+            dataset=dataset_key,
+        )
+    rel_path = dataset_entry.get("file")
+    if not isinstance(rel_path, str) or not rel_path.strip():
+        _raise_contract_error(
+            "missing_dataset_file_path",
+            f"Set datasets.{dataset_key}.file in silver/manifest.json.",
+            dataset=dataset_key,
+        )
+    path = silver_dir / cast(str, rel_path)
+    # Silver may publish partitioned parquet datasets as directories.
+    if not path.exists():
+        _raise_contract_error(
+            "missing_dataset_file",
+            "Regenerate Silver outputs so all contract files exist.",
+            dataset=dataset_key,
+            path=path,
+        )
+    return path
+
+
+def _resolve_snapshot_files_from_manifest(silver_dir: Path, manifest: dict[str, Any]) -> list[Path]:
+    datasets = _manifest_datasets(manifest)
     boss_records = datasets.get("boss_records")
     if not isinstance(boss_records, dict):
-        return []
+        _raise_contract_error(
+            "missing_dataset_entry",
+            "Add datasets.boss_records with files[] in silver/manifest.json.",
+            dataset="boss_records",
+        )
     files = boss_records.get("files")
-    if not isinstance(files, list):
-        return []
+    if not isinstance(files, list) or not files:
+        _raise_contract_error(
+            "missing_snapshot_files",
+            "Populate datasets.boss_records.files with snapshot JSONL inputs.",
+            dataset="boss_records",
+        )
 
     resolved: list[Path] = []
-    for rel in files:
+    files_list = cast(list[Any], files)
+    for index, rel in enumerate(files_list):
         if not isinstance(rel, str) or not rel.strip():
-            continue
+            _raise_contract_error(
+                "invalid_snapshot_entry",
+                f"datasets.boss_records.files[{index}] must be a non-empty string path.",
+                dataset="boss_records",
+            )
         path = silver_dir / rel
-        if path.exists():
-            resolved.append(path)
-        else:
-            logger.warning("[gold] snapshot listed in silver manifest is missing path=%s", path)
-    return sorted(set(resolved))
+        if not path.exists() or not path.is_file():
+            _raise_contract_error(
+                "missing_snapshot_file",
+                "Regenerate Silver snapshots and refresh manifest entries.",
+                dataset="boss_records",
+                path=path,
+            )
+        resolved.append(path)
+    snapshot_files = sorted(set(resolved))
+    if not snapshot_files:
+        _raise_contract_error(
+            "missing_snapshot_files",
+            "No valid snapshot files resolved from datasets.boss_records.files.",
+            dataset="boss_records",
+        )
+    return snapshot_files
+
+
+def _load_and_validate_gold_contract(silver_dir: Path) -> dict[str, Any]:
+    manifest = _load_silver_manifest(silver_dir)
+    snapshot_files = _resolve_snapshot_files_from_manifest(silver_dir, manifest)
+
+    required_files: dict[str, Path] = {}
+    for dataset_key in _REQUIRED_MANIFEST_DATASET_FILES:
+        required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
+
+    logger.info(
+        "[gold.contract] validated snapshots=%s required_datasets=%s",
+        len(snapshot_files),
+        ",".join(sorted(required_files.keys())),
+    )
+    return {
+        "manifest": manifest,
+        "snapshot_files": snapshot_files,
+        "required_files": required_files,
+    }
+
+
+def _normalize_game_key_to_game_version(dataframe: pd.DataFrame, *, source_name: str) -> pd.DataFrame:
+    frame = dataframe.copy()
+    if "game_version" not in frame.columns and "game" in frame.columns:
+        frame = frame.rename(columns={"game": "game_version"})
+    if "game_version" not in frame.columns:
+        _raise_contract_error(
+            "missing_game_version_column",
+            f"{source_name} must contain a game_version (or legacy game) column.",
+            dataset="boss_records",
+        )
+
+    frame["game_version"] = frame["game_version"].astype(str).str.strip().str.lower()
+    empty_mask = frame["game_version"].eq("")
+    if bool(empty_mask.any()):
+        _raise_contract_error(
+            "invalid_game_version_values",
+            f"{source_name} contains empty game_version rows.",
+            dataset="boss_records",
+        )
+    return frame
 
 
 def _boss_order_lookup() -> dict[tuple[str, str], tuple[int, int]]:
@@ -90,6 +226,36 @@ def _boss_order_lookup() -> dict[tuple[str, str], tuple[int, int]]:
         for idx, boss in enumerate(bosses, start=1):
             lookup[(version, boss.lower())] = (idx, total)
     return lookup
+
+
+_STARTER_BOSS_GROUP_COLS = [
+    "effective_game_version",
+    "effective_boss_name",
+    "boss_team_id",
+    "starter_base",
+    "starter_evolved_species",
+    "player_team_id",
+]
+
+
+def _write_starter_boss_outputs(gold_dir: Path, boss_rank: pd.DataFrame) -> list[str]:
+    outputs: list[str] = []
+    write_parquet(gold_dir / "team_rankings_by_boss_version_starter.parquet", boss_rank)
+    outputs.append("team_rankings_by_boss_version_starter.parquet")
+    best = boss_rank[boss_rank["rank_in_boss_starter"] == 1].copy()
+    write_parquet(gold_dir / "best_team_by_boss_version_starter.parquet", best)
+    outputs.append("best_team_by_boss_version_starter.parquet")
+    return outputs
+
+
+def _write_starter_sequence_outputs(gold_dir: Path, sequence_rank: pd.DataFrame) -> list[str]:
+    outputs: list[str] = []
+    write_parquet(gold_dir / "team_rankings_e4_champion_sequence_by_version_starter.parquet", sequence_rank)
+    outputs.append("team_rankings_e4_champion_sequence_by_version_starter.parquet")
+    sequence_best = sequence_rank[sequence_rank["rank_in_sequence"] == 1].copy()
+    write_parquet(gold_dir / "best_team_by_e4_champion_sequence_version_starter.parquet", sequence_best)
+    outputs.append("best_team_by_e4_champion_sequence_version_starter.parquet")
+    return outputs
 
 
 def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir: Path) -> list[str]:
@@ -163,14 +329,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             sdf = spark.createDataFrame(joined)
 
             boss_rank = (
-                sdf.groupBy(
-                    "effective_game_version",
-                    "effective_boss_name",
-                    "boss_team_id",
-                    "starter_base",
-                    "starter_evolved_species",
-                    "player_team_id",
-                )
+                sdf.groupBy(*_STARTER_BOSS_GROUP_COLS)
                 .agg(
                     F.avg("mc_win_rate").alias("avg_mc_win_rate"),
                     F.avg("wins").alias("avg_wins"),
@@ -188,12 +347,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             )
             boss_rank = boss_rank.withColumn("rank_in_boss_starter", F.row_number().over(boss_window))
             boss_rank_pdf = boss_rank.toPandas()
-
-            write_parquet(gold_dir / "team_rankings_by_boss_version_starter.parquet", boss_rank_pdf)
-            outputs.append("team_rankings_by_boss_version_starter.parquet")
-            best_pdf = boss_rank_pdf[boss_rank_pdf["rank_in_boss_starter"] == 1].copy()
-            write_parquet(gold_dir / "best_team_by_boss_version_starter.parquet", best_pdf)
-            outputs.append("best_team_by_boss_version_starter.parquet")
+            outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank_pdf))
 
             sequence = sdf.where(F.col("boss_stage").isin(["elite_four", "champion"]))
             sequence = sequence.withColumn("safe_rate", F.when(F.col("mc_win_rate") < 1e-6, F.lit(1e-6)).otherwise(F.col("mc_win_rate")))
@@ -214,12 +368,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             )
             sequence = sequence.withColumn("rank_in_sequence", F.row_number().over(seq_window))
             sequence_pdf = sequence.toPandas()
-            write_parquet(gold_dir / "team_rankings_e4_champion_sequence_by_version_starter.parquet", sequence_pdf)
-            outputs.append("team_rankings_e4_champion_sequence_by_version_starter.parquet")
-
-            sequence_best = sequence_pdf[sequence_pdf["rank_in_sequence"] == 1].copy()
-            write_parquet(gold_dir / "best_team_by_e4_champion_sequence_version_starter.parquet", sequence_best)
-            outputs.append("best_team_by_e4_champion_sequence_version_starter.parquet")
+            outputs.extend(_write_starter_sequence_outputs(gold_dir, sequence_pdf))
             return outputs
         finally:
             spark.stop()
@@ -228,7 +377,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
 
     boss_rank = (
         joined.groupby(
-            ["effective_game_version", "effective_boss_name", "boss_team_id", "starter_base", "starter_evolved_species", "player_team_id"],
+            _STARTER_BOSS_GROUP_COLS,
             as_index=False,
         )
         .agg(
@@ -246,11 +395,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         )
     )
     boss_rank["rank_in_boss_starter"] = boss_rank.groupby(["effective_game_version", "effective_boss_name", "starter_base"]).cumcount() + 1
-    write_parquet(gold_dir / "team_rankings_by_boss_version_starter.parquet", boss_rank)
-    outputs.append("team_rankings_by_boss_version_starter.parquet")
-    best = boss_rank[boss_rank["rank_in_boss_starter"] == 1].copy()
-    write_parquet(gold_dir / "best_team_by_boss_version_starter.parquet", best)
-    outputs.append("best_team_by_boss_version_starter.parquet")
+    outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank))
 
     sequence_df = joined[joined["boss_stage"].isin(["elite_four", "champion"])].copy()
     if not sequence_df.empty:
@@ -273,11 +418,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             ascending=[True, True, False, False],
         )
         sequence_rank["rank_in_sequence"] = sequence_rank.groupby(["effective_game_version", "starter_base"]).cumcount() + 1
-        write_parquet(gold_dir / "team_rankings_e4_champion_sequence_by_version_starter.parquet", sequence_rank)
-        outputs.append("team_rankings_e4_champion_sequence_by_version_starter.parquet")
-        sequence_best = sequence_rank[sequence_rank["rank_in_sequence"] == 1].copy()
-        write_parquet(gold_dir / "best_team_by_e4_champion_sequence_version_starter.parquet", sequence_best)
-        outputs.append("best_team_by_e4_champion_sequence_version_starter.parquet")
+        outputs.extend(_write_starter_sequence_outputs(gold_dir, sequence_rank))
 
     return outputs
 
@@ -313,32 +454,32 @@ def _build_core_aggregations_with_spark(
         spark_df = spark.createDataFrame(silver_df)
 
         progression_df = (
-            spark_df.orderBy("game", "part")
-            .groupBy("game")
+            spark_df.orderBy("game_version", "part")
+            .groupBy("game_version")
             .agg(
                 F.count("boss_name").alias("boss_steps"),
                 F.max("reachable_location_count").alias("max_reachable_locations"),
                 F.max(F.struct(F.col("part"), F.col("reachable_location_count"))).alias("_last_reachable"),
             )
             .select(
-                "game",
+                "game_version",
                 "boss_steps",
                 F.col("_last_reachable.reachable_location_count").alias("final_reachable_locations"),
                 "max_reachable_locations",
             )
             .orderBy(F.col("final_reachable_locations").desc())
         )
-        progression_pdf = progression_df.toPandas()
+        progression_pdf = progression_df.toPandas().rename(columns={"game_version": "game"})
         progression_pdf.to_csv(gold_dir / "game_progression_summary.csv", index=False)
         logger.info("[gold] wrote game_progression_summary.csv rows=%s (spark)", len(progression_pdf))
 
         location_popularity_df = (
-            spark_df.select("game", F.explode_outer("reachable_locations").alias("location_slug"))
+            spark_df.select("game_version", F.explode_outer("reachable_locations").alias("location_slug"))
             .where(F.col("location_slug").isNotNull())
             .groupBy("location_slug")
             .agg(
-                F.countDistinct("game").alias("game_count"),
-                F.count("game").alias("total_mentions"),
+                F.countDistinct("game_version").alias("game_count"),
+                F.count("game_version").alias("total_mentions"),
             )
             .orderBy(F.col("game_count").desc(), F.col("total_mentions").desc())
         )
@@ -360,27 +501,27 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     ensure_medallion_dirs()
     logger.info("[gold] build start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
     gold_dir.mkdir(parents=True, exist_ok=True)
-    silver_subdirs = get_silver_subdirs(silver_dir)
     gold_subdirs = get_gold_subdirs(gold_dir)
     gold_simulation_dir = gold_subdirs["simulation"]
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
 
-    silver_manifest = _load_silver_manifest(silver_dir)
-    manifest_snapshot_files = _resolve_snapshot_files_from_manifest(silver_dir, silver_manifest)
-    used_manifest_inputs = bool(manifest_snapshot_files)
-    if used_manifest_inputs:
-        logger.info("[gold] using silver manifest snapshot inputs count=%s", len(manifest_snapshot_files))
-    else:
-        logger.info("[gold] no usable snapshot list from silver manifest; fallback to filesystem discovery")
+    contract = _load_and_validate_gold_contract(silver_dir)
+    manifest_snapshot_files = contract["snapshot_files"]
+    required_files: dict[str, Path] = contract["required_files"]
+    logger.info("[gold] using strict manifest snapshot inputs count=%s", len(manifest_snapshot_files))
 
-    run_gold_simulation_from_silver(silver_dir=silver_dir, gold_dir=gold_dir)
+    simulation_kwargs: dict[str, Any] = {
+        "silver_dir": silver_dir,
+        "gold_dir": gold_dir,
+        "required_input_files": {
+            "teams": required_files["simulation_inputs_teams"],
+            "team_members": required_files["team_members"],
+            "team_member_moves": required_files["team_member_moves"],
+        },
+    }
+    run_gold_simulation_from_silver(**simulation_kwargs)
 
-    snapshots_dir = silver_subdirs["snapshots"]
-    game_files = manifest_snapshot_files or sorted(snapshots_dir.glob("*_boss_snapshots.jsonl"))
-    if not game_files:
-        game_files = sorted(silver_dir.glob("*_boss_snapshots.jsonl"))
-    if not game_files:
-        raise FileNotFoundError(f"No silver files found in {silver_dir}")
+    game_files = manifest_snapshot_files
 
     logger.info("[gold] loading %s silver snapshot files", len(game_files))
 
@@ -390,13 +531,14 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
         frames.append(read_jsonl(file_path))
 
     silver_df = pd.concat(frames, ignore_index=True)
+    silver_df = _normalize_game_key_to_game_version(silver_df, source_name="silver boss snapshots")
     logger.info("[gold] loaded silver rows=%s", len(silver_df))
 
     used_spark_for_core = _build_core_aggregations_with_spark(silver_df=silver_df, gold_dir=gold_dir)
     if not used_spark_for_core:
         progression = (
-            silver_df.sort_values(["game", "part"])
-            .groupby("game", as_index=False)
+            silver_df.sort_values(["game_version", "part"])
+            .groupby("game_version", as_index=False)
             .agg(
                 boss_steps=("boss_name", "count"),
                 final_reachable_locations=("reachable_location_count", "last"),
@@ -404,15 +546,16 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
             )
             .sort_values("final_reachable_locations", ascending=False)
         )
+        progression = progression.rename(columns={"game_version": "game"})
         progression.to_csv(gold_dir / "game_progression_summary.csv", index=False)
         logger.info("[gold] wrote game_progression_summary.csv rows=%s (pandas fallback)", len(progression))
 
-        exploded = silver_df[["game", "reachable_locations"]].explode("reachable_locations")
+        exploded = silver_df[["game_version", "reachable_locations"]].explode("reachable_locations")
         exploded = exploded.rename(columns={"reachable_locations": "location_slug"}).dropna()
 
         location_popularity = (
             exploded.groupby("location_slug", as_index=False)
-            .agg(game_count=("game", "nunique"), total_mentions=("game", "count"))
+            .agg(game_count=("game_version", "nunique"), total_mentions=("game_version", "count"))
             .sort_values(["game_count", "total_mentions"], ascending=False)
         )
         write_parquet(gold_dir / "location_popularity.parquet", location_popularity)
@@ -547,7 +690,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     manifest = {
         "silver_game_files": [path.name for path in game_files],
         "silver_records": int(len(silver_df)),
-        "silver_manifest_used": used_manifest_inputs,
+        "silver_manifest_used": True,
         "gold_simulation_dir": str(gold_simulation_dir.relative_to(gold_dir)),
         "gold_outputs": gold_outputs,
     }

@@ -24,20 +24,27 @@ def _validate_columns(frame: pd.DataFrame, required: set[str], name: str) -> Non
 def load_reconstructed_teams_from_silver(
     silver_dir: Path = SILVER_DIR,
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,
+    teams_path: Path | None = None,
+    team_members_path: Path | None = None,
+    team_member_moves_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     simulation_dir = silver_dir / simulation_dirname
-    teams_path = simulation_dir / "teams.parquet"
-    team_members_path = simulation_dir / "team_members.parquet"
-    team_member_moves_path = simulation_dir / "team_member_moves.parquet"
+    resolved_teams_path = teams_path if teams_path is not None else (simulation_dir / "teams.parquet")
+    resolved_team_members_path = (
+        team_members_path if team_members_path is not None else (simulation_dir / "team_members.parquet")
+    )
+    resolved_team_member_moves_path = (
+        team_member_moves_path if team_member_moves_path is not None else (simulation_dir / "team_member_moves.parquet")
+    )
 
-    if not team_members_path.exists() or not team_member_moves_path.exists():
+    if not resolved_team_members_path.exists() or not resolved_team_member_moves_path.exists():
         raise FileNotFoundError(
             "Required normalized team tables are missing. Expected team_members.parquet and team_member_moves.parquet in silver simulation."
         )
 
-    teams_df = read_parquet(teams_path) if teams_path.exists() else pd.DataFrame()
-    members_df = read_parquet(team_members_path)
-    member_moves_df = read_parquet(team_member_moves_path)
+    teams_df = read_parquet(resolved_teams_path) if resolved_teams_path.exists() else pd.DataFrame()
+    members_df = read_parquet(resolved_team_members_path)
+    member_moves_df = read_parquet(resolved_team_member_moves_path)
 
     _validate_columns(members_df, _REQUIRED_MEMBER_COLUMNS, "team_members.parquet")
     _validate_columns(member_moves_df, _REQUIRED_MEMBER_MOVE_COLUMNS, "team_member_moves.parquet")

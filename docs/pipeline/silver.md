@@ -43,6 +43,23 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Separate move metadata (`move_data` / `move_reference` / `learnable_moves`)
 9. Generate Silver manifest.
 
+## Silver Manifest Contract for Gold
+
+`data/silver/manifest.json` ist der einzige vertragliche Input fuer Gold.
+
+Der Manifest enthaelt dafuer:
+
+- `contracts.gold_strict.required_dataset_keys`
+- `datasets.boss_records.files[]`
+- `datasets.simulation_inputs_teams.file`
+- `datasets.team_members.file`
+- `datasets.team_member_moves.file`
+- `datasets.pokemon_reference.file`
+- `datasets.snapshot_available_pokemon.file`
+- `datasets.encounters.file`
+
+Fehlende oder inkonsistente Eintraege fuehren in Gold zu einem sofortigen Laufabbruch (fail-fast).
+
 ## Outputs
 
 Primary outputs in `data/silver/`:

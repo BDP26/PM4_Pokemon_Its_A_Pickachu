@@ -85,6 +85,29 @@ PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze silver gold
 PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
 ```
 
+## Silver -> Gold Contract (strict)
+
+Gold liest Inputs ausschliesslich aus `data/silver/manifest.json` und nutzt keine Dateisystem-Discovery mehr.
+
+Erforderliche Dataset-Keys fuer Gold:
+
+- `boss_records` (`files[]`)
+- `simulation_inputs_teams` (`file`)
+- `team_members` (`file`)
+- `team_member_moves` (`file`)
+- `pokemon_reference` (`file`)
+- `snapshot_available_pokemon` (`file`)
+- `encounters` (`file`)
+
+Bei fehlenden/ungueltigen Eintraegen bricht Gold sofort mit `GoldContractError` ab (z. B. `[gold.contract] missing_dataset_file ...`).
+
+Typischer Repair-Flow:
+
+```bash
+PYTHONPATH=src python -m src.pipeline.run_pipeline layers silver
+PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
+```
+
 Hinweise:
 - Kaggle-Quelle in Bronze: `maxiboo/pokemon-gen-1-9-gym-leaders-elite-four`
 - Download-Ziel: `data/bronze/kagglehub/`

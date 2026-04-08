@@ -21,6 +21,19 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     manifest = {
         "layer": "silver",
         "purpose": "Harmonized intermediate data with reusable team and move contracts for gold",
+        "contracts": {
+            "gold_strict": {
+                "required_dataset_keys": [
+                    "boss_records",
+                    "simulation_inputs_teams",
+                    "team_members",
+                    "team_member_moves",
+                    "pokemon_reference",
+                    "snapshot_available_pokemon",
+                    "encounters",
+                ]
+            }
+        },
         "datasets": {},
     }
 

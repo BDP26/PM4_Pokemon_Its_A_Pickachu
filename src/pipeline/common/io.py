@@ -25,54 +25,71 @@ def write_jsonl(path: Path, records: Iterable[dict]) -> None:
             file_handle.write("\n")
 
 
+def _to_dataframe(records: Iterable[dict] | pd.DataFrame) -> pd.DataFrame:
+    return records if isinstance(records, pd.DataFrame) else pd.DataFrame(list(records))
+
+
+def _remove_path_if_exists(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _existing_partitions(dataframe: pd.DataFrame, partition_cols: list[str] | tuple[str, ...] | None) -> list[str]:
+    if not partition_cols:
+        return []
+    return [column for column in partition_cols if column in dataframe.columns]
+
+
+def _write_non_partitioned_parquet(path: Path, dataframe: pd.DataFrame, cleanup_any_path: bool = False) -> None:
+    if cleanup_any_path:
+        _remove_path_if_exists(path)
+    elif path.exists() and path.is_dir():
+        shutil.rmtree(path)
+    dataframe.to_parquet(path, index=False)
+
+
+def _write_partitioned_parquet(path: Path, dataframe: pd.DataFrame, partitions: list[str]) -> None:
+    _remove_path_if_exists(path)
+    path.mkdir(parents=True, exist_ok=True)
+    grouped = dataframe.groupby(partitions, dropna=False, sort=True)
+    for partition_values, frame in grouped:
+        values = partition_values if isinstance(partition_values, tuple) else (partition_values,)
+        partition_dir = path
+        for column, value in zip(partitions, values, strict=False):
+            partition_dir = partition_dir / f"{column}={value}"
+        partition_dir.mkdir(parents=True, exist_ok=True)
+        # Partition columns are encoded in the directory path and must
+        # not be duplicated inside parquet data files.
+        frame.drop(columns=partitions, errors="ignore").to_parquet(
+            partition_dir / "part-000.parquet",
+            index=False,
+        )
+
+
 def write_parquet(
     path: Path,
     records: Iterable[dict] | pd.DataFrame,
     partition_cols: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(records, pd.DataFrame):
-        dataframe = records
-    else:
-        dataframe = pd.DataFrame(list(records))
+    dataframe = _to_dataframe(records)
     try:
-        if partition_cols:
-            partitions = [column for column in partition_cols if column in dataframe.columns]
-            if not partitions:
-                # Fallback to plain parquet file when partition columns are absent.
-                if path.exists():
-                    if path.is_dir():
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
-                dataframe.to_parquet(path, index=False)
-                return
+        partitions = _existing_partitions(dataframe, partition_cols)
+        if partition_cols and not partitions:
+            # Fallback to plain parquet file when partition columns are absent.
+            _write_non_partitioned_parquet(path, dataframe, cleanup_any_path=True)
+            return
 
-            if path.exists():
-                if path.is_dir():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink()
-            path.mkdir(parents=True, exist_ok=True)
-            grouped = dataframe.groupby(partitions, dropna=False, sort=True)
-            for partition_values, frame in grouped:
-                values = partition_values if isinstance(partition_values, tuple) else (partition_values,)
-                partition_dir = path
-                for column, value in zip(partitions, values, strict=False):
-                    partition_dir = partition_dir / f"{column}={value}"
-                partition_dir.mkdir(parents=True, exist_ok=True)
-                # Partition columns are encoded in the directory path and must
-                # not be duplicated inside parquet data files.
-                frame.drop(columns=partitions, errors="ignore").to_parquet(
-                    partition_dir / "part-000.parquet",
-                    index=False,
-                )
+        if partitions:
+            _write_partitioned_parquet(path, dataframe, partitions)
             return
 
         # Non-partition write may follow an earlier partitioned write target.
-        if path.exists() and path.is_dir():
-            shutil.rmtree(path)
-        dataframe.to_parquet(path, index=False)
+        _write_non_partitioned_parquet(path, dataframe)
     except ImportError as exc:  # pragma: no cover - depends on runtime env
         raise ImportError(
             "Parquet write requires pyarrow or fastparquet. Install dependency: pyarrow"

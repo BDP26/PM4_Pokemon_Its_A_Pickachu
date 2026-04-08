@@ -49,4 +49,5 @@ The Bronze layer ingests raw external data with minimal transformation.
 - Bronze data is intentionally raw and can be large.
 - Walkthrough page existence checks are cached in-memory per run.
 - Missing game walkthrough roots are skipped instead of failing the full run.
+- Der Gold-Layer liest keine Bronze-Daten direkt; der verbindliche Pfad ist Bronze -> Silver -> Gold ueber `data/silver/manifest.json`.
 

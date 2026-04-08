@@ -1,7 +1,6 @@
 import argparse
 import logging
 import sys
-import time
 import warnings
 
 from src.pipeline.bronze.orchestration.fetch_sources import fetch_bronze_sources
@@ -18,12 +17,6 @@ logging.basicConfig(
     format="%(message)s",
 )
 logger = logging.getLogger(__name__)
-_PROGRESS_LOGGING_ENABLED = False
-
-
-def enable_progress_logging_everywhere() -> None:
-    global _PROGRESS_LOGGING_ENABLED
-    _PROGRESS_LOGGING_ENABLED = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,7 +58,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    enable_progress_logging_everywhere()
     args = parse_args()
 
     if args.mode == "validate-simulation":
@@ -85,9 +77,7 @@ def main() -> None:
 
     deduped_layers = list(dict.fromkeys(selected_layers))
     for layer in deduped_layers:
-        started_at = time.perf_counter()
         layer_runners[layer]()
-        elapsed = time.perf_counter() - started_at
 
 
 

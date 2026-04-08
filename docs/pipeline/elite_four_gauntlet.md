@@ -70,6 +70,11 @@ rows_written = build_elite_four_gauntlet_results()
 print(f"Calculated gauntlet scenarios for {rows_written} teams")
 ```
 
+## Datenquelle und Layer-Grenze
+
+- Die Gauntlet-Bewertung basiert auf Silver/Gold-Simulationsartefakten, nicht auf Dateisystem-Discovery.
+- Fuer Gold gilt ein strikter Manifest-Contract ueber `data/silver/manifest.json`.
+
 ## Strategische Auswertung
 
 Basierend auf den Gauntlet-Ergebnissen können Teams nach ihrer Tauglichkeit bewertet werden:

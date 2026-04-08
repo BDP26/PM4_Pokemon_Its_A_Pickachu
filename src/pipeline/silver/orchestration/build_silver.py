@@ -148,7 +148,7 @@ def build_silver_from_bronze(
 
     if not location_index_path.exists() or not bulbapedia_dir.exists():
         raise FileNotFoundError(
-            "Bronze inputs are missing. Run the bronze step first: python -m pipeline.run_pipeline --layer bronze"
+            "Bronze inputs are missing. Run the bronze step first: python -m src.pipeline.run_pipeline layers bronze"
         )
 
     # Get allowed versions from game config
@@ -207,7 +207,7 @@ def build_silver_from_bronze(
             return
     logger.info("[silver] processing %s bulbapedia game files", len(game_files))
 
-    for game_index, game_file in enumerate(game_files, start=1):
+    for game_file in game_files:
         game_payload = cast(dict[str, Any], read_json(game_file))
         records = extract_game_data(game_payload, mapper)
         game_key = game_payload["game_key"]
