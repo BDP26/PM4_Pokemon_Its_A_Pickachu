@@ -2,6 +2,7 @@
 import csv
 from itertools import combinations
 import logging
+import os
 import time
 from collections import defaultdict
 from functools import lru_cache
@@ -10,7 +11,6 @@ from typing import Any, Collection
 
 import pokebase as pb
 
-from src.pipeline.common.io import write_parquet
 from src.pipeline.silver.inputs.game_config import (
     STARTER_EVOLUTION_CHAINS_BY_BASE,
     get_starter_choices,
@@ -43,6 +43,8 @@ _FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 _GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 _MOVESET_WIDTH = 4
+_DEFAULT_MEMBER_MOVE_POOL_CAP = 12
+_DEFAULT_MEMBER_COMBO_LIMIT = 128
 
 
 _GAME_TO_VERSION_GROUP: dict[str, str] = {
@@ -239,23 +241,57 @@ def _build_member_detail(
     }
 
 
-def _member_moveset_combinations(moves: list[str]) -> list[tuple[str, ...]]:
+def _member_moveset_combinations(moves: list[str]) -> tuple[list[tuple[str, ...]], bool]:
     unique_moves = sorted({move for move in moves if move})
     if not unique_moves:
-        return [("struggle",)]
+        return [("struggle",)], False
     if len(unique_moves) <= _MOVESET_WIDTH:
-        return [tuple(unique_moves)]
-    return list(combinations(unique_moves, _MOVESET_WIDTH))
+        return [tuple(unique_moves)], False
+
+    pool_cap_raw = os.getenv("PIPELINE_MEMBER_MOVE_POOL_CAP", str(_DEFAULT_MEMBER_MOVE_POOL_CAP)).strip()
+    combo_limit_raw = os.getenv("PIPELINE_MEMBER_COMBO_LIMIT", str(_DEFAULT_MEMBER_COMBO_LIMIT)).strip()
+
+    try:
+        pool_cap = int(pool_cap_raw)
+    except ValueError:
+        pool_cap = _DEFAULT_MEMBER_MOVE_POOL_CAP
+    try:
+        combo_limit = int(combo_limit_raw)
+    except ValueError:
+        combo_limit = _DEFAULT_MEMBER_COMBO_LIMIT
+
+    truncated = False
+    if pool_cap > 0 and len(unique_moves) > pool_cap:
+        ranked = sorted(
+            unique_moves,
+            key=lambda move_name: (_move_profile(move_name)[0], move_name),
+            reverse=True,
+        )
+        unique_moves = sorted(ranked[:pool_cap])
+        truncated = True
+
+    combos: list[tuple[str, ...]] = []
+    for combo in combinations(unique_moves, _MOVESET_WIDTH):
+        combos.append(combo)
+        if combo_limit > 0 and len(combos) >= combo_limit:
+            truncated = True
+            break
+    return combos or [("struggle",)], truncated
 
 
 def build_member_movesets_dataset(teams: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Expand team members into combinatorial moveset rows for big-data use cases."""
     rows: list[dict[str, Any]] = []
+    team_counter = 0
+    member_counter = 0
+    truncated_members = 0
     for team in teams:
+        team_counter += 1
         details = team.get("details")
         if not isinstance(details, list):
             continue
         for slot_idx, member in enumerate(details, start=1):
+            member_counter += 1
             if not isinstance(member, dict):
                 continue
             species = str(member.get("name", "")).strip().lower()
@@ -263,7 +299,9 @@ def build_member_movesets_dataset(teams: list[dict[str, Any]]) -> list[dict[str,
                 continue
             learnable = member.get("learnable_moves", [])
             learnable_moves = learnable if isinstance(learnable, list) else []
-            combos = _member_moveset_combinations([str(move) for move in learnable_moves])
+            combos, was_truncated = _member_moveset_combinations([str(move) for move in learnable_moves])
+            if was_truncated:
+                truncated_members += 1
             for combo_idx, combo in enumerate(combos, start=1):
                 row = {
                     "team_id": team.get("team_id"),
@@ -281,6 +319,13 @@ def build_member_movesets_dataset(teams: list[dict[str, Any]]) -> list[dict[str,
                 for move_idx in range(_MOVESET_WIDTH):
                     row[f"move_{move_idx + 1}"] = combo[move_idx] if move_idx < len(combo) else None
                 rows.append(row)
+    logger.info(
+        "[silver/teams] member movesets built teams=%s members=%s rows=%s truncated_members=%s",
+        team_counter,
+        member_counter,
+        len(rows),
+        truncated_members,
+    )
     return rows
 
 
@@ -349,6 +394,7 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> dict
         "starter_base": starter_base,
         "starter_evolved_species": starter_species,
         "source_team_id": base_team.get("team_id"),
+        "team_role": "player",
         "is_player_candidate": True,
     }
 
@@ -468,7 +514,9 @@ def extract_kaggle_teams(
             'pokemon': [p['name'] for p in pokemon_list] if isinstance(pokemon_list, list) else [],
             'levels': [p['level'] for p in pokemon_list] if isinstance(pokemon_list, list) else [],
             'avg_level': sum(p['level'] for p in pokemon_list) // len(pokemon_list) if isinstance(pokemon_list, list) and pokemon_list else 20,
-            'details': pokemon_list if isinstance(pokemon_list, list) else []
+            'details': pokemon_list if isinstance(pokemon_list, list) else [],
+            'team_role': 'boss',
+            'is_player_candidate': False,
         }
         teams.append(team_entry)
 
@@ -495,6 +543,9 @@ def extract_kaggle_teams(
         elapsed,
     )
     return teams
+
+
+
 
 
 

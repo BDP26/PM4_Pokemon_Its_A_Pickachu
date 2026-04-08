@@ -30,7 +30,7 @@ The Bronze layer ingests raw external data with minimal transformation.
    - Discover walkthrough part pages.
    - Fetch each part HTML payload.
    - Write one raw game JSON file.
-4. Download Kaggle dataset files, copy raw files, and export a normalized CSV.
+4. Download Kaggle dataset files and export a normalized CSV.
 5. Snapshot the effective Bronze config and create a config manifest.
 6. Write a Kaggle manifest with provenance metadata.
 
@@ -38,7 +38,6 @@ The Bronze layer ingests raw external data with minimal transformation.
 
 - `data/bronze/pokeapi/location_index.json`
 - `data/bronze/bulbapedia/{game_key}.json`
-- `data/bronze/kagglehub/raw/*`
 - `data/bronze/kagglehub/gym_leaders_elite_four.csv`
 - `data/bronze/kagglehub/manifest.json`
 - `data/bronze/config/games_config.json`

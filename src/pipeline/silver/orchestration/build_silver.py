@@ -20,7 +20,8 @@ from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     get_location_area_and_pokemon_maps,
 )
 from src.pipeline.silver.inputs.parser import extract_game_data
-from src.pipeline.silver.inputs.kaggle_teams import extract_kaggle_teams
+from src.pipeline.silver.inputs.kaggle_teams import build_member_movesets_dataset, extract_kaggle_teams
+from src.pipeline.silver.simulation.team_moveset_combinations import build_team_moveset_combinations
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
 from src.pipeline.silver.enrichment.schema_normalizer import (
     write_normalized_silver,
@@ -40,6 +41,10 @@ def _cleanup_legacy_silver_artifacts(silver_dir: Path, silver_subdirs: dict[str,
     current_simulation_outputs = {
         "teams.parquet",
         "teams.jsonl",
+        "member_movesets.parquet",
+        "starter_team_moveset_combinations.parquet",
+        "boss_teams.parquet",
+        "player_teams.parquet",
     }
     for artifact in simulation_dir.iterdir():
         if artifact.is_file() and artifact.name not in current_simulation_outputs:
@@ -84,6 +89,28 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
     }
 
 
+def _split_team_roles(teams_data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    boss_teams: list[dict[str, Any]] = []
+    player_teams: list[dict[str, Any]] = []
+    fallback_to_boss_count = 0
+    for team in teams_data:
+        role = str(team.get("team_role") or "").strip().lower()
+        if role == "player" or bool(team.get("is_player_candidate")):
+            player_teams.append(team)
+            continue
+        if role == "boss" or isinstance(team.get("boss_name"), str):
+            boss_teams.append(team)
+            continue
+        fallback_to_boss_count += 1
+        boss_teams.append(team)
+
+    return boss_teams, player_teams
+
+
+def _top_counts(values: list[str], limit: int = 5) -> dict[str, int]:
+    return dict(Counter(values).most_common(limit))
+
+
 def build_silver_from_bronze(
     bronze_dir: Path = BRONZE_DIR,
     silver_dir: Path = SILVER_DIR,
@@ -91,16 +118,12 @@ def build_silver_from_bronze(
 ) -> None:
     started_at = time.perf_counter()
     ensure_medallion_dirs()
-    logger.info("[silver] build start bronze_dir=%s silver_dir=%s", bronze_dir, silver_dir)
 
     # Ensure type chart is available
     type_chart_path = bronze_dir / "type_chart.json"
     if not type_chart_path.exists():
-        logger.info("[silver] type_chart.json missing, generating...")
         chart = build_type_chart()
         save_as_json(chart, type_chart_path)
-    else:
-        logger.info("[silver] type_chart.json found")
 
     silver_dir.mkdir(parents=True, exist_ok=True)
     silver_subdirs = get_silver_subdirs(silver_dir)
@@ -124,8 +147,6 @@ def build_silver_from_bronze(
             "Bronze inputs are missing. Run the bronze step first: python -m pipeline.run_pipeline --layer bronze"
         )
 
-    logger.info("[silver] loading bronze inputs")
-
     # Get allowed versions from game config
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
@@ -143,7 +164,6 @@ def build_silver_from_bronze(
     logger.info("[silver] processing %s bulbapedia game files", len(game_files))
 
     for game_index, game_file in enumerate(game_files, start=1):
-        logger.info("[silver] (%s/%s) parsing %s", game_index, len(game_files), game_file.name)
         game_payload = cast(dict[str, Any], read_json(game_file))
         records = extract_game_data(game_payload, mapper)
         game_key = game_payload["game_key"]
@@ -170,15 +190,18 @@ def build_silver_from_bronze(
         for record in records:
             all_slugs.extend(record["reachable_locations"])
 
+    logger.info(
+        "[silver] parsing complete games_with_records=%s total_records=%s unique_location_slugs=%s",
+        len(records_with_game_keys),
+        len(all_records),
+        len(set(all_slugs)),
+    )
+
     mapping_started_at = time.perf_counter()
-    logger.info("[silver] mapping locations+pokemon start unique_slugs=%s", len(set(all_slugs)))
     area_map, location_pokemon_map = get_location_area_and_pokemon_maps(all_slugs, allowed_versions=allowed_versions)
     logger.info(
-        "[silver] mapping locations+pokemon done elapsed_s=%.2f",
+        "[silver] mapping locations+pokemon done elapsed_s=%.2f locations=%s pokemon_locations=%s",
         time.perf_counter() - mapping_started_at,
-    )
-    logger.info(
-        "[silver] resolved mappings: locations=%s pokemon_locations=%s",
         len(area_map),
         len(location_pokemon_map),
     )
@@ -191,7 +214,15 @@ def build_silver_from_bronze(
         encounters_file.unlink()
 
     # Clear simulation outputs before writing to avoid stale datasets from prior runs.
-    for simulation_output in ["teams.parquet", "teams.jsonl", "member_movesets.parquet", "member_movesets.jsonl"]:
+    for simulation_output in [
+        "teams.parquet",
+        "teams.jsonl",
+        "member_movesets.parquet",
+        "member_movesets.jsonl",
+        "starter_team_moveset_combinations.parquet",
+        "boss_teams.parquet",
+        "player_teams.parquet",
+    ]:
         simulation_output_path = simulation_dir / simulation_output
         if simulation_output_path.exists():
             simulation_output_path.unlink()
@@ -201,13 +232,10 @@ def build_silver_from_bronze(
     for snapshot_file in snapshots_dir.glob("*_boss_snapshots.jsonl"):
         snapshot_file.unlink()
         removed_snapshots += 1
-    if removed_snapshots:
-        logger.info("[silver] cleared stale snapshot files count=%s", removed_snapshots)
 
     all_pokemon_references = {}
 
     for game_key, records in records_with_game_keys:
-        logger.info("[silver] normalizing game=%s records=%s", game_key, len(records))
         enrich_records_with_location_pokemon(records, location_pokemon_map)
         pokemon_refs = write_normalized_silver(
             records=records,
@@ -218,7 +246,11 @@ def build_silver_from_bronze(
         if pokemon_refs:
             all_pokemon_references.update(pokemon_refs)
 
-        logger.info("[silver] wrote %s_boss_snapshots.jsonl records=%s", game_key, len(records))
+    logger.info(
+        "[silver] normalization complete snapshots=%s pokemon_reference_entries=%s",
+        len(records_with_game_keys),
+        len(all_pokemon_references),
+    )
 
     # Create centralized references
     create_pokemon_reference_index(all_pokemon_references, references_dir)
@@ -239,18 +271,24 @@ def build_silver_from_bronze(
     ]
     write_json(diagnostics_dir / "unmapped_locations.json", compact_unmapped)
 
+    logger.info(
+        "[silver] diagnostics written unmapped_events=%s top_reasons=%s",
+        len(mapper.misses),
+        _top_counts([str(miss.get("reason", "unknown")) for miss in mapper.misses], limit=3),
+    )
+
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
     # Build battle simulation data
     # Extract teams from Kaggle dataset (primary source)
-    logger.info("[silver] extracting teams for simulation start")
+    logger.info("[silver] extracting teams for simulation")
     teams_started_at = time.perf_counter()
     teams_data = extract_kaggle_teams(
         bronze_dir,
         allowed_versions=allowed_versions,
     )
     logger.info(
-        "[silver] extracting teams for simulation done teams=%s elapsed_s=%.2f",
+        "[silver] team extraction done teams=%s elapsed_s=%.2f",
         len(teams_data),
         time.perf_counter() - teams_started_at,
     )
@@ -270,6 +308,8 @@ def build_silver_from_bronze(
                             "game_version": game_version,
                             "pokemon": team_info.get("pokemon", []),
                             "level": team_info.get("level", 20),
+                            "team_role": "boss",
+                            "is_player_candidate": False,
                         })
         logger.info(
             "[silver] fallback team build done teams=%s elapsed_s=%.2f",
@@ -277,22 +317,27 @@ def build_silver_from_bronze(
             time.perf_counter() - fallback_started_at,
         )
     if teams_data:
+        boss_teams, player_teams = _split_team_roles(teams_data)
         write_parquet(simulation_dir / "teams.parquet", teams_data)
         write_jsonl(simulation_dir / "teams.jsonl", teams_data)
-        logger.info("[silver] wrote teams.parquet + teams.jsonl teams=%s", len(teams_data))
+        write_parquet(simulation_dir / "boss_teams.parquet", boss_teams)
+        write_parquet(simulation_dir / "player_teams.parquet", player_teams)
+        member_movesets = build_member_movesets_dataset(player_teams)
+        write_parquet(simulation_dir / "member_movesets.parquet", member_movesets)
+        team_moveset_rows = build_team_moveset_combinations(silver_dir=silver_dir)
+        logger.info(
+            "[silver] wrote teams.parquet boss_teams=%s player_teams=%s member_movesets=%s",
+            len(boss_teams),
+            len(player_teams),
+            len(member_movesets),
+        )
     else:
         logger.warning("[silver] no teams found; simulation outputs will be skipped")
 
-    if teams_data:
-        logger.info("[silver] simulation inputs prepared; battle simulation is executed in gold layer")
-
     # Create manifest of available data
-    logger.info("[silver] creating manifest")
     create_silver_manifest(silver_dir)
 
-    logger.info("[silver] unmapped location events=%s", len(mapper.misses))
-    logger.info("[silver] done snapshots=%s games=%s", len(all_records), len(set(r["game"] for r in all_records)))
-    logger.info("[silver] build finished elapsed_s=%.2f", time.perf_counter() - started_at)
+    logger.info("[silver] build finished unmapped_events=%s records=%s elapsed_s=%.2f", len(mapper.misses), len(all_records), time.perf_counter() - started_at)
 
 
 

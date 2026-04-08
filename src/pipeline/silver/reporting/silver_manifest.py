@@ -97,6 +97,48 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Line-delimited view of prepared team compositions"
         }
 
+    boss_teams_file = simulation_dir / "boss_teams.parquet"
+    if boss_teams_file.exists():
+        try:
+            boss_teams = read_parquet(boss_teams_file)
+            boss_teams_count = len(boss_teams)
+        except Exception:
+            boss_teams_count = 0
+        manifest["datasets"]["simulation_boss_teams"] = {
+            "file": _relative_to(silver_dir, boss_teams_file),
+            "count": boss_teams_count,
+            "format": "Parquet",
+            "description": "Boss-controlled teams separated from player candidates"
+        }
+
+    player_teams_file = simulation_dir / "player_teams.parquet"
+    if player_teams_file.exists():
+        try:
+            player_teams = read_parquet(player_teams_file)
+            player_teams_count = len(player_teams)
+        except Exception:
+            player_teams_count = 0
+        manifest["datasets"]["simulation_player_teams"] = {
+            "file": _relative_to(silver_dir, player_teams_file),
+            "count": player_teams_count,
+            "format": "Parquet",
+            "description": "Player-candidate teams separated from boss teams"
+        }
+
+    member_movesets_file = simulation_dir / "member_movesets.parquet"
+    if member_movesets_file.exists():
+        try:
+            member_movesets = read_parquet(member_movesets_file)
+            member_movesets_count = len(member_movesets)
+        except Exception:
+            member_movesets_count = 0
+        manifest["datasets"]["simulation_member_movesets"] = {
+            "file": _relative_to(silver_dir, member_movesets_file),
+            "count": member_movesets_count,
+            "format": "Parquet",
+            "description": "All combinatorial 4-move sets per pokemon per team"
+        }
+
 
     # Location maps
     location_area_file = mappings_dir / "location_to_area_map.json"

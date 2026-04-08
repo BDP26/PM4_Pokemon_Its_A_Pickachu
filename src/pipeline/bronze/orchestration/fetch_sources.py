@@ -1,5 +1,4 @@
 import re
-import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -42,13 +41,10 @@ def page_exists(session, title: str) -> bool:
         r.raise_for_status()
         response = r.json()
 
-        print(f"[debug] title={title!r}")
-
         pages = response.get("query", {}).get("pages", [])
         exists = bool(pages) and not pages[0].get("missing", False)
 
-    except Exception as e:
-        print(f"[debug] page_exists failed for {title!r}: {e}")
+    except Exception:
         exists = False
 
     _TITLE_EXISTS_CACHE[title] = exists
@@ -85,34 +81,25 @@ def get_walkthrough_parts(session, root_title: str) -> list[dict]:
     return sorted(parts, key=lambda item: item["part"])
 
 
-def _copy_kaggle_raw_files(dataset_dir: Path, output_dir: Path) -> list[str]:
-    copied_files: list[str] = []
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for source_file in dataset_dir.rglob("*"):
-        if not source_file.is_file():
-            continue
-        relative_path = source_file.relative_to(dataset_dir)
-        target_path = output_dir / relative_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_file, target_path)
-        copied_files.append(str(relative_path))
-    return sorted(copied_files)
-
-
 def fetch_kaggle_gym_leaders_dataset(
     output_dir: Optional[Path] = None,
     dataset_handle: str = KAGGLE_GYM_LEADERS_DATASET,
     file_path: str = KAGGLE_GYM_LEADERS_FILE_PATH,
 ) -> None:
     kaggle_output_dir = (output_dir or BRONZE_DIR) / "kagglehub"
+    kaggle_output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_dir = Path(kagglehub.dataset_download(dataset_handle))
-    copied_files = _copy_kaggle_raw_files(dataset_dir, kaggle_output_dir / "raw")
+    dataset_files = sorted(
+        str(source_file.relative_to(dataset_dir))
+        for source_file in dataset_dir.rglob("*")
+        if source_file.is_file()
+    )
 
     selected_file = file_path
     if not selected_file:
         preferred_suffixes = (".csv", ".json", ".parquet")
-        for candidate in copied_files:
+        for candidate in dataset_files:
             if candidate.lower().endswith(preferred_suffixes):
                 selected_file = candidate
                 break
@@ -142,13 +129,13 @@ def fetch_kaggle_gym_leaders_dataset(
     metadata = {
         "dataset_handle": dataset_handle,
         "selected_file": selected_file,
-        "raw_files": copied_files,
+        "dataset_files": dataset_files,
         "dataframe_export": str(table_output_path.relative_to(kaggle_output_dir)) if table_output_path else None,
         "row_count": row_count,
         "columns": columns,
     }
     write_json(kaggle_output_dir / "manifest.json", metadata)
-    print(f"[bronze] wrote Kaggle dataset artifacts to {kaggle_output_dir}")
+    print(f"[bronze] wrote Kaggle dataset artifacts (without raw copy) to {kaggle_output_dir}")
 
 
 def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool = True) -> None:

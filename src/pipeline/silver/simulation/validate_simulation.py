@@ -215,6 +215,18 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
             issues.append(f"monte_carlo_results.parquet row {idx}: mc_win_rate out of [0, 1]")
 
     expected_matchups = len(team_ids) * max(len(team_ids) - 1, 0)
+    player_team_count = sum(
+        1
+        for team in teams
+        if bool(team.get("is_player_candidate"))
+    )
+    boss_team_count = sum(
+        1
+        for team in teams
+        if isinstance(team.get("boss_name"), str) and bool(str(team.get("boss_name") or "").strip())
+    )
+    if player_team_count > 0 and boss_team_count > 0:
+        expected_matchups = player_team_count * boss_team_count
     if team_battles and len(team_battles) != expected_matchups:
         issues.append(
             f"team_battle_simulations.parquet row count mismatch: got {len(team_battles)}, expected {expected_matchups}"
@@ -249,6 +261,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
 
 
 

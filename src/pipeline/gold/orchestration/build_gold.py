@@ -1,12 +1,14 @@
 from pathlib import Path
 import importlib
 import logging
+import math
 
 import pandas as pd
 
 from src.pipeline.common.io import read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
+from src.pipeline.silver.inputs.game_config import get_games_config
 from src.pipeline.settings import (
     GOLD_DIR,
     SILVER_DIR,
@@ -17,6 +19,197 @@ from src.pipeline.settings import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _boss_order_lookup() -> dict[tuple[str, str], tuple[int, int]]:
+    lookup: dict[tuple[str, str], tuple[int, int]] = {}
+    for game in get_games_config():
+        version = str(game.get("game_key") or "").strip().lower()
+        bosses = [str(name).strip() for name in game.get("bosses", []) if str(name).strip()]
+        total = len(bosses)
+        for idx, boss in enumerate(bosses, start=1):
+            lookup[(version, boss.lower())] = (idx, total)
+    return lookup
+
+
+def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir: Path) -> list[str]:
+    monte_carlo_path = gold_simulation_dir / "monte_carlo_results.parquet"
+    teams_path = gold_simulation_dir / "teams.parquet"
+    if not monte_carlo_path.exists() or not teams_path.exists():
+        return []
+
+    monte_carlo_df = read_parquet(monte_carlo_path)
+    teams_df = read_parquet(teams_path)
+    if monte_carlo_df.empty or teams_df.empty:
+        return []
+
+    player_context = teams_df[["team_id", "game_version", "starter_base", "starter_evolved_species"]].rename(
+        columns={"team_id": "player_team_id", "game_version": "player_game_version"}
+    )
+    boss_context = teams_df[["team_id", "boss_name", "game_version"]].rename(
+        columns={"team_id": "boss_team_id", "game_version": "boss_game_version"}
+    )
+
+    joined = monte_carlo_df.merge(player_context, on="player_team_id", how="left")
+    joined = joined.merge(boss_context, on="boss_team_id", how="left", suffixes=("", "_team"))
+    joined["effective_game_version"] = joined["boss_game_version"].fillna(joined.get("game_version")).fillna(joined["player_game_version"])
+    joined["effective_boss_name"] = joined["boss_name_team"].fillna(joined.get("boss_name"))
+
+    lookup = _boss_order_lookup()
+
+    def _resolve_stage(row: pd.Series) -> str:
+        version = str(row.get("effective_game_version") or "").strip().lower()
+        boss_name = str(row.get("effective_boss_name") or "").strip().lower()
+        order_meta = lookup.get((version, boss_name))
+        if order_meta is None:
+            return "boss"
+        order, total = order_meta
+        elite_cutoff = max(1, total - 4)
+        if order >= elite_cutoff:
+            return "champion" if order == total else "elite_four"
+        return "boss"
+
+    joined["boss_stage"] = joined.apply(_resolve_stage, axis=1)
+    joined = joined[joined["starter_base"].notna() & joined["effective_game_version"].notna()].copy()
+    if joined.empty:
+        return []
+
+    outputs: list[str] = []
+
+    try:
+        pyspark_sql = importlib.import_module("pyspark.sql")
+        pyspark_functions = importlib.import_module("pyspark.sql.functions")
+        pyspark_window = importlib.import_module("pyspark.sql.window")
+
+        SparkSession = getattr(pyspark_sql, "SparkSession")
+        F = pyspark_functions
+        Window = getattr(pyspark_window, "Window")
+
+        spark = (
+            SparkSession.builder
+            .appName("pokemon-starter-rankings")
+            .master("local[*]")
+            .config("spark.driver.host", "127.0.0.1")
+            .config("spark.driver.bindAddress", "127.0.0.1")
+            .config("spark.ui.enabled", "false")
+            .getOrCreate()
+        )
+        spark.sparkContext.setLogLevel("WARN")
+        try:
+            sdf = spark.createDataFrame(joined)
+
+            boss_rank = (
+                sdf.groupBy(
+                    "effective_game_version",
+                    "effective_boss_name",
+                    "boss_team_id",
+                    "starter_base",
+                    "starter_evolved_species",
+                    "player_team_id",
+                )
+                .agg(
+                    F.avg("mc_win_rate").alias("avg_mc_win_rate"),
+                    F.avg("wins").alias("avg_wins"),
+                    F.avg("losses").alias("avg_losses"),
+                    F.count("scenario_id").alias("scenario_rows"),
+                )
+            )
+            boss_window = Window.partitionBy("effective_game_version", "effective_boss_name", "starter_base").orderBy(
+                F.desc("avg_mc_win_rate"),
+                F.desc("avg_wins"),
+                F.asc("player_team_id"),
+            )
+            boss_rank = boss_rank.withColumn("rank_in_boss_starter", F.row_number().over(boss_window))
+            boss_rank_pdf = boss_rank.toPandas()
+
+            write_parquet(gold_dir / "team_rankings_by_boss_version_starter.parquet", boss_rank_pdf)
+            outputs.append("team_rankings_by_boss_version_starter.parquet")
+            best_pdf = boss_rank_pdf[boss_rank_pdf["rank_in_boss_starter"] == 1].copy()
+            write_parquet(gold_dir / "best_team_by_boss_version_starter.parquet", best_pdf)
+            outputs.append("best_team_by_boss_version_starter.parquet")
+
+            sequence = sdf.where(F.col("boss_stage").isin(["elite_four", "champion"]))
+            sequence = sequence.withColumn("safe_rate", F.when(F.col("mc_win_rate") < 1e-6, F.lit(1e-6)).otherwise(F.col("mc_win_rate")))
+            sequence = (
+                sequence.groupBy("effective_game_version", "starter_base", "player_team_id")
+                .agg(
+                    F.exp(F.avg(F.log("safe_rate"))).alias("sequence_win_rate"),
+                    F.avg("mc_win_rate").alias("mean_mc_win_rate"),
+                    F.countDistinct("effective_boss_name").alias("bosses_covered"),
+                    F.avg(F.col("degraded_data").cast("double")).alias("degraded_ratio"),
+                )
+                .withColumn("sequence_score", F.col("sequence_win_rate") * (F.lit(1.0) - F.coalesce(F.col("degraded_ratio"), F.lit(0.0)) * F.lit(0.2)))
+            )
+            seq_window = Window.partitionBy("effective_game_version", "starter_base").orderBy(
+                F.desc("sequence_score"),
+                F.desc("sequence_win_rate"),
+                F.asc("player_team_id"),
+            )
+            sequence = sequence.withColumn("rank_in_sequence", F.row_number().over(seq_window))
+            sequence_pdf = sequence.toPandas()
+            write_parquet(gold_dir / "team_rankings_e4_champion_sequence_by_version_starter.parquet", sequence_pdf)
+            outputs.append("team_rankings_e4_champion_sequence_by_version_starter.parquet")
+
+            sequence_best = sequence_pdf[sequence_pdf["rank_in_sequence"] == 1].copy()
+            write_parquet(gold_dir / "best_team_by_e4_champion_sequence_version_starter.parquet", sequence_best)
+            outputs.append("best_team_by_e4_champion_sequence_version_starter.parquet")
+            return outputs
+        finally:
+            spark.stop()
+    except Exception as exc:
+        logger.warning("[gold] starter ranking pyspark path failed; fallback to pandas: %s", exc)
+
+    boss_rank = (
+        joined.groupby(
+            ["effective_game_version", "effective_boss_name", "boss_team_id", "starter_base", "starter_evolved_species", "player_team_id"],
+            as_index=False,
+        )
+        .agg(
+            avg_mc_win_rate=("mc_win_rate", "mean"),
+            avg_wins=("wins", "mean"),
+            avg_losses=("losses", "mean"),
+            scenario_rows=("scenario_id", "count"),
+        )
+        .sort_values(
+            ["effective_game_version", "effective_boss_name", "starter_base", "avg_mc_win_rate", "avg_wins"],
+            ascending=[True, True, True, False, False],
+        )
+    )
+    boss_rank["rank_in_boss_starter"] = boss_rank.groupby(["effective_game_version", "effective_boss_name", "starter_base"]).cumcount() + 1
+    write_parquet(gold_dir / "team_rankings_by_boss_version_starter.parquet", boss_rank)
+    outputs.append("team_rankings_by_boss_version_starter.parquet")
+    best = boss_rank[boss_rank["rank_in_boss_starter"] == 1].copy()
+    write_parquet(gold_dir / "best_team_by_boss_version_starter.parquet", best)
+    outputs.append("best_team_by_boss_version_starter.parquet")
+
+    sequence_df = joined[joined["boss_stage"].isin(["elite_four", "champion"])].copy()
+    if not sequence_df.empty:
+        sequence_df["safe_rate"] = sequence_df["mc_win_rate"].clip(lower=1e-6)
+        sequence_df["log_rate"] = sequence_df["safe_rate"].map(lambda value: math.log(float(value)))
+        sequence_rank = (
+            sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
+            .agg(
+                mean_log_rate=("log_rate", "mean"),
+                mean_mc_win_rate=("mc_win_rate", "mean"),
+                bosses_covered=("effective_boss_name", "nunique"),
+                degraded_ratio=("degraded_data", "mean"),
+            )
+        )
+        sequence_rank["sequence_win_rate"] = sequence_rank["mean_log_rate"].map(lambda value: math.exp(float(value)))
+        sequence_rank["degraded_ratio"] = sequence_rank["degraded_ratio"].fillna(0.0)
+        sequence_rank["sequence_score"] = sequence_rank["sequence_win_rate"] * (1.0 - sequence_rank["degraded_ratio"] * 0.2)
+        sequence_rank = sequence_rank.sort_values(
+            ["effective_game_version", "starter_base", "sequence_score", "sequence_win_rate"],
+            ascending=[True, True, False, False],
+        )
+        sequence_rank["rank_in_sequence"] = sequence_rank.groupby(["effective_game_version", "starter_base"]).cumcount() + 1
+        write_parquet(gold_dir / "team_rankings_e4_champion_sequence_by_version_starter.parquet", sequence_rank)
+        outputs.append("team_rankings_e4_champion_sequence_by_version_starter.parquet")
+        sequence_best = sequence_rank[sequence_rank["rank_in_sequence"] == 1].copy()
+        write_parquet(gold_dir / "best_team_by_e4_champion_sequence_version_starter.parquet", sequence_best)
+        outputs.append("best_team_by_e4_champion_sequence_version_starter.parquet")
+
+    return outputs
 
 
 def _build_core_aggregations_with_spark(
@@ -34,54 +227,63 @@ def _build_core_aggregations_with_spark(
     SparkSession = getattr(pyspark_sql, "SparkSession")
     F = pyspark_functions
 
-    spark = (
-        SparkSession.builder
-        .appName("pokemon-gold-aggregations")
-        .master("local[*]")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-
-    spark_df = spark.createDataFrame(silver_df)
-
-    progression_df = (
-        spark_df.orderBy("game", "part")
-        .groupBy("game")
-        .agg(
-            F.count("boss_name").alias("boss_steps"),
-            F.max("reachable_location_count").alias("max_reachable_locations"),
-            F.max(F.struct(F.col("part"), F.col("reachable_location_count"))).alias("_last_reachable"),
+    spark = None
+    try:
+        spark = (
+            SparkSession.builder
+            .appName("pokemon-gold-aggregations")
+            .master("local[*]")
+            .config("spark.driver.host", "127.0.0.1")
+            .config("spark.driver.bindAddress", "127.0.0.1")
+            .config("spark.ui.enabled", "false")
+            .getOrCreate()
         )
-        .select(
-            "game",
-            "boss_steps",
-            F.col("_last_reachable.reachable_location_count").alias("final_reachable_locations"),
-            "max_reachable_locations",
-        )
-        .orderBy(F.col("final_reachable_locations").desc())
-    )
-    progression_pdf = progression_df.toPandas()
-    progression_pdf.to_csv(gold_dir / "game_progression_summary.csv", index=False)
-    logger.info("[gold] wrote game_progression_summary.csv rows=%s (spark)", len(progression_pdf))
+        spark.sparkContext.setLogLevel("WARN")
 
-    location_popularity_df = (
-        spark_df.select("game", F.explode_outer("reachable_locations").alias("location_slug"))
-        .where(F.col("location_slug").isNotNull())
-        .groupBy("location_slug")
-        .agg(
-            F.countDistinct("game").alias("game_count"),
-            F.count("game").alias("total_mentions"),
+        spark_df = spark.createDataFrame(silver_df)
+
+        progression_df = (
+            spark_df.orderBy("game", "part")
+            .groupBy("game")
+            .agg(
+                F.count("boss_name").alias("boss_steps"),
+                F.max("reachable_location_count").alias("max_reachable_locations"),
+                F.max(F.struct(F.col("part"), F.col("reachable_location_count"))).alias("_last_reachable"),
+            )
+            .select(
+                "game",
+                "boss_steps",
+                F.col("_last_reachable.reachable_location_count").alias("final_reachable_locations"),
+                "max_reachable_locations",
+            )
+            .orderBy(F.col("final_reachable_locations").desc())
         )
-        .orderBy(F.col("game_count").desc(), F.col("total_mentions").desc())
-    )
-    write_parquet(gold_dir / "location_popularity.parquet", location_popularity_df.toPandas())
-    logger.info(
-        "[gold] wrote location_popularity.parquet rows=%s (spark)",
-        location_popularity_df.count(),
-    )
-    return True
+        progression_pdf = progression_df.toPandas()
+        progression_pdf.to_csv(gold_dir / "game_progression_summary.csv", index=False)
+        logger.info("[gold] wrote game_progression_summary.csv rows=%s (spark)", len(progression_pdf))
+
+        location_popularity_df = (
+            spark_df.select("game", F.explode_outer("reachable_locations").alias("location_slug"))
+            .where(F.col("location_slug").isNotNull())
+            .groupBy("location_slug")
+            .agg(
+                F.countDistinct("game").alias("game_count"),
+                F.count("game").alias("total_mentions"),
+            )
+            .orderBy(F.col("game_count").desc(), F.col("total_mentions").desc())
+        )
+        write_parquet(gold_dir / "location_popularity.parquet", location_popularity_df.toPandas())
+        logger.info(
+            "[gold] wrote location_popularity.parquet rows=%s (spark)",
+            location_popularity_df.count(),
+        )
+        return True
+    except Exception as exc:
+        logger.warning("[gold] pyspark aggregation failed; using pandas fallback: %s", exc)
+        return False
+    finally:
+        if spark is not None:
+            spark.stop()
 
 
 def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_DIR) -> None:
@@ -243,6 +445,12 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
                     )
                     logger.info("[gold] wrote best_team_by_boss_version.csv rows=%s", len(best_same_version))
                     gold_outputs.append("best_team_by_boss_version.csv")
+
+            starter_outputs = _build_starter_rankings_from_monte_carlo(
+                gold_dir=gold_dir,
+                gold_simulation_dir=gold_simulation_dir,
+            )
+            gold_outputs.extend(starter_outputs)
 
             best_idx = monte_carlo_df.groupby("boss_team_id")["mc_win_rate"].idxmax()
             best_team_by_boss = (

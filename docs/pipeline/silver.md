@@ -37,6 +37,7 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Boss mapping by version
    - Unmapped location diagnostics (detailed, summary, compact)
 8. Extract simulation inputs (`teams.parquet`, `teams.jsonl`) from available boss/team data.
+   - Also materialize combinatorial 4-move sets per pokemon per team.
 9. Generate Silver manifest.
 
 ## Outputs
@@ -59,6 +60,7 @@ Optional simulation inputs (generated when boss team data is available):
 
 - `simulation/teams.parquet` (primary)
 - `simulation/teams.jsonl` (line-delimited view)
+- `simulation/member_movesets.parquet` (all combinatorial 4-move sets per pokemon per team)
 
 Gold consumes the Silver simulation inputs and writes the battle matrix, seeds, and Monte-Carlo outputs into `data/gold/simulation/`.
 

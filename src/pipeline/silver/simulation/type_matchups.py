@@ -1117,18 +1117,23 @@ def _run_local_simulations(
     simulations: list[dict[str, Any]] = []
 
     teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
-    total_teams = len(teams_with_id)
-    total_pairs = total_teams * max(total_teams - 1, 0)
+    attacker_teams = [team for team in teams_with_id if _is_player_candidate_team(team)]
+    defender_teams = [team for team in teams_with_id if _is_boss_team(team)]
+
+    total_attackers = len(attacker_teams)
+    total_defenders = len(defender_teams)
+    total_pairs = total_attackers * total_defenders
     progress_interval = max(1, total_pairs // 100)  # about 1% progress cadence
     pairs_done = 0
 
     logger.info(
-        "[type_matchups] starting sequential team battles teams=%s pairs=%s",
-        total_teams,
+        "[type_matchups] starting player-vs-boss battles attackers=%s defenders=%s pairs=%s",
+        total_attackers,
+        total_defenders,
         total_pairs,
     )
 
-    for attacker_index, attacker in enumerate(teams_data, start=1):
+    for attacker_index, attacker in enumerate(attacker_teams, start=1):
         attacker_id = attacker.get("team_id")
         if attacker_id is None:
             continue
@@ -1136,11 +1141,11 @@ def _run_local_simulations(
         logger.info(
             "[type_matchups] attacker progress (%s/%s) attacker_team_id=%s",
             attacker_index,
-            len(teams_data),
+            total_attackers,
             attacker_id,
         )
 
-        for defender in teams_data:
+        for defender in defender_teams:
             defender_id = defender.get("team_id")
             if defender_id is None or attacker_id == defender_id:
                 continue
@@ -1187,158 +1192,179 @@ def _run_spark_simulations(
     F = cast(Any, pyspark_functions)
     T = cast(Any, pyspark_types)
 
-    spark = (
-        SparkSession.builder
-        .appName("pokemon-team-battle-sim")
-        .master("local[*]")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+    spark = None
+    broadcast_teams = None
+    broadcast_chart = None
+    broadcast_pokemon = None
+    broadcast_moves = None
+    try:
+        spark = (
+            SparkSession.builder
+            .appName("pokemon-team-battle-sim")
+            .master("local[*]")
+            .config("spark.driver.host", "127.0.0.1")
+            .config("spark.driver.bindAddress", "127.0.0.1")
+            .config("spark.ui.enabled", "false")
+            .getOrCreate()
+        )
+        spark.sparkContext.setLogLevel("WARN")
 
-    teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
-    total_teams = len(teams_with_id)
-    total_pairs = total_teams * max(total_teams - 1, 0)
-    logger.info("[type_matchups] spark engine start teams=%s pairs=%s", total_teams, total_pairs)
+        teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
+        attacker_count = sum(1 for team in teams_with_id if _is_player_candidate_team(team))
+        defender_count = sum(1 for team in teams_with_id if _is_boss_team(team))
+        total_pairs = attacker_count * defender_count
+        logger.info(
+            "[type_matchups] spark engine start teams=%s attackers=%s defenders=%s pairs=%s",
+            len(teams_with_id),
+            attacker_count,
+            defender_count,
+            total_pairs,
+        )
+        if total_pairs == 0:
+            return []
 
-    if total_pairs == 0:
-        return []
-
-    team_lookup: dict[str, dict[str, Any]] = {
-        str(team.get("team_id")): team
-        for team in teams_with_id
-    }
-
-    teams_rows = [
-        {
-            "team_id": str(team.get("team_id")),
-            "game_version": str(team.get("game_version") or ""),
-        }
-        for team in teams_with_id
-    ]
-
-    teams_schema = T.StructType(
-        [
-            T.StructField("team_id", T.StringType(), False),
-            T.StructField("game_version", T.StringType(), True),
+        team_lookup: dict[str, dict[str, Any]] = {str(team.get("team_id")): team for team in teams_with_id}
+        team_rows = [
+            {
+                "team_id": str(team.get("team_id")),
+                "game_version": str(team.get("game_version") or ""),
+                "is_player_candidate": bool(_is_player_candidate_team(team)),
+                "is_boss": bool(_is_boss_team(team)),
+            }
+            for team in teams_with_id
         ]
-    )
-    teams_df = spark.createDataFrame(teams_rows, schema=teams_schema)
-
-    pairs_df = (
-        teams_df.alias("a")
-        .crossJoin(teams_df.alias("d"))
-        .where(F.col("a.team_id") != F.col("d.team_id"))
-        .select(
-            F.col("a.team_id").alias("attacker_id"),
-            F.col("d.team_id").alias("defender_id"),
-        )
-    )
-
-    logger.info("[type_matchups] spark pair dataframe created")
-
-    broadcast_teams = spark.sparkContext.broadcast(team_lookup)
-    broadcast_chart = spark.sparkContext.broadcast(type_chart)
-    broadcast_pokemon = spark.sparkContext.broadcast(pokemon_profiles)
-    broadcast_moves = spark.sparkContext.broadcast(move_profiles)
-
-    def _simulate_partition(rows: Any) -> Any:
-        teams_map = cast(dict[str, dict[str, Any]], broadcast_teams.value)
-        chart = cast(dict[str, dict[str, float]], broadcast_chart.value)
-        _install_lookup_cache(
-            pokemon_profiles=cast(dict[str, dict[str, Any]], broadcast_pokemon.value),
-            move_profiles=cast(dict[str, MoveProfile], broadcast_moves.value),
-        )
-        for row in rows:
-            attacker_id = str(row.attacker_id)
-            defender_id = str(row.defender_id)
-            attacker_team = teams_map[attacker_id]
-            defender_team = teams_map[defender_id]
-
-            result = simulate_team_battle(
-                attacker_team=attacker_team,
-                defender_team=defender_team,
-                type_chart=chart,
-                attacker_game_version=cast(str | None, attacker_team.get("game_version")),
-                defender_game_version=cast(str | None, defender_team.get("game_version")),
-            )
-
-            duel_rows = [
-                {
-                    "attacker_slot": int(duel.get("attacker_slot", 0) or 0),
-                    "defender_slot": int(duel.get("defender_slot", 0) or 0),
-                    "attacker_species": str(duel.get("attacker_species", "") or ""),
-                    "defender_species": str(duel.get("defender_species", "") or ""),
-                    "winner": str(duel.get("winner", "") or ""),
-                    "turns": int(duel.get("turns", 0) or 0),
-                    "attacker_remaining_hp": int(duel.get("attacker_remaining_hp", 0) or 0),
-                    "defender_remaining_hp": int(duel.get("defender_remaining_hp", 0) or 0),
-                    "attacker_move_used": str(duel.get("attacker_move_used", "") or ""),
-                    "defender_move_used": str(duel.get("defender_move_used", "") or ""),
-                }
-                for duel in cast(list[dict[str, Any]], result.get("duel_summaries", []))
+        teams_schema = T.StructType(
+            [
+                T.StructField("team_id", T.StringType(), False),
+                T.StructField("game_version", T.StringType(), True),
+                T.StructField("is_player_candidate", T.BooleanType(), False),
+                T.StructField("is_boss", T.BooleanType(), False),
             ]
+        )
+        teams_df = spark.createDataFrame(team_rows, schema=teams_schema)
 
-            yield Row(
-                team_id_attacker=str(result.get("team_id_attacker", attacker_id)),
-                team_id_defender=str(result.get("team_id_defender", defender_id)),
-                attacker_win=bool(result.get("attacker_win", False)),
-                winner_team_id=str(result.get("winner_team_id", "") or ""),
-                attacker_remaining_pokemon=int(result.get("attacker_remaining_pokemon", 0) or 0),
-                defender_remaining_pokemon=int(result.get("defender_remaining_pokemon", 0) or 0),
-                attacker_total_remaining_hp=int(result.get("attacker_total_remaining_hp", 0) or 0),
-                defender_total_remaining_hp=int(result.get("defender_total_remaining_hp", 0) or 0),
-                battle_turns=int(result.get("battle_turns", 0) or 0),
-                simulation_score=float(result.get("simulation_score", 0.0) or 0.0),
-                degraded_data=bool(result.get("degraded_data", False)),
-                warnings=[str(w) for w in cast(list[str], result.get("warnings", []))],
-                duel_summaries=duel_rows,
+        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id")
+        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id")
+
+        pairs_df = (
+            attackers_df.alias("a")
+            .crossJoin(defenders_df.alias("d"))
+            .where(F.col("a.team_id") != F.col("d.team_id"))
+            .select(
+                F.col("a.team_id").alias("attacker_id"),
+                F.col("d.team_id").alias("defender_id"),
             )
+        )
+        logger.info("[type_matchups] spark pair dataframe created (player-vs-boss)")
 
-    duel_schema = T.StructType(
-        [
-            T.StructField("attacker_slot", T.IntegerType(), False),
-            T.StructField("defender_slot", T.IntegerType(), False),
-            T.StructField("attacker_species", T.StringType(), True),
-            T.StructField("defender_species", T.StringType(), True),
-            T.StructField("winner", T.StringType(), True),
-            T.StructField("turns", T.IntegerType(), False),
-            T.StructField("attacker_remaining_hp", T.IntegerType(), False),
-            T.StructField("defender_remaining_hp", T.IntegerType(), False),
-            T.StructField("attacker_move_used", T.StringType(), True),
-            T.StructField("defender_move_used", T.StringType(), True),
+        broadcast_teams = spark.sparkContext.broadcast(team_lookup)
+        broadcast_chart = spark.sparkContext.broadcast(type_chart)
+        broadcast_pokemon = spark.sparkContext.broadcast(pokemon_profiles)
+        broadcast_moves = spark.sparkContext.broadcast(move_profiles)
+
+        def _simulate_partition(rows: Any) -> Any:
+            teams_map = cast(dict[str, dict[str, Any]], broadcast_teams.value)
+            chart = cast(dict[str, dict[str, float]], broadcast_chart.value)
+            _install_lookup_cache(
+                pokemon_profiles=cast(dict[str, dict[str, Any]], broadcast_pokemon.value),
+                move_profiles=cast(dict[str, MoveProfile], broadcast_moves.value),
+            )
+            for row in rows:
+                attacker_id = str(row.attacker_id)
+                defender_id = str(row.defender_id)
+                attacker_team = teams_map[attacker_id]
+                defender_team = teams_map[defender_id]
+
+                result = simulate_team_battle(
+                    attacker_team=attacker_team,
+                    defender_team=defender_team,
+                    type_chart=chart,
+                    attacker_game_version=cast(str | None, attacker_team.get("game_version")),
+                    defender_game_version=cast(str | None, defender_team.get("game_version")),
+                )
+
+                duel_rows = [
+                    {
+                        "attacker_slot": int(duel.get("attacker_slot", 0) or 0),
+                        "defender_slot": int(duel.get("defender_slot", 0) or 0),
+                        "attacker_species": str(duel.get("attacker_species", "") or ""),
+                        "defender_species": str(duel.get("defender_species", "") or ""),
+                        "winner": str(duel.get("winner", "") or ""),
+                        "turns": int(duel.get("turns", 0) or 0),
+                        "attacker_remaining_hp": int(duel.get("attacker_remaining_hp", 0) or 0),
+                        "defender_remaining_hp": int(duel.get("defender_remaining_hp", 0) or 0),
+                        "attacker_move_used": str(duel.get("attacker_move_used", "") or ""),
+                        "defender_move_used": str(duel.get("defender_move_used", "") or ""),
+                    }
+                    for duel in cast(list[dict[str, Any]], result.get("duel_summaries", []))
+                ]
+
+                yield Row(
+                    team_id_attacker=str(result.get("team_id_attacker", attacker_id)),
+                    team_id_defender=str(result.get("team_id_defender", defender_id)),
+                    attacker_win=bool(result.get("attacker_win", False)),
+                    winner_team_id=str(result.get("winner_team_id", "") or ""),
+                    attacker_remaining_pokemon=int(result.get("attacker_remaining_pokemon", 0) or 0),
+                    defender_remaining_pokemon=int(result.get("defender_remaining_pokemon", 0) or 0),
+                    attacker_total_remaining_hp=int(result.get("attacker_total_remaining_hp", 0) or 0),
+                    defender_total_remaining_hp=int(result.get("defender_total_remaining_hp", 0) or 0),
+                    battle_turns=int(result.get("battle_turns", 0) or 0),
+                    simulation_score=float(result.get("simulation_score", 0.0) or 0.0),
+                    degraded_data=bool(result.get("degraded_data", False)),
+                    warnings=[str(w) for w in cast(list[str], result.get("warnings", []))],
+                    duel_summaries=duel_rows,
+                )
+
+        duel_schema = T.StructType(
+            [
+                T.StructField("attacker_slot", T.IntegerType(), False),
+                T.StructField("defender_slot", T.IntegerType(), False),
+                T.StructField("attacker_species", T.StringType(), True),
+                T.StructField("defender_species", T.StringType(), True),
+                T.StructField("winner", T.StringType(), True),
+                T.StructField("turns", T.IntegerType(), False),
+                T.StructField("attacker_remaining_hp", T.IntegerType(), False),
+                T.StructField("defender_remaining_hp", T.IntegerType(), False),
+                T.StructField("attacker_move_used", T.StringType(), True),
+                T.StructField("defender_move_used", T.StringType(), True),
+            ]
+        )
+        result_schema = T.StructType(
+            [
+                T.StructField("team_id_attacker", T.StringType(), False),
+                T.StructField("team_id_defender", T.StringType(), False),
+                T.StructField("attacker_win", T.BooleanType(), False),
+                T.StructField("winner_team_id", T.StringType(), True),
+                T.StructField("attacker_remaining_pokemon", T.IntegerType(), False),
+                T.StructField("defender_remaining_pokemon", T.IntegerType(), False),
+                T.StructField("attacker_total_remaining_hp", T.IntegerType(), False),
+                T.StructField("defender_total_remaining_hp", T.IntegerType(), False),
+                T.StructField("battle_turns", T.IntegerType(), False),
+                T.StructField("simulation_score", T.DoubleType(), False),
+                T.StructField("degraded_data", T.BooleanType(), False),
+                T.StructField("warnings", T.ArrayType(T.StringType(), containsNull=False), False),
+                T.StructField("duel_summaries", T.ArrayType(duel_schema, containsNull=False), False),
+            ]
+        )
+
+        partitions = max(4, min(256, total_pairs // 2000 + 1))
+        pair_rdd = pairs_df.repartition(partitions).rdd.mapPartitions(_simulate_partition)
+        result_df = spark.createDataFrame(pair_rdd, schema=result_schema)
+        logger.info("[type_matchups] spark simulation dataframe materialized partitions=%s", partitions)
+
+        result_df = result_df.orderBy("team_id_attacker", "team_id_defender")
+        result_rows: list[dict[str, Any]] = [
+            cast(dict[str, Any], row.asDict(recursive=True))
+            for row in result_df.toLocalIterator()
         ]
-    )
-
-    result_schema = T.StructType(
-        [
-            T.StructField("team_id_attacker", T.StringType(), False),
-            T.StructField("team_id_defender", T.StringType(), False),
-            T.StructField("attacker_win", T.BooleanType(), False),
-            T.StructField("winner_team_id", T.StringType(), True),
-            T.StructField("attacker_remaining_pokemon", T.IntegerType(), False),
-            T.StructField("defender_remaining_pokemon", T.IntegerType(), False),
-            T.StructField("attacker_total_remaining_hp", T.IntegerType(), False),
-            T.StructField("defender_total_remaining_hp", T.IntegerType(), False),
-            T.StructField("battle_turns", T.IntegerType(), False),
-            T.StructField("simulation_score", T.DoubleType(), False),
-            T.StructField("degraded_data", T.BooleanType(), False),
-            T.StructField("warnings", T.ArrayType(T.StringType(), containsNull=False), False),
-            T.StructField("duel_summaries", T.ArrayType(duel_schema, containsNull=False), False),
-        ]
-    )
-
-    partitions = max(4, min(256, total_pairs // 2000 + 1))
-    pair_rdd = pairs_df.repartition(partitions).rdd.mapPartitions(_simulate_partition)
-    result_df = spark.createDataFrame(pair_rdd, schema=result_schema)
-
-    logger.info("[type_matchups] spark simulation dataframe materialized partitions=%s", partitions)
-
-    result_df = result_df.orderBy("team_id_attacker", "team_id_defender")
-    result_rows = [row.asDict(recursive=True) for row in result_df.toLocalIterator()]
-    logger.info("[type_matchups] spark engine done rows=%s", len(result_rows))
-    return result_rows
+        logger.info("[type_matchups] spark engine done rows=%s", len(result_rows))
+        return result_rows
+    finally:
+        for broadcast_var in [broadcast_teams, broadcast_chart, broadcast_pokemon, broadcast_moves]:
+            if broadcast_var is not None:
+                broadcast_var.unpersist()
+        if spark is not None:
+            spark.stop()
 
 
 def build_type_matchups(
@@ -1348,5 +1374,4 @@ def build_type_matchups(
 ) -> None:
     """Backward-compatible wrapper; now delegates to sequential battle simulations."""
     build_team_battle_simulations(teams_data=teams_data, silver_dir=silver_dir, bronze_dir=bronze_dir)
-
 

@@ -3,544 +3,555 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Walkthrough Teams</title>
+  <title>Pokemon Walkthrough Commander</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #fafafa; color: #1f2937; }
-    h1 { margin-bottom: 8px; }
-    .muted { color: #6b7280; margin-bottom: 16px; }
-    .hint { margin: 0 0 16px; padding: 10px 12px; background: #ecfeff; border: 1px solid #a5f3fc; border-radius: 8px; color: #155e75; font-size: 14px; }
-    .controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+    :root {
+      --bg: #f4f8ff;
+      --panel: #ffffff;
+      --panel-soft: #f8fbff;
+      --text: #0f172a;
+      --muted: #4b5563;
+      --line: #dbe5f5;
+      --brand: #2563eb;
+      --brand-soft: #e9f0ff;
+      --good: #047857;
+      --warn: #b45309;
+      --shadow: 0 12px 30px rgba(15, 23, 42, 0.09);
+    }
+    [data-theme="dark"] {
+      --bg: #0b1220;
+      --panel: #111b2f;
+      --panel-soft: #0f172a;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --line: #233454;
+      --brand: #60a5fa;
+      --brand-soft: #172742;
+      --good: #34d399;
+      --warn: #fbbf24;
+      --shadow: 0 16px 36px rgba(2, 8, 23, 0.4);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: radial-gradient(circle at 12% 4%, #dce8ff 0%, var(--bg) 34%);
+      color: var(--text);
+    }
+    [data-theme="dark"] body {
+      background: radial-gradient(circle at 20% 5%, #172742 0%, var(--bg) 34%);
+    }
+    .shell { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .hero {
+      background: linear-gradient(145deg, var(--panel), var(--panel-soft));
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin-bottom: 14px;
+    }
+    .hero-top { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .title { margin: 0; font-size: clamp(1.3rem, 2.8vw, 2rem); }
+    .subtitle { margin: 8px 0 0; color: var(--muted); }
+    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .badge { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 999px; padding: 6px 10px; font-size: 12px; }
+    .theme-btn {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-top: 14px;
+    }
     .control { display: flex; flex-direction: column; gap: 6px; }
-    select { padding: 8px; min-width: 220px; }
-    .card { background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
-    .title { font-weight: 700; margin-bottom: 6px; }
-    .meta { color: #374151; font-size: 14px; margin-bottom: 8px; }
-    .team { font-size: 14px; }
-    .team-choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
-    .team-choice { border: 1px solid #d1d5db; border-radius: 10px; padding: 8px 10px; background: #ffffff; cursor: pointer; }
-    .team-choice.active { border-color: #2563eb; background: #eff6ff; }
-    .team-choice-title { font-weight: 700; font-size: 13px; }
-    .team-choice-meta { font-size: 12px; color: #4b5563; margin-top: 4px; }
-    .pokemon-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 10px; }
-    .pokemon-card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; background: #fcfcff; display: flex; gap: 10px; align-items: flex-start; }
-    .sprite { width: 72px; height: 72px; image-rendering: pixelated; object-fit: contain; background: #f8fafc; border-radius: 10px; border: 1px solid #e5e7eb; flex: 0 0 auto; }
-    .pokemon-meta { min-width: 0; }
-    .pokemon-name { font-weight: 700; margin-bottom: 2px; }
-    .pokemon-moves { color: #4b5563; font-size: 12px; line-height: 1.35; word-break: break-word; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 12px; margin-right: 6px; }
-    .section { margin-top: 12px; padding-top: 8px; border-top: 1px solid #e5e7eb; }
-    .starter-box { display: flex; gap: 12px; align-items: center; padding: 10px 12px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; margin: 14px 0; }
-    .starter-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #dcfce7; color: #166534; font-size: 12px; margin-bottom: 6px; }
-    .catch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 10px; }
-    .catch-card { border: 1px solid #dbeafe; border-radius: 12px; padding: 10px; background: #f8fbff; display: flex; gap: 10px; align-items: center; }
-    .catch-meta { min-width: 0; }
-    .catch-name { font-weight: 700; }
-    .catch-score { color: #1d4ed8; font-size: 12px; }
-    .rank-card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px; background: #ffffff; margin-top: 10px; }
-    .sprite-strip { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0; }
-    .sprite-sm { width: 52px; height: 52px; image-rendering: pixelated; object-fit: contain; background: #f8fafc; border-radius: 8px; border: 1px solid #e5e7eb; flex: 0 0 auto; }
-    .sprite-label { font-size: 11px; color: #4b5563; text-align: center; max-width: 58px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .sprite-item { display: flex; flex-direction: column; align-items: center; gap: 3px; }
-    .sprite-moves { font-size: 10px; color: #6b7280; text-align: center; max-width: 96px; line-height: 1.2; }
+    .control label { font-size: 12px; color: var(--muted); font-weight: 700; }
+    .control select, .control input {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px 10px;
+      min-height: 38px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    @media (max-width: 1060px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+    .panel h2 { margin: 0 0 10px; font-size: 1rem; }
+    .timeline { max-height: 72vh; overflow: auto; padding-right: 4px; }
+    .boss-item {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+      color: var(--text);
+      border-radius: 12px;
+      text-align: left;
+      padding: 10px;
+      margin-bottom: 8px;
+      cursor: pointer;
+    }
+    .boss-item.active { border-color: var(--brand); outline: 2px solid color-mix(in oklab, var(--brand) 26%, transparent); }
+    .boss-item .small { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .kpi { border: 1px solid var(--line); border-radius: 12px; background: var(--panel-soft); padding: 10px; }
+    .kpi .label { font-size: 12px; color: var(--muted); }
+    .kpi .value { font-size: 1.05rem; font-weight: 700; margin-top: 4px; }
+    .stack { display: grid; gap: 10px; }
+    .section-title { margin: 0 0 8px; font-size: 1rem; }
+    .text-muted { color: var(--muted); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel-soft);
+      padding: 10px;
+    }
+    .sprite-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sprite-item { width: 86px; text-align: center; }
+    .sprite {
+      width: 58px;
+      height: 58px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .sprite-name { font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+    .team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+    .pill { display: inline-block; border-radius: 999px; border: 1px solid var(--line); padding: 3px 8px; font-size: 11px; margin: 0 6px 6px 0; }
+    .catch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+    .catch { display: flex; gap: 10px; align-items: center; }
+    .catch .meta { min-width: 0; }
+    .catch .name { font-weight: 700; }
+    .small { font-size: 12px; color: var(--muted); }
+    .warn { color: var(--warn); }
+    .good { color: var(--good); }
+    .empty { padding: 10px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); }
   </style>
 </head>
 <body>
-  <h1>Best Team by Boss and Version</h1>
-  <div class="muted">Walkthrough order from Silver + Monte Carlo team recommendations from Gold.</div>
-  <div class="hint">Recommendations are based on damage simulation: only naturally learned level-up moves are considered; TM/HM moves are excluded.</div>
+  <div class="shell">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <h1 class="title">Pokemon Walkthrough Commander</h1>
+          <p class="subtitle">Boss-by-boss progression with best teams, catch radar, and simulation quality checks.</p>
+        </div>
+        <button id="themeBtn" class="theme-btn" type="button">Toggle theme</button>
+      </div>
+      <div class="badge-row">
+        <span class="badge">Gold: `walkthrough_best_teams.json`</span>
+        <span class="badge">Silver: encounter references + location coverage</span>
+        <span class="badge">Simulation: level-up moves only (no TM/HM)</span>
+      </div>
+      <div class="controls">
+        <div class="control">
+          <label for="versionSelect">Version</label>
+          <select id="versionSelect"></select>
+        </div>
+        <div class="control">
+          <label for="starterSelect">Starter</label>
+          <select id="starterSelect"></select>
+        </div>
+        <div class="control">
+          <label for="bossSelect">Boss (quick jump)</label>
+          <select id="bossSelect"></select>
+        </div>
+        <div class="control">
+          <label for="searchInput">Filter catch radar</label>
+          <input id="searchInput" type="text" placeholder="Name or location" />
+        </div>
+      </div>
+    </section>
 
-  <div class="controls">
-    <div class="control">
-      <label for="versionSelect">Version</label>
-      <select id="versionSelect"></select>
-    </div>
-    <div class="control">
-      <label for="bossSelect">Boss</label>
-      <select id="bossSelect"></select>
-    </div>
-    <div class="control">
-      <label for="starterSelect">Starter</label>
-      <select id="starterSelect"></select>
-    </div>
+    <main class="layout">
+      <aside class="panel">
+        <h2>Progression Timeline</h2>
+        <div id="timeline" class="timeline"></div>
+      </aside>
+
+      <section class="stack" id="content"></section>
+    </main>
   </div>
 
-  <div id="content"></div>
-
   <script>
+    const DATA_PATH = "../data/gold/walkthrough_best_teams.json";
+    const POKEMON_REFERENCE_PATH = "../data/silver/references/pokemon_reference.json";
     const spriteCache = new Map();
     let renderToken = 0;
 
-    const DATA_PATH = "../data/gold/walkthrough_best_teams.json";
-    const POKEMON_REFERENCE_PATH = "../data/silver/references/pokemon_reference.json";
-
-    function fmtPct(value) {
-      if (value === null || value === undefined) return "-";
-      return (Number(value) * 100).toFixed(1) + "%";
+    function normName(v) { return String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+    function safeText(v) { return v === null || v === undefined ? "-" : String(v); }
+    function speciesSlug(v) { return String(v || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
+    function prettyLocation(v) { return String(v || "").split("-").filter(Boolean).map((p) => p[0].toUpperCase() + p.slice(1)).join(" "); }
+    function pct(v) { return v === null || v === undefined || Number.isNaN(Number(v)) ? "-" : `${(Number(v) * 100).toFixed(1)}%`; }
+    function pokeIdFromUrl(url) { const m = String(url || "").match(/\/pokemon\/(\d+)\/?/); return m ? Number(m[1]) : null; }
+    function spriteFromPokeId(id) { return Number.isFinite(Number(id)) && Number(id) > 0 ? `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${Number(id)}.png` : null; }
+    function placeholderSprite() {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" rx="8" fill="#dde7f6"/><text x="32" y="36" text-anchor="middle" font-size="9" fill="#64748b">n/a</text></svg>';
+      return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
     }
 
-    function normName(value) {
-      return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-    }
+    const fallbackData = {
+      versions: ["demo"],
+      starter_choices_by_version: { demo: ["Bulbasaur", "Charmander", "Squirtle"] },
+      starter_family_members_by_version: {
+        demo: {
+          Bulbasaur: ["Bulbasaur", "Ivysaur", "Venusaur"],
+          Charmander: ["Charmander", "Charmeleon", "Charizard"],
+          Squirtle: ["Squirtle", "Wartortle", "Blastoise"]
+        }
+      },
+      walkthroughs: {
+        demo: [{
+          boss_order: 1,
+          boss_name: "Brock",
+          part: 1,
+          location_count: 3,
+          boss_key: "1:brock",
+          reachable_location_pokemon: { "route-2": ["pidgey", "nidoran-m"], "viridian-forest": ["pikachu", "caterpie"] },
+          reachable_location_encounters: {
+            "viridian-forest": [{ species: "pikachu", encounter_chance_max: 5, capture_rate: 190 }]
+          },
+          recommended_team: { team_id: "demo-1", mc_win_rate: 0.72, wins: 72, n_trials: 100, avg_level: 13, win_reason: "Solid type coverage and speed advantage." },
+          boss_team: { team_id: "brock-team", pokemon: [{ name: "Geodude", pokeid: 74 }, { name: "Onix", pokeid: 95 }] },
+          top_teams: [{
+            team_id: "demo-1",
+            rank_in_boss_version: 1,
+            mc_win_rate: 0.72,
+            wins: 72,
+            n_trials: 100,
+            avg_level: 13,
+            pokemon: [{ name: "Bulbasaur", pokeid: 1 }, { name: "Pidgey", pokeid: 16 }, { name: "Pikachu", pokeid: 25 }]
+          }]
+        }]
+      }
+    };
 
-    function safeText(value) {
-      return value === null || value === undefined ? "-" : String(value);
+    function starterChoices(version, payload) { return (payload.starter_choices_by_version || {})[version] || []; }
+    function starterFamilyMembers(version, starter, payload) {
+      const byVersion = payload.starter_family_members_by_version || {};
+      return (byVersion[version] || {})[starter] || [starter];
     }
-
-    function speciesSlug(value) {
-      return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    function pokemonName(mon) { return mon && mon.name ? String(mon.name) : "unknown"; }
+    function uniqueBosses(rows) {
+      const seen = new Set();
+      const out = [];
+      (rows || []).forEach((r) => {
+        const key = r.boss_key || `${r.boss_order}:${normName(r.boss_name)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ ...r, boss_key: key });
+      });
+      return out;
     }
-
-    function extractPokeIdFromUrl(url) {
-      const match = String(url || "").match(/\/pokemon\/(\d+)\/?/);
-      return match ? Number(match[1]) : null;
+    function teamContainsStarter(team, version, starter, payload) {
+      if (!starter) return true;
+      const family = new Set(starterFamilyMembers(version, starter, payload).map(normName));
+      return (team && Array.isArray(team.pokemon) ? team.pokemon : []).some((m) => family.has(normName(pokemonName(m))));
     }
-
-    function spriteFromPokeId(pokeid) {
-      const id = Number(pokeid);
-      if (!Number.isFinite(id) || id <= 0) return null;
-      return `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${id}.png`;
+    function topTeamsForBoss(row, version, starter, payload) {
+      const byStarter = row && row.top_teams_by_starter ? row.top_teams_by_starter : null;
+      if (starter && byStarter && Array.isArray(byStarter[starter])) return byStarter[starter].slice(0, 5);
+      const raw = Array.isArray(row && row.top_teams) ? row.top_teams : [];
+      const filtered = raw.filter((team) => teamContainsStarter(team, version, starter, payload));
+      if (filtered.length) return filtered.slice(0, 5);
+      if (!starter && raw.length) return raw.slice(0, 5);
+      return row && row.recommended_team ? [row.recommended_team] : [];
+    }
+    function locationsForPokemon(pokemon, row) {
+      const map = row && row.reachable_location_pokemon ? row.reachable_location_pokemon : {};
+      const key = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+      return Object.entries(map).filter(([, list]) => Array.isArray(list) && list.some((v) => speciesSlug(v) === key)).map(([loc]) => loc);
+    }
+    function encounterStatsForPokemon(pokemon, row) {
+      const byLoc = row && row.reachable_location_encounters ? row.reachable_location_encounters : {};
+      const key = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
+      let chanceMax = null;
+      let captureRate = null;
+      Object.values(byLoc).forEach((entries) => {
+        if (!Array.isArray(entries)) return;
+        entries.forEach((e) => {
+          if (!e || speciesSlug(e.species || "") !== key) return;
+          const c = Number(e.encounter_chance_max);
+          if (Number.isFinite(c)) chanceMax = chanceMax === null ? c : Math.max(chanceMax, c);
+          const r = Number(e.capture_rate);
+          if (captureRate === null && Number.isFinite(r)) captureRate = r;
+        });
+      });
+      return { chanceMax, captureRate };
+    }
+    function rarityLabel(chanceMax) {
+      if (!Number.isFinite(Number(chanceMax))) return "Unknown";
+      if (chanceMax >= 35) return "Common";
+      if (chanceMax >= 20) return "Uncommon";
+      if (chanceMax >= 10) return "Rare";
+      return "Very rare";
+    }
+    function buildCatchRecommendations(teams, row, version, starter, payload) {
+      const starterSet = new Set((starterFamilyMembers(version, starter, payload) || []).map(normName));
+      const grouped = new Map();
+      (teams || []).forEach((team, idx) => {
+        const rank = Number(team && team.rank_in_boss_version ? team.rank_in_boss_version : idx + 1);
+        const weight = Math.max(1, 6 - rank);
+        (team && Array.isArray(team.pokemon) ? team.pokemon : []).forEach((mon) => {
+          const name = pokemonName(mon);
+          if (starterSet.has(normName(name))) return;
+          const key = mon && mon.species_slug ? `slug:${mon.species_slug}` : (mon && mon.pokeid ? `id:${mon.pokeid}` : `name:${normName(name)}`);
+          if (!grouped.has(key)) {
+            grouped.set(key, {
+              name,
+              score: 0,
+              count: 0,
+              pokeid: mon && mon.pokeid ? Number(mon.pokeid) : null,
+              sprite_url: mon && mon.sprite_url ? String(mon.sprite_url) : null,
+              locations: locationsForPokemon(mon, row),
+              encounter: encounterStatsForPokemon(mon, row)
+            });
+          }
+          const item = grouped.get(key);
+          item.score += weight;
+          item.count += 1;
+        });
+      });
+      return Array.from(grouped.values()).sort((a, b) => (b.score - a.score) || (b.count - a.count) || a.name.localeCompare(b.name)).slice(0, 12);
     }
 
     async function spriteFromReference(name, references) {
       const normalized = speciesSlug(name);
       const ref = references[normName(name)] || references[normalized];
-      const refPokeId = ref && ref.url ? extractPokeIdFromUrl(ref.url) : null;
-      const idSprite = spriteFromPokeId(refPokeId);
-      if (idSprite) {
-        return idSprite;
-      }
-
-      const pokemonUrl = (ref && ref.url) ? String(ref.url) : `https://pokeapi.co/api/v2/pokemon/${normalized}/`;
-      if (spriteCache.has(pokemonUrl)) {
-        return spriteCache.get(pokemonUrl);
-      }
-
+      const id = ref && ref.url ? pokeIdFromUrl(ref.url) : null;
+      const fixed = spriteFromPokeId(id);
+      if (fixed) return fixed;
+      const url = ref && ref.url ? String(ref.url) : `https://pokeapi.co/api/v2/pokemon/${normalized}/`;
+      if (spriteCache.has(url)) return spriteCache.get(url);
       try {
-        const response = await fetch(pokemonUrl);
-        if (!response.ok) {
-          spriteCache.set(pokemonUrl, null);
-          return null;
-        }
-        const payload = await response.json();
-        const payloadIdSprite = payload && payload.id ? spriteFromPokeId(payload.id) : null;
-        const spriteUrl = payloadIdSprite || (payload && payload.sprites ? payload.sprites.front_default : null);
-        const resolved = spriteUrl ? String(spriteUrl) : null;
-        spriteCache.set(pokemonUrl, resolved);
-        return resolved;
+        const r = await fetch(url);
+        if (!r.ok) { spriteCache.set(url, null); return null; }
+        const p = await r.json();
+        const sprite = spriteFromPokeId(p && p.id) || (p && p.sprites ? p.sprites.front_default : null);
+        spriteCache.set(url, sprite ? String(sprite) : null);
+        return spriteCache.get(url);
       } catch (_) {
-        spriteCache.set(pokemonUrl, null);
+        spriteCache.set(url, null);
         return null;
       }
     }
-
-    function placeholderSprite() {
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" rx="10" fill="#f8fafc"/><text x="36" y="40" font-size="10" text-anchor="middle" fill="#94a3b8">no sprite</text></svg>';
-      return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
-    }
-
-    function uniqueBosses(rows) {
-      const seen = new Set();
-      const result = [];
-      rows.forEach((row) => {
-        const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        result.push({ ...row, boss_key: key });
-      });
-      return result;
-    }
-
-    function starterChoices(version, payload) {
-      const mapping = payload.starter_choices_by_version || {};
-      return mapping[version] || [];
-    }
-
-    function starterFamilyMembers(version, starter, payload) {
-      const allFamilies = payload.starter_family_members_by_version || {};
-      const forVersion = allFamilies[version] || {};
-      return forVersion[starter] || [starter];
-    }
-
-    function teamStatsHtml(team) {
-      if (!team) return "<div class='team'>No team recommendation found.</div>";
-      return `
-        <div class='team'>
-          <div>
-            <span class='pill'>Win Rate ${fmtPct(team.mc_win_rate)}</span>
-            <span class='pill'>${safeText(team.wins)}/${safeText(team.n_trials)} Wins</span>
-            <span class='pill'>Avg Lv ${safeText(team.avg_level)}</span>
-          </div>
-          <div class="section">
-            <div><b>Team ID:</b> ${safeText(team.team_id)}</div>
-            <div style='margin-top:4px; color:#6b7280; font-size:13px;'>Movesets: level-up moves only, no TM/HM.</div>
-          </div>
-        </div>
-      `;
-    }
-
-    function prettyLocation(slug) {
-      return String(slug || "")
-        .split("-")
-        .filter(Boolean)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
-    }
-
-    function catchLocationsForPokemon(pokemon, row) {
-      const map = row && row.reachable_location_pokemon ? row.reachable_location_pokemon : {};
-      const name = pokemonName(pokemon);
-      const speciesKey = speciesSlug((pokemon && pokemon.species_slug) || name);
-      const results = [];
-      Object.entries(map).forEach(([location, speciesList]) => {
-        if (!Array.isArray(speciesList)) return;
-        const hasSpecies = speciesList.some((entry) => speciesSlug(entry) === speciesKey);
-        if (hasSpecies) results.push(location);
-      });
-      return results;
-    }
-
-    function encounterStatsForPokemon(pokemon, row) {
-      const byLocation = row && row.reachable_location_encounters ? row.reachable_location_encounters : {};
-      const speciesKey = speciesSlug((pokemon && pokemon.species_slug) || pokemonName(pokemon));
-      let chanceMin = null;
-      let chanceMax = null;
-      let captureRate = null;
-
-      Object.values(byLocation).forEach((encounters) => {
-        if (!Array.isArray(encounters)) return;
-        encounters.forEach((entry) => {
-          if (!entry) return;
-          const entrySpecies = speciesSlug(entry.species || "");
-          if (entrySpecies !== speciesKey) return;
-
-          const localMin = Number(entry.encounter_chance_min);
-          const localMax = Number(entry.encounter_chance_max);
-          if (Number.isFinite(localMin)) {
-            chanceMin = chanceMin === null ? localMin : Math.min(chanceMin, localMin);
-          }
-          if (Number.isFinite(localMax)) {
-            chanceMax = chanceMax === null ? localMax : Math.max(chanceMax, localMax);
-          }
-
-          const localCaptureRate = Number(entry.capture_rate);
-          if (captureRate === null && Number.isFinite(localCaptureRate)) {
-            captureRate = localCaptureRate;
-          }
-        });
-      });
-
-      return { chanceMin, chanceMax, captureRate };
-    }
-
-    function rarityLabel(chanceMax) {
-      if (chanceMax === null || chanceMax === undefined || Number.isNaN(Number(chanceMax))) return "Unknown";
-      const value = Number(chanceMax);
-      if (value >= 35) return "Common";
-      if (value >= 20) return "Uncommon";
-      if (value >= 10) return "Rare";
-      return "Very rare";
-    }
-
-    function pokemonName(pokemon) {
-      return pokemon && pokemon.name ? String(pokemon.name) : "unknown";
-    }
-
-    async function spriteUrlForPokemon(pokemon, references) {
-      const idSprite = spriteFromPokeId(pokemon && pokemon.pokeid ? pokemon.pokeid : null);
+    async function spriteFor(mon, references) {
+      const idSprite = spriteFromPokeId(mon && mon.pokeid ? mon.pokeid : null);
       if (idSprite) return idSprite;
-      const payloadSprite = pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null;
-      if (payloadSprite) return payloadSprite;
-      return await spriteFromReference(pokemonName(pokemon), references);
+      if (mon && mon.sprite_url) return String(mon.sprite_url);
+      return await spriteFromReference(pokemonName(mon), references);
+    }
+    async function spriteTile(mon, references) {
+      const sprite = (await spriteFor(mon, references)) || placeholderSprite();
+      return `<div class="sprite-item"><img class="sprite" src="${sprite}" alt="${safeText(pokemonName(mon))} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="sprite-name">${safeText(pokemonName(mon))}</div></div>`;
     }
 
-    function buildCatchRecommendations(teams, row, version, starter, payload) {
-      const byName = new Map();
-      const starterFamily = new Set((starter && starterFamilyMembers(version, starter, payload) || []).map((v) => normName(v)));
-      teams.forEach((team, idx) => {
-        const rank = Number(team && team.rank_in_boss_version ? team.rank_in_boss_version : (idx + 1));
-        const weight = Math.max(1, 6 - rank);
-        const mons = Array.isArray(team && team.pokemon) ? team.pokemon : [];
-        mons.forEach((pokemon) => {
-          const name = pokemonName(pokemon);
-          if (starterFamily.has(normName(name))) {
-            return;
-          }
-          const variantKey = pokemon && pokemon.species_slug
-            ? `slug:${pokemon.species_slug}`
-            : (pokemon && pokemon.pokeid ? `id:${pokemon.pokeid}` : `name:${normName(name)}`);
-          if (!byName.has(variantKey)) {
-            byName.set(variantKey, {
-              name,
-              count: 0,
-              score: 0,
-              pokeid: pokemon && pokemon.pokeid ? Number(pokemon.pokeid) : null,
-              species_slug: pokemon && pokemon.species_slug ? String(pokemon.species_slug) : speciesSlug(name),
-              sprite_url: pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null,
-              catch_locations: catchLocationsForPokemon(pokemon, row),
-              encounter_stats: encounterStatsForPokemon(pokemon, row),
-            });
-          }
-          const item = byName.get(variantKey);
-          item.count += 1;
-          item.score += weight;
-          if (!item.pokeid && pokemon && pokemon.pokeid) item.pokeid = Number(pokemon.pokeid);
-          if (!item.species_slug && pokemon && pokemon.species_slug) item.species_slug = String(pokemon.species_slug);
-          if (!item.sprite_url && pokemon && pokemon.sprite_url) item.sprite_url = String(pokemon.sprite_url);
-          if ((!item.catch_locations || item.catch_locations.length === 0) && pokemon) {
-            item.catch_locations = catchLocationsForPokemon(pokemon, row);
-          }
-          if ((!item.encounter_stats || item.encounter_stats.chanceMax === null) && pokemon) {
-            item.encounter_stats = encounterStatsForPokemon(pokemon, row);
-          }
-        });
-      });
-
-      return Array.from(byName.values())
-        .sort((a, b) => (b.score - a.score) || (b.count - a.count) || a.name.localeCompare(b.name))
-        .slice(0, 10);
+    function getQueryState() {
+      const p = new URLSearchParams(window.location.search);
+      return { version: p.get("version") || "", starter: p.get("starter") || "", boss: p.get("boss") || "", q: p.get("q") || "" };
+    }
+    function setQueryState(state) {
+      const p = new URLSearchParams();
+      if (state.version) p.set("version", state.version);
+      if (state.starter) p.set("starter", state.starter);
+      if (state.boss) p.set("boss", state.boss);
+      if (state.q) p.set("q", state.q);
+      history.replaceState({}, "", `${window.location.pathname}?${p.toString()}`);
     }
 
-    async function catchRecommendationHtml(rec, references) {
-      const sprite = spriteFromPokeId(rec.pokeid) || rec.sprite_url || (await spriteFromReference(rec.name, references)) || placeholderSprite();
-      const locations = Array.isArray(rec.catch_locations) ? rec.catch_locations : [];
-      const stats = rec.encounter_stats || {};
-      const rarity = rarityLabel(stats.chanceMax);
-      const shown = locations.slice(0, 3).map(prettyLocation).join(", ");
-      const locationLine = locations.length > 0
-        ? `<div class="catch-score">Catch at: ${shown}${locations.length > 3 ? ` (+${locations.length - 3} more)` : ""}</div>`
-        : `<div class="catch-score">Catch location unknown for this step.</div>`;
-      const rarityLine = `<div class="catch-score">Encounter rarity: ${rarity}${stats.chanceMax !== null && stats.chanceMax !== undefined ? ` (max chance ${safeText(stats.chanceMax)}%)` : ""}</div>`;
-      const catchRateLine = `<div class="catch-score">Catch rate: ${stats.captureRate !== null && stats.captureRate !== undefined ? safeText(stats.captureRate) : "Unknown"}</div>`;
-      return `
-        <div class="catch-card">
-          <img class="sprite" src="${sprite}" alt="${rec.name} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
-          <div class="catch-meta">
-            <div class="catch-name">${safeText(rec.name)}</div>
-            <div class="catch-score">Priority ${safeText(rec.score)} · In ${safeText(rec.count)}/5 teams</div>
-            ${locationLine}
-            ${rarityLine}
-            ${catchRateLine}
-          </div>
-        </div>
-      `;
+    function timelineHtml(rows, selectedBossKey) {
+      if (!rows.length) return "<div class='empty'>No progression data.</div>";
+      return rows.map((row) => {
+        const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
+        const active = key === selectedBossKey ? "active" : "";
+        return `<button class="boss-item ${active}" data-boss="${key}"><div><strong>#${safeText(row.boss_order)} ${safeText(row.boss_name)}</strong></div><div class="small">Part ${safeText(row.part)} ${row.location_count ? `- ${row.location_count} locations` : ""}</div></button>`;
+      }).join("");
     }
 
-    async function bossTeamHtml(bossTeam, references) {
-      if (!bossTeam) return "<div class='team'>Boss team details unavailable.</div>";
-      const strip = await teamSpriteStripHtml(bossTeam, references);
-      return `
-        <div class="rank-card">
-          <div class='title' style='margin-bottom:10px;'>Boss team you are fighting</div>
-          ${teamStatsHtml({
-            ...bossTeam,
-            mc_win_rate: null,
-            wins: null,
-            n_trials: null,
-          })}
-          <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Boss team Pokemon</div>
-            ${strip}
-          </div>
-        </div>
-      `;
-    }
-
-    async function teamSpriteStripHtml(team, references) {
-      const mons = Array.isArray(team && team.pokemon) ? team.pokemon : [];
-      if (mons.length === 0) return "<div class='team'>No Pokemon details available.</div>";
-      const parts = await Promise.all(mons.map(async (pokemon) => {
-        const sprite = (await spriteUrlForPokemon(pokemon, references)) || placeholderSprite();
-        const requiredMoves = Array.isArray(pokemon && pokemon.required_moves)
-          ? pokemon.required_moves
-          : (Array.isArray(pokemon && pokemon.moves) ? pokemon.moves : []);
-        const movesPreview = requiredMoves.slice(0, 2).join(", ");
-        return `
-          <div class="sprite-item">
-            <img class="sprite-sm" src="${sprite}" alt="${pokemonName(pokemon)} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
-            <div class="sprite-label">${safeText(pokemonName(pokemon))}</div>
-            <div class="sprite-moves">${movesPreview ? `Req: ${safeText(movesPreview)}` : "Req moves n/a"}</div>
-          </div>
-        `;
-      }));
-      return `<div class="sprite-strip">${parts.join("")}</div>`;
-    }
-
-    async function rankedTeamHtml(team, idx, references) {
-      const spriteStrip = await teamSpriteStripHtml(team, references);
-      const rank = safeText(team && team.rank_in_boss_version ? team.rank_in_boss_version : (idx + 1));
-      return `
-        <div class="rank-card">
-          <div class='title' style='margin-bottom:10px;'>Rank #${rank}</div>
-          ${teamStatsHtml(team)}
-          <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Recommended Team (Sprite Overview)</div>
-            ${spriteStrip}
-          </div>
-        </div>
-      `;
-    }
-
-    function teamContainsStarterFamily(team, version, starter, payload) {
-      if (!team || !starter) return true;
-      const familyMembers = new Set(starterFamilyMembers(version, starter, payload).map((m) => normName(m)));
-      const mons = Array.isArray(team.pokemon) ? team.pokemon : [];
-      return mons.some((mon) => familyMembers.has(normName(mon && mon.name ? mon.name : "")));
-    }
-
-    function topTeamsForBoss(row, version, starter, payload) {
-      const byStarter = row && row.top_teams_by_starter ? row.top_teams_by_starter : null;
-      if (starter && byStarter && Array.isArray(byStarter[starter])) {
-        return byStarter[starter].slice(0, 5);
-      }
-      const rawTop = Array.isArray(row.top_teams) ? row.top_teams : [];
-      const filtered = rawTop.filter((team) => teamContainsStarterFamily(team, version, starter, payload));
-      if (filtered.length > 0) return filtered.slice(0, 5);
-      if (!starter && rawTop.length > 0) return rawTop.slice(0, 5);
-      return (!starter && row.recommended_team) ? [row.recommended_team] : [];
-    }
-
-    async function pokemonCardHtml(pokemon, references) {
-      const payloadSprite = pokemon && pokemon.sprite_url ? String(pokemon.sprite_url) : null;
-      const sprite = payloadSprite || (await spriteFromReference(pokemon.name, references));
-      const moves = Array.isArray(pokemon.moves) ? pokemon.moves : [];
-      const movesText = moves.map((m) => (m && m.name ? m.name : m)).filter(Boolean).join(", ");
-      const fallbackSprite = placeholderSprite();
-      return `
-        <div class="pokemon-card">
-          <img class="sprite" src="${sprite || fallbackSprite}" alt="${pokemon.name} Sprite" onerror="this.onerror=null;this.src='${fallbackSprite}'" />
-          <div class="pokemon-meta">
-            <div class="pokemon-name">${pokemon.name}</div>
-            <div class="pokemon-moves">Lv ${safeText(pokemon.level)}${movesText ? `<br/>${movesText}` : ''}</div>
-          </div>
-        </div>
-      `;
-    }
-
-    async function starterBoxHtml(starter, references) {
-      if (!starter) return "";
-      const sprite = (await spriteFromReference(starter, references)) || placeholderSprite();
-      return `
-        <div class="starter-box">
-          <img class="sprite" src="${sprite}" alt="${starter} Sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'" />
-          <div>
-            <div class="starter-badge">Starter locked for this walkthrough</div>
-            <div class="pokemon-name">${starter}</div>
-            <div class="pokemon-moves">Chosen once and reused consistently for this version.</div>
-          </div>
-        </div>
-      `;
-    }
-
-    async function render(version, bossKey, starter, data, references) {
-      const currentToken = ++renderToken;
-      const container = document.getElementById("content");
+    async function render(data, references) {
+      const token = ++renderToken;
+      const version = document.getElementById("versionSelect").value;
+      const starter = document.getElementById("starterSelect").value;
+      const bossKey = document.getElementById("bossSelect").value;
+      const query = normName(document.getElementById("searchInput").value);
       const rows = uniqueBosses((data.walkthroughs && data.walkthroughs[version]) || []);
-      const selected = bossKey ? rows.find((row) => (row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`) === bossKey) : rows[0];
+      const selected = rows.find((r) => (r.boss_key || `${r.boss_order}:${normName(r.boss_name)}`) === bossKey) || rows[0];
 
+      document.getElementById("timeline").innerHTML = timelineHtml(rows, selected ? selected.boss_key : "");
+      setQueryState({ version, starter, boss: selected ? selected.boss_key : "", q: document.getElementById("searchInput").value.trim() });
+
+      const container = document.getElementById("content");
       if (!selected) {
-        container.innerHTML = "<div class='card'>No boss data found for the selected version.</div>";
+        container.innerHTML = "<div class='panel'><div class='empty'>No boss data found for the selected version.</div></div>";
         return;
       }
 
       const teams = topTeamsForBoss(selected, version, starter, data);
-      const recommendations = buildCatchRecommendations(teams, selected, version, starter, data);
-      const recommendationsHtml = recommendations.length > 0
-        ? (await Promise.all(recommendations.map((rec) => catchRecommendationHtml(rec, references)))).join("")
-        : "<div class='team'>No catch recommendations available.</div>";
-      const rankedTeamsHtml = teams.length > 0
-        ? (await Promise.all(teams.map((team, idx) => rankedTeamHtml(team, idx, references)))).join("")
-        : "<div class='team'>No team rankings found.</div>";
-      const starterBox = await starterBoxHtml(starter, references);
-      const bossTeamSection = await bossTeamHtml(selected.boss_team, references);
-      const reasonText = selected.recommended_team && selected.recommended_team.win_reason
-        ? String(selected.recommended_team.win_reason)
-        : "Selected by top simulation performance against the boss team.";
+      const recs = buildCatchRecommendations(teams, selected, version, starter, data).filter((r) => {
+        if (!query) return true;
+        const inName = normName(r.name).includes(query);
+        const inLoc = (r.locations || []).some((loc) => normName(loc).includes(query));
+        return inName || inLoc;
+      });
+      const topTeam = teams[0] || selected.recommended_team || null;
 
-      if (currentToken !== renderToken) {
-        return;
-      }
+      const bossMons = selected.boss_team && Array.isArray(selected.boss_team.pokemon) ? selected.boss_team.pokemon : [];
+      const bossStrip = (await Promise.all(bossMons.map((m) => spriteTile(m, references)))).join("") || "<div class='empty'>Boss team unavailable.</div>";
+      const teamCards = teams.length
+        ? (await Promise.all(teams.map(async (t, idx) => {
+          const mons = Array.isArray(t && t.pokemon) ? t.pokemon : [];
+          const strip = (await Promise.all(mons.map((m) => spriteTile(m, references)))).join("");
+          return `<article class="card"><h3 class="section-title">Rank #${safeText(t.rank_in_boss_version || idx + 1)}</h3><div><span class="pill">Win ${pct(t.mc_win_rate)}</span><span class="pill">${safeText(t.wins)}/${safeText(t.n_trials)} wins</span><span class="pill">Avg Lv ${safeText(t.avg_level)}</span></div><div class="sprite-row">${strip || "<div class='empty'>No mons in team.</div>"}</div></article>`;
+        }))).join("")
+        : "<div class='empty'>No ranked teams available.</div>";
+      const catchCards = recs.length
+        ? (await Promise.all(recs.map(async (r) => {
+          const sprite = spriteFromPokeId(r.pokeid) || r.sprite_url || (await spriteFromReference(r.name, references)) || placeholderSprite();
+          const locLabel = (r.locations || []).slice(0, 2).map(prettyLocation).join(", ");
+          return `<article class="card catch"><img class="sprite" src="${sprite}" alt="${safeText(r.name)} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="meta"><div class="name">${safeText(r.name)}</div><div class="small">Priority ${safeText(r.score)} | In ${safeText(r.count)}/5 teams</div><div class="small">${locLabel ? `Catch: ${locLabel}${r.locations.length > 2 ? ` (+${r.locations.length - 2})` : ""}` : "Catch location unknown"}</div><div class="small ${r.encounter && Number.isFinite(r.encounter.chanceMax) && r.encounter.chanceMax >= 20 ? "good" : "warn"}">Rarity: ${rarityLabel(r.encounter ? r.encounter.chanceMax : null)}${r.encounter && Number.isFinite(r.encounter.chanceMax) ? ` (${r.encounter.chanceMax}% max)` : ""}</div></div></article>`;
+        }))).join("")
+        : "<div class='empty'>No catch recommendations match this filter.</div>";
+
+      if (token !== renderToken) return;
 
       container.innerHTML = `
-        <div class='card'>
-          <div class='title'>#${safeText(selected.boss_order)} - ${safeText(selected.boss_name)}</div>
-          <div class='meta'>Part ${safeText(selected.part)}${selected.location_count ? ` · Reachable Locations: ${selected.location_count}` : ""}</div>
-          ${starterBox}
-          <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Why this recommendation can win</div>
-            <div class='team'>${safeText(reasonText)}</div>
+        <section class="panel">
+          <div class="kpis">
+            <div class="kpi"><div class="label">Selected Boss</div><div class="value">#${safeText(selected.boss_order)} ${safeText(selected.boss_name)}</div></div>
+            <div class="kpi"><div class="label">Part / Locations</div><div class="value">${safeText(selected.part)} / ${safeText(selected.location_count || 0)}</div></div>
+            <div class="kpi"><div class="label">Top Win Rate</div><div class="value">${pct(topTeam && topTeam.mc_win_rate)}</div></div>
+            <div class="kpi"><div class="label">Starter Lock</div><div class="value">${safeText(starter || "Any")}</div></div>
           </div>
-          <div class="section">
-            ${bossTeamSection}
+          <article class="card">
+            <h2 class="section-title">Battle Briefing</h2>
+            <p class="text-muted">${safeText(selected.recommended_team && selected.recommended_team.win_reason ? selected.recommended_team.win_reason : "Best simulation output under current constraints.")}</p>
+          </article>
+          <article class="card">
+            <h2 class="section-title">Boss Team</h2>
+            <div class="sprite-row">${bossStrip}</div>
+          </article>
+        </section>
+
+        <section class="panel">
+          <h2>Top Team Matrix</h2>
+          <div class="team-grid">${teamCards}</div>
+        </section>
+
+        <section class="panel">
+          <h2>Catch Radar</h2>
+          <div class="small" style="margin-bottom:8px;">Optimized by team frequency and rank weight.</div>
+          <div class="catch-grid">${catchCards}</div>
+        </section>
+
+        <section class="panel">
+          <h2>Data Quality Snapshot</h2>
+          <div class="card">
+            <div class="small">Reachable locations mapped: <strong>${safeText(Object.keys(selected.reachable_location_pokemon || {}).length)}</strong></div>
+            <div class="small">Encounter tables available: <strong>${safeText(Object.keys(selected.reachable_location_encounters || {}).length)}</strong></div>
+            <div class="small">Teams displayed: <strong>${safeText(teams.length)}</strong></div>
           </div>
-          <div class="section">
-            <div class='title' style='margin-bottom:10px;'>What should I catch? (sprite-first view)</div>
-            <div class='catch-grid'>${recommendationsHtml}</div>
-          </div>
-          <div class="section">
-            <div class='title' style='margin-bottom:10px;'>Top 5 teams per starter, boss, and game</div>
-            ${rankedTeamsHtml}
-          </div>
-        </div>
+        </section>
       `;
+
+      document.querySelectorAll(".boss-item").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.getElementById("bossSelect").value = btn.dataset.boss;
+          void render(data, references);
+        });
+      });
+    }
+
+    function refreshBossSelect(data) {
+      const version = document.getElementById("versionSelect").value;
+      const rows = uniqueBosses((data.walkthroughs && data.walkthroughs[version]) || []);
+      document.getElementById("bossSelect").innerHTML = rows.map((row) => `<option value="${row.boss_key}">#${safeText(row.boss_order)} - ${safeText(row.boss_name)}</option>`).join("");
+    }
+    function refreshStarterSelect(data) {
+      const version = document.getElementById("versionSelect").value;
+      const starters = starterChoices(version, data);
+      document.getElementById("starterSelect").innerHTML = starters.map((s) => `<option value="${s}">${s}</option>`).join("");
     }
 
     async function boot() {
-      const [response, refResponse] = await Promise.all([fetch(DATA_PATH), fetch(POKEMON_REFERENCE_PATH)]);
-      if (!response.ok) {
-        document.getElementById("content").innerHTML = "Error: walkthrough_best_teams.json not found. Please rebuild the Gold layer.";
-        return;
-      }
-      const data = await response.json();
-      const references = refResponse.ok ? await refResponse.json() : {};
-      const select = document.getElementById("versionSelect");
-      const bossSelect = document.getElementById("bossSelect");
-      const starterSelect = document.getElementById("starterSelect");
-      const versions = data.versions || [];
-      select.innerHTML = versions.map(v => `<option value='${v}'>${v}</option>`).join("");
+      let data = fallbackData;
+      let references = {};
+      let usedFallback = true;
+      const state = getQueryState();
 
-      function refreshStarters(version, preferredStarter = null) {
-          const starters = starterChoices(version, data);
-        starterSelect.innerHTML = starters.map((starter) => `<option value='${starter}'>${starter}</option>`).join("");
-        if (preferredStarter && starters.includes(preferredStarter)) {
-          starterSelect.value = preferredStarter;
+      try {
+        const [d, r] = await Promise.all([fetch(DATA_PATH), fetch(POKEMON_REFERENCE_PATH)]);
+        if (d.ok) {
+          const payload = await d.json();
+          if (payload && Array.isArray(payload.versions) && payload.versions.length > 0) {
+            data = payload;
+            usedFallback = false;
+          }
         }
-        if (!starterSelect.value && starters.length > 0) {
-          starterSelect.value = starters[0];
-        }
+        if (r.ok) references = await r.json();
+      } catch (_) {
+        usedFallback = true;
       }
 
-      function refreshBosses(version, preferredBossKey = null) {
-        const rows = uniqueBosses((data.walkthroughs && data.walkthroughs[version]) || []);
-        bossSelect.innerHTML = rows.map((row) => {
-          const key = row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`;
-          return `<option value='${key}'>#${safeText(row.boss_order)} - ${safeText(row.boss_name)}</option>`;
-        }).join("");
-        if (preferredBossKey && rows.some((row) => (row.boss_key || `${row.boss_order}:${normName(row.boss_name)}`) === preferredBossKey)) {
-          bossSelect.value = preferredBossKey;
-        }
-        if (!bossSelect.value && rows.length > 0) {
-          bossSelect.value = rows[0].boss_key || `${rows[0].boss_order}:${normName(rows[0].boss_name)}`;
-        }
+      document.getElementById("versionSelect").innerHTML = (data.versions || []).map((v) => `<option value="${v}">${v}</option>`).join("");
+      if (state.version && (data.versions || []).includes(state.version)) {
+        document.getElementById("versionSelect").value = state.version;
+      }
+      refreshStarterSelect(data);
+      if (state.starter) document.getElementById("starterSelect").value = state.starter;
+      refreshBossSelect(data);
+      if (state.boss) document.getElementById("bossSelect").value = state.boss;
+      if (state.q) document.getElementById("searchInput").value = state.q;
+
+      if (usedFallback) {
+        const el = document.createElement("div");
+        el.className = "panel";
+        el.innerHTML = "<div class='small warn'>Live Gold payload not found. Showing demo data so the UI still works.</div>";
+        document.querySelector(".shell").insertBefore(el, document.querySelector("main"));
       }
 
-      if (versions.length > 0) {
-        refreshStarters(versions[0]);
-        refreshBosses(versions[0]);
-        void render(versions[0], bossSelect.value, starterSelect.value, data, references);
-      }
-
-      select.addEventListener("change", () => {
-        refreshStarters(select.value);
-        refreshBosses(select.value);
-        void render(select.value, bossSelect.value, starterSelect.value, data, references);
+      document.getElementById("versionSelect").addEventListener("change", () => {
+        refreshStarterSelect(data);
+        refreshBossSelect(data);
+        void render(data, references);
+      });
+      document.getElementById("starterSelect").addEventListener("change", () => void render(data, references));
+      document.getElementById("bossSelect").addEventListener("change", () => void render(data, references));
+      document.getElementById("searchInput").addEventListener("input", () => void render(data, references));
+      document.getElementById("themeBtn").addEventListener("click", () => {
+        const current = document.documentElement.getAttribute("data-theme") || "light";
+        const next = current === "dark" ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", next);
+        localStorage.setItem("walkthrough-theme", next);
       });
 
-      bossSelect.addEventListener("change", () => void render(select.value, bossSelect.value, starterSelect.value, data, references));
-      starterSelect.addEventListener("change", () => void render(select.value, bossSelect.value, starterSelect.value, data, references));
+      const savedTheme = localStorage.getItem("walkthrough-theme");
+      if (savedTheme === "dark" || savedTheme === "light") document.documentElement.setAttribute("data-theme", savedTheme);
+      await render(data, references);
     }
 
     boot().catch((err) => {
-      document.getElementById("content").innerText = "Load error: " + err;
+      document.getElementById("content").innerHTML = `<section class="panel"><div class="empty">Load error: ${safeText(err)}</div></section>`;
     });
   </script>
 </body>
