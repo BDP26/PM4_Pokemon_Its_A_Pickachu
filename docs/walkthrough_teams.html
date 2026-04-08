@@ -170,6 +170,8 @@
     .catch { display: flex; gap: 10px; align-items: center; }
     .catch .meta { min-width: 0; }
     .catch .name { font-weight: 700; }
+    .catch details { margin-top: 6px; }
+    .catch summary { cursor: pointer; color: var(--brand); font-size: 12px; }
     .small { font-size: 12px; color: var(--muted); }
     .warn { color: var(--warn); }
     .good { color: var(--good); }
@@ -393,28 +395,56 @@
         );
       }
 
-       let chanceMax = null;
-       let captureRate = null;
-       Object.values(byLoc).forEach((entries) => {
-         if (!Array.isArray(entries)) return;
-         entries.forEach((e) => {
-           if (!e || !speciesMatches(e.species || "")) return;
-           const c = Number(e.encounter_chance_max);
-           if (Number.isFinite(c)) chanceMax = chanceMax === null ? c : Math.max(chanceMax, c);
-           const r = Number(e.capture_rate);
-           if (captureRate === null && Number.isFinite(r)) captureRate = r;
-         });
-       });
-       return { chanceMax, captureRate };
-     }
-     function rarityLabel(chanceMax) {
+      let chanceMax = null;
+      let captureRate = null;
+      let levelMin = null;
+      let levelMax = null;
+      const methodsSet = new Set();
+      Object.values(byLoc).forEach((entries) => {
+        if (!Array.isArray(entries)) return;
+        entries.forEach((e) => {
+          if (!e || !speciesMatches(e.species || "")) return;
+          const c = Number(e.encounter_chance_max);
+          if (Number.isFinite(c)) chanceMax = chanceMax === null ? c : Math.max(chanceMax, c);
+          const r = Number(e.capture_rate);
+          if (captureRate === null && Number.isFinite(r)) captureRate = r;
+
+          const minLevel = Number(e.level_min);
+          const maxLevel = Number(e.level_max);
+          if (Number.isFinite(minLevel)) levelMin = levelMin === null ? minLevel : Math.min(levelMin, minLevel);
+          if (Number.isFinite(maxLevel)) levelMax = levelMax === null ? maxLevel : Math.max(levelMax, maxLevel);
+
+          const methods = Array.isArray(e.encounter_methods) ? e.encounter_methods : [];
+          methods.forEach((method) => {
+            const normalized = String(method || "").trim().toLowerCase();
+            if (normalized) methodsSet.add(normalized);
+          });
+        });
+      });
+      return {
+        chanceMax,
+        captureRate,
+        levelMin,
+        levelMax,
+        methods: Array.from(methodsSet).sort(),
+      };
+    }
+    function rarityLabel(chanceMax) {
       const value = Number(chanceMax);
       if (!Number.isFinite(value) || value <= 0) return "Unknown";
       if (value >= 35) return "Common";
       if (value >= 20) return "Uncommon";
       if (value >= 10) return "Rare";
       return "Very rare";
-     }
+    }
+
+    function rarityFromCoverage(locationCount) {
+      const n = Number(locationCount || 0);
+      if (n >= 4) return "Common";
+      if (n >= 2) return "Uncommon";
+      if (n >= 1) return "Rare";
+      return "Unknown";
+    }
     function buildCatchRecommendations(teams, row, version, starter, payload) {
       const starterSet = new Set((starterFamilyMembers(version, starter, payload) || []).map(normName));
       const grouped = new Map();
@@ -551,9 +581,10 @@
         ? (await Promise.all(recs.map(async (r) => {
           const sprite = spriteFromPokeId(r.pokeid) || r.sprite_url || (await spriteFromReference(r.name, references)) || placeholderSprite();
           const locLabel = (r.locations || []).slice(0, 2).map(prettyLocation).join(", ");
+          const allLocationsLabel = (r.locations || []).map(prettyLocation).join(", ");
           const reachableLocations = Object.keys(selected.reachable_location_pokemon || {});
           const possibleLocLabel = reachableLocations.slice(0, 2).map(prettyLocation).join(", ");
-           const locationText = locLabel
+          const locationText = locLabel
             ? `Catch: ${locLabel}${r.locations.length > 2 ? ` (+${r.locations.length - 2})` : ""}`
             : (
               reachableLocations.length
@@ -562,7 +593,19 @@
             );
           const chance = Number(r.encounter ? r.encounter.chanceMax : null);
           const hasChance = Number.isFinite(chance) && chance > 0;
-          return `<article class="card catch"><img class="sprite" src="${sprite}" alt="${safeText(r.name)} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="meta"><div class="name">${safeText(r.name)}</div><div class="small">${locationText}</div><div class="small">Priority ${safeText(r.score)} | In ${safeText(r.count)}/5 teams</div><div class="small ${hasChance && chance >= 20 ? "good" : "warn"}">Rarity: ${rarityLabel(r.encounter ? r.encounter.chanceMax : null)}${hasChance ? ` (${chance}% max)` : ""}</div></div></article>`;
+          const rarity = hasChance ? rarityLabel(chance) : rarityFromCoverage((r.locations || []).length);
+          const rarityDetail = hasChance ? ` (${chance}% max)` : ` (by coverage: ${(r.locations || []).length} locations)`;
+          const methods = Array.isArray(r.encounter && r.encounter.methods) ? r.encounter.methods : [];
+          const methodsLabel = methods.length ? methods.join(", ") : "unknown";
+          const levelMin = Number(r.encounter && r.encounter.levelMin);
+          const levelMax = Number(r.encounter && r.encounter.levelMax);
+          const hasLevel = Number.isFinite(levelMin) || Number.isFinite(levelMax);
+          const levelLabel = hasLevel
+            ? `${Number.isFinite(levelMin) ? levelMin : "?"}-${Number.isFinite(levelMax) ? levelMax : "?"}`
+            : "unknown";
+          const captureRate = Number(r.encounter && r.encounter.captureRate);
+          const captureLabel = Number.isFinite(captureRate) ? String(captureRate) : "unknown";
+          return `<article class="card catch"><img class="sprite" src="${sprite}" alt="${safeText(r.name)} sprite" onerror="this.onerror=null;this.src='${placeholderSprite()}'"/><div class="meta"><div class="name">${safeText(r.name)}</div><div class="small">${locationText}</div><div class="small">Priority ${safeText(r.score)} | In ${safeText(r.count)}/5 teams</div><div class="small ${rarity === "Common" || rarity === "Uncommon" ? "good" : "warn"}">Rarity: ${rarity}${rarityDetail}</div><details><summary>Show catch details</summary><div class="small">Where: ${allLocationsLabel || "unknown"}</div><div class="small">Methods: ${safeText(methodsLabel)}</div><div class="small">Level range: ${safeText(levelLabel)}</div><div class="small">Capture rate: ${safeText(captureLabel)}</div></details></div></article>`;
         }))).join("")
         : "<div class='empty'>No catch recommendations match this filter.</div>";
 
@@ -589,21 +632,21 @@
         <section class="panel">
           <div class="panel-title">
             <div>
-              <h2>Catch Radar</h2>
-              <p>Priorisiert nach Team-Haufigkeit, Boss-Rang und Verfugbarkeit.</p>
-            </div>
-          </div>
-          <div class="catch-grid">${catchCards}</div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <div>
               <h2>Top Team Matrix</h2>
               <p>Top 5 Teams fur den gewahlten Boss und Starter-Filter.</p>
             </div>
           </div>
           <div class="team-grid">${teamCards}</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>Catch Radar</h2>
+              <p>Priorisiert nach Team-Haufigkeit, Boss-Rang und Verfugbarkeit. Aufklappen fur Fang-Details.</p>
+            </div>
+          </div>
+          <div class="catch-grid">${catchCards}</div>
         </section>
 
         <section class="panel">
