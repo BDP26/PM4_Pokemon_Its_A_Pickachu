@@ -46,7 +46,6 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame]) -> Valida
     bosses = tables.get("bosses", pd.DataFrame())
     locations = tables.get("locations", pd.DataFrame())
     encounters = tables.get("encounters", pd.DataFrame())
-    snapshot_available = tables.get("snapshot_available_pokemon", pd.DataFrame())
     teams = tables.get("teams", pd.DataFrame())
     team_members = tables.get("team_members", pd.DataFrame())
     team_member_moves = tables.get("team_member_moves", pd.DataFrame())
@@ -100,17 +99,6 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame]) -> Valida
                 detail="encounters.game references unknown games.game_version",
                 count=len(invalid),
             )
-
-    if not snapshot_available.empty:
-        invalid_games = [v for v in _series_set(snapshot_available, "game_version") if v and v not in game_versions]
-        invalid_boss = [v for v in _series_set(snapshot_available, "boss_id") if v and v not in boss_ids]
-        invalid_locations = [v for v in _series_set(snapshot_available, "first_available_location_id") if v and v not in location_ids]
-        if invalid_games:
-            _append_issue(issues, level="error", code="FK_SNAPSHOT_GAME", table="snapshot_available_pokemon", detail="unknown game_version", count=len(invalid_games))
-        if invalid_boss:
-            _append_issue(issues, level="error", code="FK_SNAPSHOT_BOSS", table="snapshot_available_pokemon", detail="unknown boss_id", count=len(invalid_boss))
-        if invalid_locations:
-            _append_issue(issues, level="warning", code="FK_SNAPSHOT_LOCATION", table="snapshot_available_pokemon", detail="unknown first_available_location_id", count=len(invalid_locations))
 
     if not teams.empty:
         invalid = [v for v in _series_set(teams, "game_version") if v and v not in game_versions]

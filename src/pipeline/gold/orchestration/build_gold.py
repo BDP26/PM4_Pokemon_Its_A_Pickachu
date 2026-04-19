@@ -34,7 +34,6 @@ _REQUIRED_MANIFEST_DATASET_FILES = (
     "team_members",
     "team_member_moves",
     "pokemon_reference",
-    "snapshot_available_pokemon",
     "encounters",
 )
 

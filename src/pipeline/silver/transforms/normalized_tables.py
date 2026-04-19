@@ -118,47 +118,6 @@ def build_locations_table(
 
     return sorted(rows_by_id.values(), key=lambda row: (row["game_version"], row["location_id"]))
 
-
-def build_snapshot_available_pokemon_table(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for record in records:
-        snapshot = BossSnapshotContract.from_record(record)
-        location_encounters = record.get("reachable_location_encounters", {})
-        if not isinstance(location_encounters, dict):
-            continue
-
-        for location_slug, encounter_rows in location_encounters.items():
-            if not isinstance(encounter_rows, list):
-                continue
-            for encounter in encounter_rows:
-                if not isinstance(encounter, dict):
-                    continue
-                species = normalize_key_part(encounter.get("species"))
-                if not species:
-                    continue
-                dedupe_key = (snapshot.snapshot_id, species)
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                methods = encounter.get("encounter_methods") or []
-                rows.append(
-                    {
-                        "snapshot_id": snapshot.snapshot_id,
-                        "game_version": snapshot.version,
-                        "boss_id": snapshot.boss_id,
-                        "pokemon_species": species,
-                        "first_available_location_id": f"{snapshot.version}:{normalize_key_part(location_slug)}",
-                        "encounter_method": methods[0] if methods else None,
-                        "min_level": encounter.get("level_min"),
-                        "max_level": encounter.get("level_max"),
-                    }
-                )
-
-    return rows
-
-
 def build_team_members_table(teams: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for team in teams:
@@ -281,7 +240,10 @@ def build_learnable_moves_table(move_data: dict[str, Any]) -> list[dict[str, Any
             continue
         game_version = str(payload.get("game_version") or "").strip().lower()
         species = normalize_key_part(payload.get("species"))
-        for move_name in payload.get("learnable_moves", []):
+        move_levels_raw = payload.get("learnable_move_levels")
+        move_levels = move_levels_raw if isinstance(move_levels_raw, dict) else {}
+        move_names = move_levels.keys() if move_levels else payload.get("learnable_moves", [])
+        for move_name in move_names:
             move_norm = normalize_key_part(move_name)
             if not game_version or not species or not move_norm:
                 continue
@@ -289,12 +251,17 @@ def build_learnable_moves_table(move_data: dict[str, Any]) -> list[dict[str, Any
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
+            learned_level_raw = move_levels.get(move_name)
+            try:
+                learned_level = int(learned_level_raw or 0)
+            except (TypeError, ValueError):
+                learned_level = 0
             rows.append(
                 {
                     "game_version": game_version,
                     "pokemon_species": species,
                     "move_name": move_norm,
-                    "learned_level": None,
+                    "learned_level": learned_level if learned_level > 0 else 1,
                     "learn_method": "level-up",
                 }
             )

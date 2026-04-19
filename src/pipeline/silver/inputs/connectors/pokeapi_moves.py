@@ -31,6 +31,15 @@ _BOOTSTRAP_MOVE_FALLBACK_ENABLED = False
 _BOOTSTRAP_LEARNABLE_FALLBACK_ENABLED = False
 
 
+def _normalize_learned_level(raw_level: Any) -> int:
+    """Normalize API/parquet learned level; treat null/0 as level 1."""
+    try:
+        level = int(raw_level or 0)
+    except (TypeError, ValueError):
+        level = 0
+    return level if level > 0 else 1
+
+
 def _normalize_species_slug(species: str) -> str:
     normalized = str(species).strip().lower().replace(".", " ").replace("_", " ")
     normalized = " ".join(normalized.split())
@@ -112,8 +121,7 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
             move_name = _normalize_move_name(row.get("move_name"))
             if not game_version or not species or not move_name:
                 continue
-            learned_level_raw = row.get("learned_level")
-            learned_level = int(learned_level_raw or 0) if str(learned_level_raw).strip() else 0
+            learned_level = _normalize_learned_level(row.get("learned_level"))
             slot = grouped.setdefault((game_version, species), {})
             slot[move_name] = min(slot.get(move_name, learned_level), learned_level)
 
@@ -165,18 +173,40 @@ def _learnable_moves_for_species(species: str, level: int, game_version: str) ->
         return cached
 
     level_cap = int(level)
-    move_levels = _LEARNABLE_BY_GAME_SPECIES.get((game_version_norm, species_slug))
+    move_levels = _learnable_move_levels_for_species(species_slug, game_version_norm)
     if move_levels:
-        filtered = tuple(sorted(move for move, learned_level in move_levels.items() if learned_level <= 0 or learned_level <= level_cap))
+        filtered = tuple(sorted(move for move, learned_level in move_levels.items() if learned_level <= level_cap))
         _LEARNABLE_CACHE[cache_key] = filtered
         return filtered
 
-    if not _BOOTSTRAP_LEARNABLE_FALLBACK_ENABLED:
-        _LEARNABLE_CACHE[cache_key] = ()
-        return ()
+    result: tuple[str, ...] = ()
+    _LEARNABLE_CACHE[cache_key] = result
+    return result
 
-    # First-run bootstrap: allow API lookup only until parquet references exist.
+
+def _learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
+    """Return all level-up learnable moves with learned levels for one game version."""
+    _ensure_parquet_cache_loaded()
+
+    species_slug = _normalize_species_slug(species)
+    game_version_norm = str(game_version).lower().strip()
+    cached_levels = _LEARNABLE_BY_GAME_SPECIES.get((game_version_norm, species_slug))
     version_group = GAME_TO_VERSION_GROUP.get(game_version_norm, game_version_norm)
+
+    # Always short-circuit when this exact species+game was already resolved.
+    if cached_levels is not None:
+        return dict(cached_levels)
+
+    # Reuse existing species data from a sibling game in the same version group.
+    for (known_game, known_species), known_levels in _LEARNABLE_BY_GAME_SPECIES.items():
+        if known_species != species_slug:
+            continue
+        known_group = GAME_TO_VERSION_GROUP.get(known_game, known_game)
+        if known_group != version_group:
+            continue
+        _LEARNABLE_BY_GAME_SPECIES[(game_version_norm, species_slug)] = dict(known_levels)
+        return dict(known_levels)
+
     resolved_poke = None
     for candidate in _species_lookup_candidates(species_slug):
         try:
@@ -186,8 +216,10 @@ def _learnable_moves_for_species(species: str, level: int, game_version: str) ->
             continue
 
     if resolved_poke is None:
-        _LEARNABLE_CACHE[cache_key] = ()
-        return ()
+        if cached_levels is not None:
+            return dict(cached_levels)
+        _LEARNABLE_BY_GAME_SPECIES[(game_version_norm, species_slug)] = {}
+        return {}
 
     discovered: dict[str, int] = {}
     for move_slot in getattr(resolved_poke, "moves", []):
@@ -195,21 +227,22 @@ def _learnable_moves_for_species(species: str, level: int, game_version: str) ->
         if not move_name:
             continue
         for detail in getattr(move_slot, "version_group_details", []):
-            learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "")
-            if learn_method != "level-up":
-                continue
-            learned_at = int(getattr(detail, "level_learned_at", 0) or 0)
-            if learned_at > level_cap:
-                continue
-            detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "")
+            detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "").strip().lower()
             if detail_group != version_group:
                 continue
+            learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "").strip().lower()
+            if learn_method != "level-up":
+                continue
+            learned_at = _normalize_learned_level(getattr(detail, "level_learned_at", None))
             discovered[move_name] = min(discovered.get(move_name, learned_at), learned_at)
 
+    if cached_levels:
+        for move_name, learned_level in cached_levels.items():
+            learned_level_norm = _normalize_learned_level(learned_level)
+            discovered[move_name] = min(discovered.get(move_name, learned_level_norm), learned_level_norm)
+
     _LEARNABLE_BY_GAME_SPECIES[(game_version_norm, species_slug)] = discovered
-    result = tuple(sorted(discovered))
-    _LEARNABLE_CACHE[cache_key] = result
-    return result
+    return dict(discovered)
 
 
 def prefetch_species_move_data(entries: list[tuple[str, int, str, list[str]]]) -> None:
@@ -246,6 +279,7 @@ def _build_member_moves(
     """Build detailed move info from parquet-backed references."""
     cleaned_moves = [_normalize_move_name(move) for move in moves if str(move).strip()]
     learnable_moves = list(_learnable_moves_for_species(name, level, game_version))
+    learnable_move_levels = _learnable_move_levels_for_species(name, game_version)
 
     move_details: dict[str, Any] = {}
     for move_name in learnable_moves:
@@ -267,6 +301,7 @@ def _build_member_moves(
         "game_version": game_version,
         "provided_moves": cleaned_moves,
         "learnable_moves": learnable_moves,
+        "learnable_move_levels": dict(sorted(learnable_move_levels.items())),
         "move_details": move_details,
     }
 

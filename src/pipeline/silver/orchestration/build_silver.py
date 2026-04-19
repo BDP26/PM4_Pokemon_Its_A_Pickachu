@@ -44,7 +44,6 @@ from src.pipeline.silver.transforms.normalized_tables import (
     build_learnable_moves_table,
     build_locations_table,
     build_move_reference_table,
-    build_snapshot_available_pokemon_table,
     build_team_member_moves_table,
     build_team_members_table,
 )
@@ -52,35 +51,6 @@ from src.pipeline.silver.schemas.relational_checks import validate_normalized_si
 
 
 logger = logging.getLogger(__name__)
-
-
-def _cleanup_legacy_silver_artifacts(silver_dir: Path, silver_subdirs: dict[str, Path]) -> None:
-    """Remove deprecated artifacts that are no longer part of current silver outputs."""
-    removed: list[Path] = []
-
-    simulation_dir = silver_subdirs["simulation"]
-    current_simulation_outputs = {
-        "teams.parquet",
-        "teams.jsonl",
-        "boss_teams.parquet",
-        "player_teams.parquet",
-        "team_members.parquet",
-        "team_member_moves.parquet",
-        "move_data.json",
-    }
-    for artifact in simulation_dir.iterdir():
-        if artifact.is_file() and artifact.name not in current_simulation_outputs:
-            artifact.unlink()
-            removed.append(artifact)
-
-    # Legacy root-level snapshot layout (kept for old fallback paths only).
-    for root_snapshot in silver_dir.glob("*_boss_snapshots.jsonl"):
-        root_snapshot.unlink()
-        removed.append(root_snapshot)
-
-    if removed:
-        logger.info("[silver] hard cleanup removed legacy artifacts count=%s", len(removed))
-
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
     by_reason = Counter()
@@ -118,7 +88,6 @@ def _top_counts(values: list[str], limit: int = 5) -> dict[str, int]:
 def build_silver_from_bronze(
     bronze_dir: Path = BRONZE_DIR,
     silver_dir: Path = SILVER_DIR,
-    hard_cleanup: bool = False,
 ) -> None:
     started_at = time.perf_counter()
     ensure_medallion_dirs()
@@ -133,9 +102,6 @@ def build_silver_from_bronze(
     silver_subdirs = get_silver_subdirs(silver_dir)
     for directory in silver_subdirs.values():
         directory.mkdir(parents=True, exist_ok=True)
-
-    if hard_cleanup:
-        _cleanup_legacy_silver_artifacts(silver_dir=silver_dir, silver_subdirs=silver_subdirs)
 
     snapshots_dir = silver_subdirs["snapshots"]
     mappings_dir = silver_subdirs["mappings"]
@@ -191,7 +157,6 @@ def build_silver_from_bronze(
             references_dir / "bosses.parquet",
             references_dir / "locations.parquet",
             references_dir / "encounters.parquet",
-            references_dir / "snapshot_available_pokemon.parquet",
             references_dir / "move_reference.parquet",
             references_dir / "learnable_moves.parquet",
             references_dir / "pokemon_learnable_moves.parquet",
@@ -294,16 +259,10 @@ def build_silver_from_bronze(
     games_table = build_games_table(games_config)
     bosses_table = build_bosses_table(boss_mapping_by_version)
     locations_table = build_locations_table(all_records, area_map, mapper.misses)
-    snapshot_available_pokemon = build_snapshot_available_pokemon_table(all_records)
 
     write_parquet(references_dir / "games.parquet", games_table, partition_cols=["region"])
     write_parquet(references_dir / "bosses.parquet", bosses_table, partition_cols=["game_version", "boss_role"])
     write_parquet(references_dir / "locations.parquet", locations_table, partition_cols=["game_version", "mapping_status"])
-    write_parquet(
-        references_dir / "snapshot_available_pokemon.parquet",
-        snapshot_available_pokemon,
-        partition_cols=["game_version", "boss_id"],
-    )
 
     encounters_frame = pd.DataFrame()
     if encounters_file.exists():
@@ -388,7 +347,6 @@ def build_silver_from_bronze(
                 "bosses": pd.DataFrame(bosses_table),
                 "locations": pd.DataFrame(locations_table),
                 "encounters": encounters_frame,
-                "snapshot_available_pokemon": pd.DataFrame(snapshot_available_pokemon),
                 "teams": pd.DataFrame(validated_teams),
                 "team_members": pd.DataFrame(team_members),
                 "team_member_moves": pd.DataFrame(team_member_moves),

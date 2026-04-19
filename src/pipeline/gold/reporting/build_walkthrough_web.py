@@ -385,133 +385,6 @@ def _snapshot_files_from_manifest(silver_dir: Path, silver_manifest: dict[str, A
     return sorted(set(resolved))
 
 
-def _fallback_snapshot_maps_by_boss(
-    snapshot_available_path: Path,
-    encounters_path: Path | None,
-) -> tuple[dict[tuple[str, str], dict[str, list[str]]], dict[tuple[str, str], dict[str, list[dict[str, Any]]]]]:
-    if not snapshot_available_path.exists():
-        return {}, {}
-
-    try:
-        snapshot_df = read_parquet(snapshot_available_path)
-    except Exception:
-        logger.warning("[gold][web] failed to load snapshot_available_pokemon parquet for catch fallback", exc_info=True)
-        return {}, {}
-
-    if snapshot_df.empty:
-        return {}, {}
-
-    available_species_by_boss: dict[tuple[str, str], set[str]] = {}
-    first_location_by_species: dict[tuple[str, str], dict[str, str]] = {}
-
-    for row in snapshot_df.to_dict(orient="records"):
-        version = str(row.get("game_version") or "").strip().lower()
-        boss_id = str(row.get("boss_id") or "").strip().lower()
-        species = str(row.get("pokemon_species") or "").strip().lower()
-        location_id = str(row.get("first_available_location_id") or "").strip().lower()
-        if not version or not boss_id or not species or not location_id:
-            continue
-
-        _, _, location_slug = location_id.partition(":")
-        location_slug = location_slug or location_id
-        key = (version, boss_id)
-        available_species_by_boss.setdefault(key, set()).add(species)
-        first_location_by_species.setdefault(key, {}).setdefault(species, location_slug)
-
-    pokemon_by_boss: dict[tuple[str, str], dict[str, set[str]]] = {}
-    encounters_by_boss: dict[tuple[str, str], dict[str, dict[str, dict[str, Any]]]] = {}
-
-    if encounters_path is not None and encounters_path.exists():
-        try:
-            encounters_df = read_parquet(encounters_path)
-        except Exception:
-            logger.warning("[gold][web] failed to load encounters parquet for catch fallback", exc_info=True)
-            encounters_df = pd.DataFrame()
-
-        for row in encounters_df.to_dict(orient="records"):
-            version = str(row.get("game") or row.get("game_version") or "").strip().lower()
-            boss_id = str(row.get("boss_id") or "").strip().lower()
-            species = str(row.get("pokemon") or row.get("pokemon_species") or "").strip().lower()
-            location_slug = str(row.get("location") or row.get("location_slug") or "").strip().lower()
-            if not version or not boss_id or not species or not location_slug:
-                continue
-            key = (version, boss_id)
-            available_species = available_species_by_boss.get(key)
-            if available_species is not None and species not in available_species:
-                continue
-
-            pokemon_by_boss.setdefault(key, {}).setdefault(location_slug, set()).add(species)
-            species_entry = encounters_by_boss.setdefault(key, {}).setdefault(location_slug, {}).setdefault(
-                species,
-                {
-                    "species": species,
-                    "level_min": None,
-                    "level_max": None,
-                    "encounter_chance_max": None,
-                    "capture_rate": None,
-                    "encounter_methods": set(),
-                },
-            )
-            min_level = _safe_int(row.get("level_min"))
-            max_level = _safe_int(row.get("level_max"))
-            if min_level is not None:
-                species_entry["level_min"] = min_level if species_entry["level_min"] is None else min(species_entry["level_min"], min_level)
-            if max_level is not None:
-                species_entry["level_max"] = max_level if species_entry["level_max"] is None else max(species_entry["level_max"], max_level)
-            methods_value = row.get("methods")
-            if methods_value is None or (isinstance(methods_value, float) and np.isnan(methods_value)):
-                methods_value = row.get("encounter_methods")
-            if isinstance(methods_value, np.ndarray):
-                methods_iterable = methods_value.tolist()
-            elif isinstance(methods_value, (list, tuple, set)):
-                methods_iterable = list(methods_value)
-            else:
-                if methods_value is None or (isinstance(methods_value, float) and np.isnan(methods_value)):
-                    methods_iterable = []
-                else:
-                    methods_iterable = [methods_value]
-            for method in methods_iterable:
-                method_name = str(method).strip().lower()
-                if method_name:
-                    species_entry["encounter_methods"].add(method_name)
-
-    # Ensure every available species appears in at least one location for each boss.
-    for key, species_set in available_species_by_boss.items():
-        for species in sorted(species_set):
-            location_slug = first_location_by_species.get(key, {}).get(species)
-            if not location_slug:
-                continue
-            pokemon_by_boss.setdefault(key, {}).setdefault(location_slug, set()).add(species)
-            encounters_by_boss.setdefault(key, {}).setdefault(location_slug, {}).setdefault(
-                species,
-                {
-                    "species": species,
-                    "level_min": None,
-                    "level_max": None,
-                    "encounter_chance_max": None,
-                    "capture_rate": None,
-                    "encounter_methods": set(),
-                },
-            )
-
-    out_species: dict[tuple[str, str], dict[str, list[str]]] = {}
-    out_encounters: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = {}
-    for key, locations in pokemon_by_boss.items():
-        out_species[key] = {location: sorted(species_set) for location, species_set in sorted(locations.items())}
-    for key, locations in encounters_by_boss.items():
-        serialized_locations: dict[str, list[dict[str, Any]]] = {}
-        for location, species_rows in sorted(locations.items()):
-            serialized_locations[location] = [
-                {
-                    **entry,
-                    "encounter_methods": sorted(entry.get("encounter_methods", set())),
-                }
-                for _, entry in sorted(species_rows.items())
-            ]
-        out_encounters[key] = serialized_locations
-    return out_species, out_encounters
-
-
 def build_walkthrough_best_teams_payload(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
@@ -660,12 +533,7 @@ def build_walkthrough_best_teams_payload(
     pokemon_reference = _load_pokemon_reference(silver_dir, silver_manifest)
     snapshot_paths = _snapshot_files_from_manifest(silver_dir, silver_manifest)
 
-    snapshot_available_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "snapshot_available_pokemon")
     encounters_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "encounters")
-    fallback_location_map_by_boss, fallback_encounters_by_boss = _fallback_snapshot_maps_by_boss(
-        snapshot_available_path=snapshot_available_path,
-        encounters_path=encounters_path,
-    )
 
     walkthroughs: dict[str, list[dict[str, Any]]] = {}
 
@@ -742,10 +610,6 @@ def build_walkthrough_best_teams_payload(
 
             if isinstance(row.get("boss_id"), str):
                 fallback_key = (version, str(row["boss_id"]).strip().lower())
-                if not row["reachable_location_pokemon"]:
-                    row["reachable_location_pokemon"] = fallback_location_map_by_boss.get(fallback_key, {})
-                if not row["reachable_location_encounters"]:
-                    row["reachable_location_encounters"] = fallback_encounters_by_boss.get(fallback_key, {})
             location_map = row.get("reachable_location_pokemon")
             row["catchable_locations_by_pokemon"] = _invert_location_species_map(location_map if isinstance(location_map, dict) else {})
 
