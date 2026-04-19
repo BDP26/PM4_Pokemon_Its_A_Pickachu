@@ -2,6 +2,7 @@
 
 import logging
 import time
+from itertools import combinations, product
 from typing import Any
 
 from src.pipeline.silver.config.game_config import (
@@ -9,7 +10,12 @@ from src.pipeline.silver.config.game_config import (
     get_starter_choices,
     resolve_starter_species_for_level,
 )
-from src.pipeline.silver.config.team_config import DEFAULT_MEMBER_LEVEL, DEFAULT_TEAM_MEMBER_LIMIT
+from src.pipeline.silver.config.team_config import (
+    DEFAULT_MEMBER_COMBO_LIMIT,
+    DEFAULT_MEMBER_LEVEL,
+    DEFAULT_TEAM_MEMBER_LIMIT,
+    MOVESET_WIDTH,
+)
 from src.pipeline.silver.inputs.connectors.pokeapi_moves import _build_member_detail, _build_member_moves
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id
 
@@ -46,7 +52,22 @@ def _dedupe_details_by_family(details: list[dict[str, Any]], limit: int = 6) -> 
     return result
 
 
-def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _member_moveset_variants(raw_moves: list[str]) -> list[list[str]]:
+    moves = sorted({str(move).strip().lower() for move in raw_moves if str(move).strip()})
+    if not moves:
+        return [[]]
+    if len(moves) <= MOVESET_WIDTH:
+        return [moves]
+
+    variants: list[list[str]] = []
+    for combo in combinations(moves, MOVESET_WIDTH):
+        variants.append(list(combo))
+        if len(variants) >= DEFAULT_MEMBER_COMBO_LIMIT:
+            break
+    return variants if variants else [moves[:MOVESET_WIDTH]]
+
+
+def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build a player team variant with starter.
 
     Returns:
@@ -56,14 +77,6 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
     version = str(base_team.get("game_version", "unknown"))
     avg_level = int(base_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
     starter_species = resolve_starter_species_for_level(starter_base.lower().strip(), avg_level)
-    team_id = make_team_id(
-        "player",
-        version,
-        starter_base,
-        source_team_id=str(base_team.get("team_id") or ""),
-        variant=starter_species,
-    )
-
     starter_member = _build_member_detail(
         name=starter_species,
         level=avg_level,
@@ -72,25 +85,9 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
         origin="starter",
     )
 
-    move_storage: dict[str, Any] = {}
-
     team_details = []
     if starter_member is not None:
-        starter_instance_id = make_pokemon_instance_id(team_id, 1, starter_species)
-        starter_member["pokemon_instance_id"] = starter_instance_id
         team_details.append(starter_member)
-        # Store move details for starter
-        starter_moves = _build_member_moves(
-            name=starter_species,
-            level=avg_level,
-            moves=[],
-            game_version=version,
-        )
-        if starter_moves is not None:
-            starter_moves["pokemon_instance_id"] = starter_instance_id
-            starter_moves["team_id"] = team_id
-            starter_moves["slot_index"] = 1
-            move_storage[starter_instance_id] = starter_moves
 
     base_details = base_team.get("pokemon", [])
     base_moves = base_team.get("moves", [])
@@ -114,51 +111,83 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
                 level=level,
                 moves=list(moves) if isinstance(moves, list) else [],
                 game_version=version,
-                origin="kaggle",
+                origin="progression",
             )
             if member_detail is not None:
-                slot_index = idx + 2
-                instance_id = make_pokemon_instance_id(team_id, slot_index, name)
-                member_detail["pokemon_instance_id"] = instance_id
                 team_details.append(member_detail)
 
-                # Store move details
-                member_moves = _build_member_moves(
-                    name=name,
-                    level=level,
-                    moves=list(moves) if isinstance(moves, list) else [],
-                    game_version=version,
-                )
-                if member_moves is not None:
-                    member_moves["pokemon_instance_id"] = instance_id
-                    member_moves["team_id"] = team_id
-                    member_moves["slot_index"] = slot_index
-                    move_storage[instance_id] = member_moves
-
     team_details = _dedupe_details_by_family(team_details, limit=DEFAULT_TEAM_MEMBER_LIMIT)
-    levels = [int(member.get("level") or avg_level) for member in team_details]
-    team_avg_level = int(sum(levels) / len(levels)) if levels else avg_level
+    if not team_details:
+        return [], {}
 
-    pokemon_moves = [member.get("moves", []) for member in team_details]
-    pokemon_instance_ids = [str(member.get("pokemon_instance_id") or "") for member in team_details]
-    team_dict = {
-        "team_id": team_id,
-        "boss_name": None,
-        "gym": base_team.get("gym"),
-        "game_version": version,
-        "pokemon": [member["name"] for member in team_details],
-        "levels": levels,
-        "moves": pokemon_moves,
-        "pokemon_instance_ids": pokemon_instance_ids,
-        "avg_level": team_avg_level,
-        "starter_base": starter_base,
-        "starter_evolved_species": starter_species,
-        "source_team_id": base_team.get("team_id"),
-        "team_role": "player",
-        "is_player_candidate": True,
-    }
+    per_member_variants = [_member_moveset_variants(list(member.get("moves", []))) for member in team_details]
+    team_variants: list[dict[str, Any]] = []
+    move_storage: dict[str, Any] = {}
+    source_team_id = str(base_team.get("team_id") or "")
 
-    return team_dict, move_storage
+    for combo in product(*per_member_variants):
+        variant_signature_parts = []
+        for member, moveset in zip(team_details, combo, strict=False):
+            variant_signature_parts.append(
+                f"{str(member.get('name') or '').strip().lower()}={'|'.join(sorted(set(str(move).strip().lower() for move in moveset if str(move).strip())))}"
+            )
+        variant_signature = ";".join(variant_signature_parts)
+        team_id = make_team_id(
+            "player",
+            version,
+            starter_base,
+            source_team_id=source_team_id,
+            variant=f"{starter_species}:{variant_signature}",
+        )
+
+        team_members: list[dict[str, Any]] = []
+        for slot_index, (member, selected_moves) in enumerate(zip(team_details, combo, strict=False), start=1):
+            member_name = str(member.get("name") or "").strip().lower()
+            member_level = int(member.get("level") or avg_level)
+            instance_id = make_pokemon_instance_id(team_id, slot_index, member_name)
+            team_members.append(
+                {
+                    "name": member_name,
+                    "level": member_level,
+                    "moves": list(selected_moves),
+                    "origin": member.get("origin"),
+                    "pokemon_instance_id": instance_id,
+                }
+            )
+            member_moves = _build_member_moves(
+                name=member_name,
+                level=member_level,
+                moves=list(selected_moves),
+                game_version=version,
+            )
+            if member_moves is not None:
+                member_moves["pokemon_instance_id"] = instance_id
+                member_moves["team_id"] = team_id
+                member_moves["slot_index"] = slot_index
+                move_storage[instance_id] = member_moves
+
+        levels = [int(member.get("level") or avg_level) for member in team_members]
+        team_avg_level = int(sum(levels) / len(levels)) if levels else avg_level
+        team_variants.append(
+            {
+                "team_id": team_id,
+                "boss_name": None,
+                "gym": base_team.get("gym"),
+                "game_version": version,
+                "pokemon": [member["name"] for member in team_members],
+                "levels": levels,
+                "moves": [member.get("moves", []) for member in team_members],
+                "pokemon_instance_ids": [str(member.get("pokemon_instance_id") or "") for member in team_members],
+                "avg_level": team_avg_level,
+                "starter_base": starter_base,
+                "starter_evolved_species": starter_species,
+                "source_team_id": base_team.get("team_id"),
+                "team_role": "player",
+                "is_player_candidate": True,
+            }
+        )
+
+    return team_variants, move_storage
 
 
 def build_player_teams_from_progression_context(boss_progression_teams: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -180,8 +209,8 @@ def build_player_teams_from_progression_context(boss_progression_teams: list[dic
         if not starters:
             continue
         for starter in starters:
-            team_dict, move_dict = _build_starter_variant(team, starter)
-            variants.append(team_dict)
+            team_dicts, move_dict = _build_starter_variant(team, starter)
+            variants.extend(team_dicts)
             all_moves.update(move_dict)
 
     logger.info(
@@ -192,7 +221,3 @@ def build_player_teams_from_progression_context(boss_progression_teams: list[dic
         time.perf_counter() - started_at,
     )
     return variants, all_moves
-
-
-
-

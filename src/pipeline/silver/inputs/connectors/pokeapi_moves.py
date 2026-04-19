@@ -336,14 +336,25 @@ def _build_member_detail(
         )
         return None
 
-    valid_moves = [move for move in cleaned_moves if move in learnable_moves]
-    for move in learnable_moves:
-        if move not in valid_moves and len(valid_moves) < 4:
+    valid_moves: list[str] = []
+    seen_moves: set[str] = set()
+
+    # keep valid cleaned moves (no duplicates)
+    for move in cleaned_moves:
+        if move in learnable_moves and move not in seen_moves:
             valid_moves.append(move)
+            seen_moves.add(move)
+
+    # then add remaining learnable moves (no limit anymore)
+    for move in learnable_moves:
+        if move in seen_moves:
+            continue
+        valid_moves.append(move)
+        seen_moves.add(move)
 
     return {
         "name": str(name).strip().lower(),
         "level": int(level),
-        "moves": valid_moves[:4],
+        "moves": valid_moves,  # no longer capped at 4
         "origin": origin,
     }
