@@ -6,7 +6,7 @@ from itertools import combinations, product
 from typing import Any
 
 from src.pipeline.silver.config.game_config import (
-    STARTER_EVOLUTION_CHAINS_BY_BASE,
+    get_starter_family_root,
     get_starter_choices,
     resolve_starter_species_for_level,
 )
@@ -23,16 +23,10 @@ from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_t
 logger = logging.getLogger(__name__)
 
 
-_STARTER_FAMILY_LOOKUP: dict[str, str] = {
-    species: base
-    for base, chain in STARTER_EVOLUTION_CHAINS_BY_BASE.items()
-    for _, species in chain
-}
-
 
 def _family_root_for_species(species: str) -> str:
     normalized = species.lower().strip()
-    return _STARTER_FAMILY_LOOKUP.get(normalized, normalized)
+    return get_starter_family_root(normalized)
 
 
 def _dedupe_details_by_family(details: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:

@@ -1,4 +1,6 @@
 from typing import Any
+from functools import lru_cache
+from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
 
 STARTER_CHOICES_BY_VERSION: dict[str, list[str]] = {
     "red": ["bulbasaur", "charmander", "squirtle"],
@@ -15,27 +17,38 @@ STARTER_CHOICES_BY_VERSION: dict[str, list[str]] = {
     "y": ["chespin", "fennekin", "froakie"],
 }
 
-# Level thresholds follow the standard starter progression (typically 16 / 36).
-STARTER_EVOLUTION_CHAINS_BY_BASE: dict[str, list[tuple[int, str]]] = {
-    "bulbasaur": [(1, "bulbasaur"), (16, "ivysaur"), (36, "venusaur")],
-    "charmander": [(1, "charmander"), (16, "charmeleon"), (36, "charizard")],
-    "squirtle": [(1, "squirtle"), (16, "wartortle"), (36, "blastoise")],
-    "chikorita": [(1, "chikorita"), (16, "bayleef"), (32, "meganium")],
-    "cyndaquil": [(1, "cyndaquil"), (14, "quilava"), (36, "typhlosion")],
-    "totodile": [(1, "totodile"), (18, "croconaw"), (30, "feraligatr")],
-    "treecko": [(1, "treecko"), (16, "grovyle"), (36, "sceptile")],
-    "torchic": [(1, "torchic"), (16, "combusken"), (36, "blaziken")],
-    "mudkip": [(1, "mudkip"), (16, "marshtomp"), (36, "swampert")],
-    "turtwig": [(1, "turtwig"), (18, "grotle"), (32, "torterra")],
-    "chimchar": [(1, "chimchar"), (14, "monferno"), (36, "infernape")],
-    "piplup": [(1, "piplup"), (16, "prinplup"), (36, "empoleon")],
-    "snivy": [(1, "snivy"), (17, "servine"), (36, "serperior")],
-    "tepig": [(1, "tepig"), (17, "pignite"), (36, "emboar")],
-    "oshawott": [(1, "oshawott"), (17, "dewott"), (36, "samurott")],
-    "chespin": [(1, "chespin"), (16, "quilladin"), (36, "chesnaught")],
-    "fennekin": [(1, "fennekin"), (16, "braixen"), (36, "delphox")],
-    "froakie": [(1, "froakie"), (16, "frogadier"), (36, "greninja")],
-}
+@lru_cache(maxsize=128)
+def _starter_family_rules(base_starter: str) -> dict[str, dict[str, Any]]:
+    base = str(base_starter).strip().lower()
+    if not base:
+        return {}
+    try:
+        return get_species_evolution_rules(base)
+    except Exception:
+        return {
+            base: {
+                "species_name": base,
+                "base_species": base,
+                "evolution_stage": 1,
+                "min_valid_level": None,
+                "min_level_from_previous": None,
+                "special_evolution_conditions": [],
+            }
+        }
+
+
+@lru_cache(maxsize=1)
+def _starter_family_root_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    starter_bases = {starter for starters in STARTER_CHOICES_BY_VERSION.values() for starter in starters}
+    for base in starter_bases:
+        rules = _starter_family_rules(base)
+        for species_name, info in rules.items():
+            species = str(species_name).strip().lower()
+            root = str(info.get("base_species") or base).strip().lower()
+            if species:
+                lookup[species] = root
+    return lookup
 
 BASE_GAME_GROUPS = [
     {
@@ -142,23 +155,58 @@ def get_starter_choices(version: str) -> list[str]:
 
 
 def resolve_starter_species_for_level(base_starter: str, level: int) -> str:
-    chain = STARTER_EVOLUTION_CHAINS_BY_BASE.get(base_starter.lower())
-    if not chain:
-        return base_starter.lower()
+    base = str(base_starter).strip().lower()
+    if not base:
+        return ""
 
-    resolved = chain[0][1]
-    for threshold, species in chain:
-        if level >= threshold:
-            resolved = species
-        else:
-            break
-    return resolved
+    rules = _starter_family_rules(base)
+    if not rules:
+        return base
+
+    best_species = base
+    best_rank = (-1, -1)
+    for species, info in rules.items():
+        if str(info.get("base_species") or "").strip().lower() != base:
+            continue
+        min_valid = info.get("min_valid_level")
+        if min_valid is not None and int(level) < int(min_valid):
+            continue
+        stage = int(info.get("evolution_stage") or 1)
+        threshold = int(min_valid) if min_valid is not None else 0
+        rank = (stage, threshold)
+        if rank >= best_rank:
+            best_rank = rank
+            best_species = str(species).strip().lower()
+
+    return best_species
+
 
 
 def get_starter_family_members(base_starter: str) -> list[str]:
-    chain = STARTER_EVOLUTION_CHAINS_BY_BASE.get(base_starter.lower())
-    if not chain:
-        return [base_starter.lower()]
-    return [species for _, species in chain]
+    base = str(base_starter).strip().lower()
+    if not base:
+        return []
+
+    rules = _starter_family_rules(base)
+    members: list[tuple[int, int, str]] = []
+    for species, info in rules.items():
+        if str(info.get("base_species") or "").strip().lower() != base:
+            continue
+        stage = int(info.get("evolution_stage") or 1)
+        min_valid = int(info.get("min_valid_level")) if info.get("min_valid_level") is not None else 0
+        members.append((stage, min_valid, str(species).strip().lower()))
+
+    if not members:
+        return [base]
+
+    members.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [species for _, _, species in members]
+
+
+def get_starter_family_root(species: str) -> str:
+    normalized = str(species).strip().lower()
+    if not normalized:
+        return ""
+    return _starter_family_root_lookup().get(normalized, normalized)
 
 
