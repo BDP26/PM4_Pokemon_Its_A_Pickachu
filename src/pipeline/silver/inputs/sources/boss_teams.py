@@ -12,7 +12,9 @@ from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
     _build_member_detail,
     _build_member_moves,
     prefetch_species_move_data,
+    persist_move_reference_cache,
 )
+from src.pipeline.settings import SILVER_DIR
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id
 
 
@@ -256,6 +258,16 @@ def extract_boss_teams_from_kaggle_source(
             len(prefetch_entries),
             time.perf_counter() - stage_started_at,
         )
+        stage_started_at = time.perf_counter()
+        logger.info("[silver/teams] stage=persist_move_reference_cache start entries=%s", len(prefetch_entries))
+        persisted = persist_move_reference_cache(prefetch_entries, silver_dir=SILVER_DIR)
+        logger.info(
+            "[silver/teams] stage=persist_move_reference_cache done learnable_rows=%s move_rows=%s target_pairs=%s elapsed_s=%.2f",
+            persisted.get("learnable_rows", 0),
+            persisted.get("move_rows", 0),
+            persisted.get("target_pairs", 0),
+            time.perf_counter() - stage_started_at,
+        )
 
         stage_started_at = time.perf_counter()
         logger.info("[silver/teams] stage=group_rows start")
@@ -294,7 +306,6 @@ def extract_boss_teams_from_kaggle_source(
         time.perf_counter() - started_at,
     )
     return teams, move_storage
-
 
 
 

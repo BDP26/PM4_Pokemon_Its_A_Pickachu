@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +28,7 @@ from src.pipeline.silver.inputs.builders.player_teams import (
     build_progression_source_teams,
 )
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
+from src.pipeline.silver.inputs.connectors.pokeapi_moves import persist_move_reference_cache
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
 from src.pipeline.silver.enrichment.schema_normalizer import (
     write_normalized_silver,
@@ -39,7 +41,6 @@ from src.pipeline.silver.writers.outputs import (
     load_state,
     save_state,
     write_validated_move_data,
-    write_validated_teams,
 )
 from src.pipeline.silver.transforms.normalized_tables import (
     build_bosses_table,
@@ -87,6 +88,16 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
 
 def _top_counts(values: list[str], limit: int = 5) -> dict[str, int]:
     return dict(Counter(values).most_common(limit))
+
+
+def _remove_if_exists(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
 
 def _build_team_metadata_rows(teams: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -184,8 +195,6 @@ def build_silver_from_bronze(
             references_dir / "learnable_moves.parquet",
             references_dir / "pokemon_learnable_moves.parquet",
             simulation_dir / "teams.parquet",
-            simulation_dir / "boss_teams.parquet",
-            simulation_dir / "player_teams.parquet",
             simulation_dir / "team_members.parquet",
             simulation_dir / "team_member_moves.parquet",
             simulation_dir / "move_data.json",
@@ -323,6 +332,24 @@ def build_silver_from_bronze(
         allowed_versions=allowed_versions,
     )
     progression_source_teams = build_progression_source_teams(all_records, boss_teams)
+    progression_prefetch_entries: list[tuple[str, int, str, list[str]]] = []
+    for source_team in progression_source_teams:
+        game_version = str(source_team.get("game_version") or "").strip().lower()
+        avg_level = int(source_team.get("avg_level") or 0)
+        pokemon = source_team.get("pokemon", [])
+        if not game_version or avg_level <= 0 or not isinstance(pokemon, list):
+            continue
+        for species in pokemon:
+            progression_prefetch_entries.append((str(species), avg_level, game_version, []))
+    if progression_prefetch_entries:
+        persisted_progression = persist_move_reference_cache(progression_prefetch_entries, silver_dir=silver_dir)
+        logger.info(
+            "[silver] persisted progression move cache entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
+            persisted_progression.get("entry_count", 0),
+            persisted_progression.get("target_pairs", 0),
+            persisted_progression.get("learnable_rows", 0),
+            persisted_progression.get("move_rows", 0),
+        )
     player_teams, player_move_data = build_player_teams_from_progression_context(progression_source_teams)
     teams_data = boss_teams + player_teams
     all_move_data = {**boss_move_data, **player_move_data}
@@ -337,20 +364,12 @@ def build_silver_from_bronze(
     )
 
     if teams_data:
+        _remove_if_exists(simulation_dir / "boss_teams.parquet")
+        _remove_if_exists(simulation_dir / "player_teams.parquet")
         validated_teams = validate_team_payloads(teams_data)
         team_metadata_rows = _build_team_metadata_rows(validated_teams)
         write_parquet(simulation_dir / "teams.parquet", team_metadata_rows, partition_cols=["game_version", "team_role"])
         write_jsonl(simulation_dir / "teams.jsonl", validated_teams)
-        write_validated_teams(
-            simulation_dir / "boss_teams.parquet",
-            boss_teams,
-            partition_cols=["game_version", "boss_name"],
-        )
-        write_validated_teams(
-            simulation_dir / "player_teams.parquet",
-            player_teams,
-            partition_cols=["game_version"],
-        )
         validated_move_data = write_validated_move_data(simulation_dir / "move_data.json", all_move_data)
 
         team_members = build_team_members_table(validated_teams)

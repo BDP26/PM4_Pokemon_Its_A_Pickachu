@@ -171,7 +171,7 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
     effective_team_variant_limit = DEFAULT_TEAM_VARIANT_LIMIT
     if variant_space_size > TEAM_VARIANT_CONFIRMATION_THRESHOLD and not ALLOW_LARGE_TEAM_VARIANTS:
         # Keep pipeline execution safe by tightening the cap unless user explicitly opts in.
-        effective_team_variant_limit = min(DEFAULT_TEAM_VARIANT_LIMIT, 250)
+        effective_team_variant_limit = DEFAULT_TEAM_VARIANT_LIMIT
         logger.warning(
             "[silver/teams] large starter variant space detected source_team_id=%s game_version=%s starter_base=%s estimated_space=%s threshold=%s applied_limit=%s (set PM4_ALLOW_LARGE_TEAM_VARIANTS=1 to allow full cap=%s)",
             base_team.get("team_id"),

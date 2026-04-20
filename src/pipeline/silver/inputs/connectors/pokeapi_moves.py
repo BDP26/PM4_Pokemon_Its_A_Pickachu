@@ -11,7 +11,7 @@ from typing import Any
 
 import pokebase as pb
 
-from src.pipeline.common.io import read_parquet
+from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import (
     FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
@@ -252,6 +252,88 @@ def prefetch_species_move_data(entries: list[tuple[str, int, str, list[str]]]) -
         _learnable_moves_for_species(species, level, game_version)
         for move_name in provided_moves:
             _move_profile(str(move_name))
+
+
+def persist_move_reference_cache(
+    entries: list[tuple[str, int, str, list[str]]],
+    silver_dir: Path = SILVER_DIR,
+) -> dict[str, int]:
+    """Materialize move-reference parquet files for requested game/species entries."""
+    _ensure_parquet_cache_loaded(silver_dir=silver_dir)
+
+    target_pairs: set[tuple[str, str]] = set()
+    required_moves: set[str] = set()
+
+    for species, _, game_version, provided_moves in entries:
+        game_version_norm = str(game_version).strip().lower()
+        species_slug = _normalize_species_slug(species)
+        if not game_version_norm or not species_slug:
+            continue
+        target_pairs.add((game_version_norm, species_slug))
+        _learnable_move_levels_for_species(species_slug, game_version_norm)
+        for move_name in provided_moves:
+            normalized = _normalize_move_name(move_name)
+            if normalized:
+                required_moves.add(normalized)
+
+    learnable_rows: list[dict[str, Any]] = []
+    all_referenced_moves: set[str] = set(required_moves)
+
+    for game_version, species_slug in sorted(target_pairs):
+        move_levels = _LEARNABLE_BY_GAME_SPECIES.get((game_version, species_slug), {})
+        if not move_levels:
+            continue
+        for move_name, learned_level in sorted(move_levels.items()):
+            normalized_move = _normalize_move_name(move_name)
+            if not normalized_move:
+                continue
+            all_referenced_moves.add(normalized_move)
+            learnable_rows.append(
+                {
+                    "game_version": game_version,
+                    "pokemon_species": species_slug,
+                    "move_name": normalized_move,
+                    "learned_level": _normalize_learned_level(learned_level),
+                    "learn_method": "level-up",
+                }
+            )
+
+    move_rows: list[dict[str, Any]] = []
+    for move_name in sorted(all_referenced_moves):
+        power, damage_class = _move_profile(move_name)
+        move_rows.append(
+            {
+                "move_name": move_name,
+                "power": int(power),
+                "damage_class": str(damage_class or "status"),
+                "type": None,
+                "accuracy": None,
+                "pp": None,
+            }
+        )
+
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+    if learnable_rows:
+        write_parquet(references_dir / "learnable_moves.parquet", learnable_rows, partition_cols=["game_version"])
+        write_parquet(
+            references_dir / "pokemon_learnable_moves.parquet",
+            learnable_rows,
+            partition_cols=["game_version", "pokemon_species"],
+        )
+    if move_rows:
+        write_parquet(references_dir / "move_reference.parquet", move_rows)
+
+    # Ensure subsequent calls re-read from freshly materialized parquet files.
+    global _CACHE_SILVER_DIR
+    _CACHE_SILVER_DIR = None
+
+    return {
+        "entry_count": len(entries),
+        "target_pairs": len(target_pairs),
+        "learnable_rows": len(learnable_rows),
+        "move_rows": len(move_rows),
+    }
 
 
 def _damaging_moves_for_species(species: str, level: int, game_version: str) -> tuple[str, ...]:

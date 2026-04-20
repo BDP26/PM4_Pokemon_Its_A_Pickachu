@@ -91,8 +91,6 @@ Team tables in `data/silver/simulation/`:
 
 - `simulation/teams.parquet` (combined boss and player teams, lean structure)
 - `simulation/teams.jsonl` (line-delimited view)
-- `simulation/boss_teams.parquet` (boss teams only)
-- `simulation/player_teams.parquet` (player teams only)
 - `simulation/team_members.parquet` (one row per team slot)
 - `simulation/team_member_moves.parquet` (one row per move slot)
 - `simulation/move_data.json` (detailed move info: power, damage_class per move)
@@ -142,6 +140,5 @@ Validate Gold simulation artifacts after a full run:
 - Silver keeps a balance between normalized references and per-game snapshots.
 - Silver erzeugt keine vollständigen Moveset-Kombinationen mehr (Verantwortung von Gold).
 - Silver validiert FK/PK-Beziehungen über normalisierte Tabellen und bricht bei Fehlern ab.
-
 
 
