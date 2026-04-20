@@ -22,7 +22,10 @@ from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     get_location_area_and_pokemon_maps,
 )
 from src.pipeline.silver.inputs.parser import extract_game_data
-from src.pipeline.silver.inputs.builders.player_teams import build_player_teams_from_progression_context
+from src.pipeline.silver.inputs.builders.player_teams import (
+    build_player_teams_from_progression_context,
+    build_progression_source_teams,
+)
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
 from src.pipeline.silver.enrichment.schema_normalizer import (
@@ -48,6 +51,7 @@ from src.pipeline.silver.transforms.normalized_tables import (
     build_team_members_table,
 )
 from src.pipeline.silver.schemas.relational_checks import validate_normalized_silver_tables
+from src.pipeline.silver.schemas.contracts import validate_team_payloads
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +87,25 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
 
 def _top_counts(values: list[str], limit: int = 5) -> dict[str, int]:
     return dict(Counter(values).most_common(limit))
+
+def _build_team_metadata_rows(teams: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for team in teams:
+        rows.append(
+            {
+                "team_id": team.get("team_id"),
+                "game_version": team.get("game_version"),
+                "team_role": team.get("team_role"),
+                "boss_name": team.get("boss_name"),
+                "gym": team.get("gym"),
+                "is_player_candidate": bool(team.get("is_player_candidate", False)),
+                "starter_base": team.get("starter_base"),
+                "starter_evolved_species": team.get("starter_evolved_species"),
+                "source_team_id": team.get("source_team_id"),
+                "avg_level": team.get("avg_level"),
+            }
+        )
+    return rows
 
 
 def build_silver_from_bronze(
@@ -292,19 +315,21 @@ def build_silver_from_bronze(
 
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
-    # Build battle simulation data in separate stages (boss -> player)
+    # Build battle simulation data in separate stages (boss -> progression sources -> player variants)
     logger.info("[silver] extracting boss teams for simulation")
     teams_started_at = time.perf_counter()
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(
         bronze_dir,
         allowed_versions=allowed_versions,
     )
-    player_teams, player_move_data = build_player_teams_from_progression_context(boss_teams)
+    progression_source_teams = build_progression_source_teams(all_records, boss_teams)
+    player_teams, player_move_data = build_player_teams_from_progression_context(progression_source_teams)
     teams_data = boss_teams + player_teams
     all_move_data = {**boss_move_data, **player_move_data}
     logger.info(
-        "[silver] team extraction done boss_teams=%s player_teams=%s teams_total=%s move_records=%s elapsed_s=%.2f",
+        "[silver] team extraction done boss_teams=%s progression_sources=%s player_teams=%s teams_total=%s move_records=%s elapsed_s=%.2f",
         len(boss_teams),
+        len(progression_source_teams),
         len(player_teams),
         len(teams_data),
         len(all_move_data),
@@ -312,11 +337,9 @@ def build_silver_from_bronze(
     )
 
     if teams_data:
-        validated_teams = write_validated_teams(
-            simulation_dir / "teams.parquet",
-            teams_data,
-            partition_cols=["game_version", "team_role"],
-        )
+        validated_teams = validate_team_payloads(teams_data)
+        team_metadata_rows = _build_team_metadata_rows(validated_teams)
+        write_parquet(simulation_dir / "teams.parquet", team_metadata_rows, partition_cols=["game_version", "team_role"])
         write_jsonl(simulation_dir / "teams.jsonl", validated_teams)
         write_validated_teams(
             simulation_dir / "boss_teams.parquet",

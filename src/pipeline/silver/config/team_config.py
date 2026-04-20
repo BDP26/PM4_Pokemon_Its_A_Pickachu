@@ -1,4 +1,23 @@
 """Shared configuration for Silver team/moveset preparation."""
+import os
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else minimum
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
 
 # Common moveset size used across team member and team-combination builders.
 MOVESET_WIDTH = 4
@@ -30,9 +49,12 @@ FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
 
 GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
-# Moveset combination limits - increased to handle Pokemon with many moves (e.g., escavalier)
-DEFAULT_MEMBER_MOVE_POOL_CAP = 20  # Up from 12: allow up to 20 learnable moves before filtering
-DEFAULT_MEMBER_COMBO_LIMIT = 500  # Up from 128: allow up to 500 move combinations per member
+# Moveset combination limits and safety checks.
+DEFAULT_MEMBER_MOVE_POOL_CAP = _env_int("PM4_MEMBER_MOVE_POOL_CAP", 12)
+DEFAULT_MEMBER_COMBO_LIMIT = _env_int("PM4_MEMBER_COMBO_LIMIT", 64)
+DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 1200)
+TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 5000)
+ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", False)
 
 DEFAULT_TEAM_MEMBER_LIMIT = 6
 DEFAULT_MEMBER_LEVEL = 20
@@ -51,5 +73,3 @@ SPECIES_SLUG_ALIASES: dict[str, str] = {
     "nidoran f": "nidoran-f",
     "nidoran m": "nidoran-m",
 }
-
-
