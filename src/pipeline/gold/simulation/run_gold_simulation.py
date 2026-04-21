@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.pipeline.common.io import write_parquet
 from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
+from src.pipeline.gold.simulation.config import BattleSimulationConfig, load_battle_simulation_config
 from src.pipeline.settings import (
     BRONZE_DIR,
     GOLD_DIR,
@@ -29,18 +30,18 @@ def _run_gold_team_battle_simulations(
     teams_data: list[dict[str, Any]],
     gold_dir: Path,
     bronze_dir: Path,
+    config: BattleSimulationConfig,
 ) -> None:
-    """Adapter: run shared simulation builder while writing outputs into Gold simulation dir."""
     build_team_battle_simulations(
         teams_data=teams_data,
         silver_dir=gold_dir,
         bronze_dir=bronze_dir,
         force_spark=True,
+        config=config,
     )
 
 
 def _build_gold_battle_seeds(*, gold_dir: Path) -> None:
-    """Adapter: keep legacy signature usage isolated from Gold orchestration code."""
     build_battle_seeds(
         silver_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
@@ -48,7 +49,6 @@ def _build_gold_battle_seeds(*, gold_dir: Path) -> None:
 
 
 def _run_gold_monte_carlo_optimizer(*, gold_dir: Path, n_trials: int, rng_seed: int) -> None:
-    """Adapter: keep legacy signature usage isolated from Gold orchestration code."""
     run_monte_carlo_team_optimizer(
         silver_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
@@ -64,13 +64,15 @@ def run_gold_simulation_from_silver(
     required_input_files: dict[str, Path] | None = None,
     n_trials: int = 500,
     rng_seed: int = 42,
+    sim_config: BattleSimulationConfig | None = None,
 ) -> None:
-    """Run full battle simulation pipeline in gold using silver prepared team inputs."""
     started_at = time.perf_counter()
     silver_simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     gold_simulation_dir = gold_dir / GOLD_SIMULATION_DIRNAME
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
+
+    config = sim_config or load_battle_simulation_config()
 
     teams_path = required_input_files.get("teams") if required_input_files else (silver_simulation_dir / "teams.parquet")
     team_members_path = (
@@ -100,11 +102,16 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
 
     sims_started_at = time.perf_counter()
-    logger.info("[gold/simulation] running team battle simulations with pyspark")
+    logger.info(
+        "[gold/simulation] running team battle simulations with pyspark battle_trials=%s sim_seed=%s",
+        config.n_battle_trials,
+        config.rng_seed,
+    )
     _run_gold_team_battle_simulations(
         teams_data=teams_data,
         gold_dir=gold_dir,
         bronze_dir=bronze_dir,
+        config=config,
     )
     logger.info("[gold/simulation] team battle simulations done elapsed_s=%.2f", time.perf_counter() - sims_started_at)
 
@@ -114,13 +121,11 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
     mc_started_at = time.perf_counter()
-    logger.info("[gold/simulation] running monte carlo optimizer trials=%s seed=%s", n_trials, rng_seed)
+    logger.info("[gold/simulation] running monte carlo resampling trials=%s seed=%s", n_trials, rng_seed)
     _run_gold_monte_carlo_optimizer(
         gold_dir=gold_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
-    logger.info("[gold/simulation] monte carlo optimizer done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
+    logger.info("[gold/simulation] monte carlo resampling done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
     logger.info("[gold/simulation] finished elapsed_s=%.2f", time.perf_counter() - started_at)
-
-

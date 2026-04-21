@@ -1,4 +1,4 @@
-"""Monte-Carlo optimizer for simulation battle seeds."""
+"""Monte-Carlo resampling for battle seeds."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,12 +16,10 @@ def run_monte_carlo_team_optimizer(
     rng_seed: int = 42,
 ) -> int:
     """
-    Run Monte-Carlo simulations for each battle seed.
+    Run downstream Bernoulli resampling for already-estimated battle win probabilities.
 
-    Uses deterministic `predicted_player_win_chance` from sequential team simulations
-    and simulates Bernoulli outcomes over `n_trials` battles.
-
-    Returns the number of simulated scenarios written.
+    This does not simulate battle mechanics directly.
+    It samples scenario outcomes from `predicted_player_win_chance`.
     """
     simulation_dir = silver_dir / simulation_dirname
     seeds_path = simulation_dir / "battle_seeds.parquet"
@@ -33,7 +31,7 @@ def run_monte_carlo_team_optimizer(
 
     seeds_df = read_parquet(seeds_path)
     if seeds_df.empty:
-        print("[monte_carlo] battle_seeds.jsonl is empty, skipping")
+        print("[monte_carlo] battle_seeds.parquet is empty, skipping")
         return 0
 
     required_cols = {
@@ -46,15 +44,15 @@ def run_monte_carlo_team_optimizer(
     }
     missing = required_cols - set(seeds_df.columns)
     if missing:
-        raise ValueError(f"battle_seeds.jsonl missing required columns: {sorted(missing)}")
+        raise ValueError(f"battle_seeds.parquet missing required columns: {sorted(missing)}")
 
     probs = seeds_df["predicted_player_win_chance"].astype(float).clip(lower=0.0, upper=1.0).to_numpy()
     rng = np.random.default_rng(rng_seed)
     wins = rng.binomial(n_trials, probs)
 
     seeds_df = seeds_df.copy()
-    seeds_df["n_trials"] = int(n_trials)
-    seeds_df["rng_seed"] = int(rng_seed)
+    seeds_df["mc_trials"] = int(n_trials)
+    seeds_df["mc_rng_seed"] = int(rng_seed)
     seeds_df["wins"] = wins
     seeds_df["losses"] = n_trials - wins
     seeds_df["mc_win_rate"] = seeds_df["wins"] / float(n_trials)
@@ -70,7 +68,8 @@ def run_monte_carlo_team_optimizer(
         "simulated_attacker_win",
         "degraded_data",
         "n_trials",
-        "rng_seed",
+        "mc_trials",
+        "mc_rng_seed",
         "wins",
         "losses",
         "mc_win_rate",
@@ -79,7 +78,5 @@ def run_monte_carlo_team_optimizer(
     records = seeds_df[available_columns].to_dict(orient="records")
     write_parquet(output_path, records)
 
-    print(f"[monte_carlo] simulated {len(records)} scenarios with n_trials={n_trials}")
+    print(f"[monte_carlo] simulated {len(records)} scenarios with mc_trials={n_trials}")
     return len(records)
-
-
