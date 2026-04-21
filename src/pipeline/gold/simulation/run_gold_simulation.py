@@ -18,7 +18,7 @@ from src.pipeline.settings import (
     SILVER_SIMULATION_DIRNAME,
 )
 from src.pipeline.silver.simulation.battle_seeds import build_battle_seeds
-from src.pipeline.silver.simulation.metadata import write_simulation_run_metadata
+from src.pipeline.silver.writers.outputs import write_simulation_run_metadata
 from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 from src.pipeline.silver.simulation.type_matchups import build_team_battle_simulations
 from src.pipeline.silver.validation.simulation_outputs import validate_team_battle_simulations
