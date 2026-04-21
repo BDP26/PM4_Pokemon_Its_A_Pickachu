@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -63,3 +64,18 @@ def write_validated_move_data(path: Path, records: dict[str, dict[str, Any]] | l
     validated = validate_move_payloads(payload)
     write_json(path, {item["pokemon_instance_id"]: item for item in validated})
     return validated
+
+def write_simulation_run_metadata(
+    output_dir: Path,
+    *,
+    engine: str,
+    config: Any,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "engine": engine,
+        "config": asdict(config) if hasattr(config, "__dataclass_fields__") else dict(config),
+    }
+    if extra:
+        payload["extra"] = extra
+    write_json(output_dir / "run_metadata.json", payload)

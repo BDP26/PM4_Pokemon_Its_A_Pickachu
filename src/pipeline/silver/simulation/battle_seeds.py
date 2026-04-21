@@ -10,26 +10,23 @@ from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
-def _probability_from_simulation(row: pd.Series) -> float:
+def _probability_from_simulation(row: pd.Series) -> tuple[float, str]:
     if "predicted_player_win_chance" in row and pd.notna(row["predicted_player_win_chance"]):
-        return round(float(row["predicted_player_win_chance"]), 3)
+        return round(float(row["predicted_player_win_chance"]), 3), "empirical_trials"
 
-    # Legacy fallback
     score = float(row.get("simulation_score", 0.0) or 0.0)
     attacker_win = bool(row.get("attacker_win", False))
     degraded = bool(row.get("degraded_data", False))
 
     probability = 0.5 + 0.5 * math.tanh(score / 120.0)
-
     if attacker_win:
         probability = max(probability, 0.55)
     else:
         probability = min(probability, 0.45)
-
     if degraded:
         probability = 0.5 + (probability - 0.5) * 0.6
 
-    return round(min(0.99, max(0.01, probability)), 3)
+    return round(min(0.99, max(0.01, probability)), 3), "legacy_score_mapping"
 
 
 def build_battle_seeds(
@@ -68,7 +65,7 @@ def build_battle_seeds(
 
         for _, player_match in boss_matchups.iterrows():
             player_id = player_match.get("team_id_attacker")
-            predicted_win_chance = _probability_from_simulation(player_match)
+            predicted_win_chance, probability_source = _probability_from_simulation(player_match)
             simulation_score = float(player_match.get("simulation_score", 0.0) or 0.0)
             attacker_win = bool(player_match.get("attacker_win", False))
             degraded_data = bool(player_match.get("degraded_data", False))
@@ -82,6 +79,7 @@ def build_battle_seeds(
                 "game_version": game_version,
                 "boss_level": boss_level,
                 "predicted_player_win_chance": predicted_win_chance,
+                "probability_source": probability_source,
                 "simulation_score": round(simulation_score, 3),
                 "simulated_attacker_win": attacker_win,
                 "degraded_data": degraded_data,

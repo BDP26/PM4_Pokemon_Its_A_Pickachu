@@ -19,7 +19,6 @@ def run_monte_carlo_team_optimizer(
     Run downstream Bernoulli resampling for already-estimated battle win probabilities.
 
     This does not simulate battle mechanics directly.
-    It samples scenario outcomes from `predicted_player_win_chance`.
     """
     simulation_dir = silver_dir / simulation_dirname
     seeds_path = simulation_dir / "battle_seeds.parquet"
@@ -41,6 +40,7 @@ def run_monte_carlo_team_optimizer(
         "boss_name",
         "game_version",
         "predicted_player_win_chance",
+        "probability_source",
     }
     missing = required_cols - set(seeds_df.columns)
     if missing:
@@ -64,6 +64,7 @@ def run_monte_carlo_team_optimizer(
         "boss_name",
         "game_version",
         "predicted_player_win_chance",
+        "probability_source",
         "simulation_score",
         "simulated_attacker_win",
         "degraded_data",

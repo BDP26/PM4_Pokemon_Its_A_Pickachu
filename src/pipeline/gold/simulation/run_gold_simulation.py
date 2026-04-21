@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pandas as pd
 
-from src.pipeline.common.io import write_parquet
+from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
 from src.pipeline.gold.simulation.config import BattleSimulationConfig, load_battle_simulation_config
 from src.pipeline.settings import (
@@ -18,8 +18,11 @@ from src.pipeline.settings import (
     SILVER_SIMULATION_DIRNAME,
 )
 from src.pipeline.silver.simulation.battle_seeds import build_battle_seeds
+from src.pipeline.silver.simulation.metadata import write_simulation_run_metadata
 from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 from src.pipeline.silver.simulation.type_matchups import build_team_battle_simulations
+from src.pipeline.silver.validation.simulation_outputs import validate_team_battle_simulations
+from src.pipeline.silver.validation.team_tables import validate_reconstructed_teams
 
 
 logger = logging.getLogger(__name__)
@@ -98,8 +101,27 @@ def run_gold_simulation_from_silver(
         return
 
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
+
+    if config.validate_reconstructed_teams:
+        validate_reconstructed_teams(
+            teams=teams_data,
+            strict=config.fail_on_validation_errors,
+        )
+
     write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
+
+    write_simulation_run_metadata(
+        gold_simulation_dir,
+        engine="spark",
+        config=config,
+        extra={
+            "stage": "gold_simulation",
+            "input_team_count": len(teams_data),
+            "mc_trials": n_trials,
+            "mc_rng_seed": rng_seed,
+        },
+    )
 
     sims_started_at = time.perf_counter()
     logger.info(
@@ -114,6 +136,18 @@ def run_gold_simulation_from_silver(
         config=config,
     )
     logger.info("[gold/simulation] team battle simulations done elapsed_s=%.2f", time.perf_counter() - sims_started_at)
+
+    simulations_path = gold_simulation_dir / "team_battle_simulations.parquet"
+    if simulations_path.exists() and config.validate_simulation_outputs:
+        simulation_rows = read_parquet(simulations_path).to_dict(orient="records")
+        validate_team_battle_simulations(
+            rows=cast(list[dict[str, Any]], simulation_rows),
+            strict=config.fail_on_validation_errors,
+        )
+        if config.fail_on_degraded_data:
+            degraded_count = sum(bool(row.get("degraded_data", False)) for row in simulation_rows)
+            if degraded_count > 0:
+                raise ValueError(f"Simulation output contains degraded rows count={degraded_count}")
 
     seeds_started_at = time.perf_counter()
     logger.info("[gold/simulation] building battle seeds")

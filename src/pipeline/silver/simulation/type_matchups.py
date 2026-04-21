@@ -12,7 +12,9 @@ from typing import Any, TypedDict, cast
 import pokebase as pb
 
 from src.pipeline.common.io import read_json, write_json, write_parquet
+from src.pipeline.silver.writers.outputs import write_simulation_run_metadata
 from src.pipeline.gold.simulation.config import BattleSimulationConfig, load_battle_simulation_config
+from src.pipeline.silver.validation.simulation_outputs import validate_team_battle_simulations
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
@@ -98,12 +100,19 @@ class TeamBattleResult(TypedDict, total=False):
     duel_summaries: list[dict[str, Any]]
     predicted_player_win_chance: float
     n_trials: int
+    degradation_reasons: list[str]
+    probability_source: str
+    move_selection_policy: str
+    switching_policy: str
+    move_legality_policy: str
 
 
 class WarningCollector:
     def __init__(self) -> None:
         self._warnings: list[str] = []
         self._seen: set[str] = set()
+        self._degradation_reasons: list[str] = []
+        self._degradation_seen: set[str] = set()
 
     def warn(self, message: str) -> None:
         if message in self._seen:
@@ -112,12 +121,21 @@ class WarningCollector:
         self._warnings.append(message)
         logger.warning(message)
 
+    def degrade(self, reason: str, message: str | None = None) -> None:
+        if reason not in self._degradation_seen:
+            self._degradation_seen.add(reason)
+            self._degradation_reasons.append(reason)
+        if message:
+            self.warn(message)
+
     def all(self) -> list[str]:
         return list(self._warnings)
 
+    def degradation_reasons(self) -> list[str]:
+        return list(self._degradation_reasons)
+
     def has_warnings(self) -> bool:
         return bool(self._warnings)
-
 
 def _cache_paths(silver_dir: Path) -> tuple[Path, Path]:
     cache_dir = silver_dir / SILVER_SIMULATION_DIRNAME / _LOOKUP_CACHE_DIRNAME
@@ -496,7 +514,8 @@ def _get_pokemon_profile(
 ) -> tuple[dict[str, Any], bool, str | None]:
     profile, degraded, warning = _get_pokemon_profile_cached(species_id)
     if warning:
-        warnings.warn(
+        warnings.degrade(
+            "pokemon_profile_lookup_fallback",
             f"Pokemon lookup failed (original='{original_species}', normalized='{species_id}') -> fallback defaults"
         )
     return profile, degraded, warning
@@ -517,7 +536,10 @@ def _get_move_profile_cached(move_name: str) -> tuple[MoveProfile, bool, str | N
 def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveProfile, bool]:
     profile, degraded, warning = _get_move_profile_cached(move_name)
     if warning and move_name not in _QUIET_FALLBACK_MOVES:
-        warnings.warn(f"Move lookup failed (move='{move_name}') -> fallback move profile")
+        warnings.degrade(
+            "move_profile_lookup_fallback",
+            f"Move lookup failed (move='{move_name}') -> fallback move profile"
+        )
     return profile, degraded
 
 
@@ -680,7 +702,10 @@ def _legal_moves_for_pokemon(
 
     if not legal_moves and config.allow_struggle_fallback:
         degraded = True
-        warnings.warn(f"No legal damaging moves for '{species_id}' at level {level}; using struggle")
+        warnings.degrade(
+            "struggle_fallback",
+            f"No legal damaging moves for '{species_id}' at level {level}; using struggle"
+        )
         legal_moves.append(cast(MoveProfile, cast(object, dict(_STRUGGLE_MOVE))))
 
     return legal_moves, degraded
@@ -1135,6 +1160,7 @@ def simulate_team_battle_once(
         "degraded_data": bool(degraded_data or warnings.has_warnings()),
         "warnings": warnings.all(),
         "duel_summaries": duel_summaries,
+        "degradation_reasons": warnings.degradation_reasons(),
     }
 
 
@@ -1194,6 +1220,11 @@ def simulate_team_battle(
         "duel_summaries": last["duel_summaries"],
         "predicted_player_win_chance": round(win_rate, 3),
         "n_trials": len(results),
+        "probability_source": config.probability_policy,
+        "move_selection_policy": config.move_selection_policy,
+        "switching_policy": config.switching_policy,
+        "move_legality_policy": config.move_legality_policy,
+        "degradation_reasons": sorted({reason for r in results for reason in r.get("degradation_reasons", [])}),
     }
 
 
@@ -1246,6 +1277,26 @@ def build_team_battle_simulations(
         simulation_rows = _run_local_simulations(teams_data=teams_data, type_chart=type_chart, config=config)
 
     write_parquet(simulation_dir / "team_battle_simulations.parquet", simulation_rows)
+
+    write_simulation_run_metadata(
+        simulation_dir,
+        engine="spark" if use_spark else "local",
+        config=config,
+        extra={
+            "team_count": len(teams_data),
+            "output_rows": len(simulation_rows),
+        },
+    )
+
+    if config.validate_simulation_outputs:
+        validate_team_battle_simulations(
+            rows=cast(list[dict[str, Any]], simulation_rows),
+            strict=config.fail_on_validation_errors,
+        )
+        if config.fail_on_degraded_data:
+            degraded_count = sum(bool(row.get("degraded_data", False)) for row in simulation_rows)
+            if degraded_count > 0:
+                raise ValueError(f"Simulation output contains degraded rows count={degraded_count}")
 
     elapsed_total = time.perf_counter() - started_at
     _persist_lookup_cache_to_disk()
