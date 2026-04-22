@@ -39,6 +39,32 @@ logger = logging.getLogger(__name__)
 MAX_CANDIDATE_MOVES_PER_MEMBER = 8
 
 
+def _effective_team_variant_limit(variant_space_size: int) -> int | None:
+    """Resolve effective team-variant cap.
+
+    Returns:
+        int: hard cap on generated variants
+        None: no explicit cap (generate full variant space)
+    """
+    team_limit = DEFAULT_TEAM_VARIANT_LIMIT if DEFAULT_TEAM_VARIANT_LIMIT > 0 else None
+    moveset_limit = (
+        DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM
+        if DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM > 0
+        else None
+    )
+
+    if ALLOW_LARGE_TEAM_VARIANTS:
+        if team_limit is None:
+            return None
+        return max(1, team_limit)
+
+    # Conservative mode: keep both caps active.
+    active_limits = [limit for limit in (team_limit, moveset_limit) if limit is not None]
+    if not active_limits:
+        return max(1, variant_space_size)
+    return max(1, min(active_limits))
+
+
 def _family_root_for_species(species: str) -> str:
     normalized = species.lower().strip()
     return get_starter_family_root(normalized)
@@ -260,7 +286,8 @@ def _build_starter_variant(
     for member_variants in per_member_variants:
         variant_space_size *= len(member_variants)
 
-    effective_team_variant_limit = min(DEFAULT_TEAM_VARIANT_LIMIT, DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM)
+    effective_team_variant_limit = _effective_team_variant_limit(variant_space_size)
+    effective_limit_label = str(effective_team_variant_limit) if effective_team_variant_limit is not None else "unbounded"
     if variant_space_size > TEAM_VARIANT_CONFIRMATION_THRESHOLD and not ALLOW_LARGE_TEAM_VARIANTS:
         logger.warning(
             "[silver/teams] large starter variant space detected source_team_id=%s game_version=%s starter_base=%s estimated_space=%s threshold=%s applied_limit=%s",
@@ -269,7 +296,7 @@ def _build_starter_variant(
             starter_base,
             variant_space_size,
             TEAM_VARIANT_CONFIRMATION_THRESHOLD,
-            effective_team_variant_limit,
+            effective_limit_label,
         )
 
     team_variants: list[dict[str, Any]] = []
@@ -278,7 +305,7 @@ def _build_starter_variant(
     truncated_for_team_limit = False
 
     for combo in product(*per_member_variants):
-        if len(team_variants) >= effective_team_variant_limit:
+        if effective_team_variant_limit is not None and len(team_variants) >= effective_team_variant_limit:
             truncated_for_team_limit = True
             break
 
@@ -352,7 +379,7 @@ def _build_starter_variant(
             version,
             starter_base,
             len(team_variants),
-            effective_team_variant_limit,
+            effective_limit_label,
             variant_space_size,
         )
 
