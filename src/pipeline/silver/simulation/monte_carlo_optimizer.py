@@ -1,4 +1,4 @@
-"""Monte-Carlo resampling for battle seeds."""
+"""Monte-Carlo resampling for simulation battle seeds."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,11 +15,6 @@ def run_monte_carlo_team_optimizer(
     n_trials: int = 500,
     rng_seed: int = 42,
 ) -> int:
-    """
-    Run downstream Bernoulli resampling for already-estimated battle win probabilities.
-
-    This does not simulate battle mechanics directly.
-    """
     simulation_dir = silver_dir / simulation_dirname
     seeds_path = simulation_dir / "battle_seeds.parquet"
     output_path = simulation_dir / "monte_carlo_results.parquet"
@@ -40,7 +35,6 @@ def run_monte_carlo_team_optimizer(
         "boss_name",
         "game_version",
         "predicted_player_win_chance",
-        "probability_source",
     }
     missing = required_cols - set(seeds_df.columns)
     if missing:
@@ -51,8 +45,8 @@ def run_monte_carlo_team_optimizer(
     wins = rng.binomial(n_trials, probs)
 
     seeds_df = seeds_df.copy()
-    seeds_df["mc_trials"] = int(n_trials)
-    seeds_df["mc_rng_seed"] = int(rng_seed)
+    seeds_df["n_trials"] = int(n_trials)
+    seeds_df["rng_seed"] = int(rng_seed)
     seeds_df["wins"] = wins
     seeds_df["losses"] = n_trials - wins
     seeds_df["mc_win_rate"] = seeds_df["wins"] / float(n_trials)
@@ -64,13 +58,11 @@ def run_monte_carlo_team_optimizer(
         "boss_name",
         "game_version",
         "predicted_player_win_chance",
-        "probability_source",
         "simulation_score",
         "simulated_attacker_win",
         "degraded_data",
         "n_trials",
-        "mc_trials",
-        "mc_rng_seed",
+        "rng_seed",
         "wins",
         "losses",
         "mc_win_rate",
@@ -79,5 +71,5 @@ def run_monte_carlo_team_optimizer(
     records = seeds_df[available_columns].to_dict(orient="records")
     write_parquet(output_path, records)
 
-    print(f"[monte_carlo] simulated {len(records)} scenarios with mc_trials={n_trials}")
+    print(f"[monte_carlo] simulated {len(records)} scenarios with n_trials={n_trials}")
     return len(records)

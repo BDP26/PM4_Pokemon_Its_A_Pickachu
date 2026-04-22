@@ -62,8 +62,6 @@ def _write_partitioned_parquet(path: Path, dataframe: pd.DataFrame, partitions: 
         for column, value in zip(partitions, values, strict=False):
             partition_dir = partition_dir / f"{column}={value}"
         partition_dir.mkdir(parents=True, exist_ok=True)
-        # Partition columns are encoded in the directory path and must
-        # not be duplicated inside parquet data files.
         frame.drop(columns=partitions, errors="ignore").to_parquet(
             partition_dir / "part-000.parquet",
             index=False,
@@ -80,7 +78,6 @@ def write_parquet(
     try:
         partitions = _existing_partitions(dataframe, partition_cols)
         if partition_cols and not partitions:
-            # Fallback to plain parquet file when partition columns are absent.
             _write_non_partitioned_parquet(path, dataframe, cleanup_any_path=True)
             return
 
@@ -88,9 +85,8 @@ def write_parquet(
             _write_partitioned_parquet(path, dataframe, partitions)
             return
 
-        # Non-partition write may follow an earlier partitioned write target.
         _write_non_partitioned_parquet(path, dataframe)
-    except ImportError as exc:  # pragma: no cover - depends on runtime env
+    except ImportError as exc:
         raise ImportError(
             "Parquet write requires pyarrow or fastparquet. Install dependency: pyarrow"
         ) from exc
@@ -103,11 +99,19 @@ def read_jsonl(path: Path) -> pd.DataFrame:
 def read_parquet(path: Path) -> pd.DataFrame:
     try:
         return pd.read_parquet(path)
-    except ImportError as exc:  # pragma: no cover - depends on runtime env
+    except ImportError as exc:
         raise ImportError(
             "Parquet read requires pyarrow or fastparquet. Install dependency: pyarrow"
         ) from exc
 
 
+def read_many_parquet(paths: list[Path]) -> pd.DataFrame:
+    existing_paths = [path for path in paths if path.exists()]
+    if not existing_paths:
+        return pd.DataFrame()
 
+    frames = [read_parquet(path) for path in existing_paths]
+    if not frames:
+        return pd.DataFrame()
 
+    return pd.concat(frames, ignore_index=True)

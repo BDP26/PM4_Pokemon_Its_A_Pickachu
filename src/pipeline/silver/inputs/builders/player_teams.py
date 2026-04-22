@@ -1,10 +1,10 @@
 """Player-team generation from progression context and starter choices.
 
-Refactored for maximum team diversity:
-- build a larger reachable species pool per progression record
-- generate multiple diverse base team combinations
-- expand starter variants on top of those base teams
-- expand movesets after species diversity is established
+Final refactor:
+- per-game compatible
+- parquet-first move universe
+- controlled combinatorics
+- no legacy logic
 """
 
 import logging
@@ -19,23 +19,25 @@ from src.pipeline.silver.config.game_config import (
 )
 from src.pipeline.silver.config.team_config import (
     ALLOW_LARGE_TEAM_VARIANTS,
+    DEFAULT_CATCH_POOL_SIZE,
     DEFAULT_MEMBER_COMBO_LIMIT,
     DEFAULT_MEMBER_LEVEL,
+    DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+    DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
+    DEFAULT_SOURCE_TEAM_POOL_SIZE,
     DEFAULT_TEAM_MEMBER_LIMIT,
     DEFAULT_TEAM_VARIANT_LIMIT,
     MOVESET_WIDTH,
     TEAM_VARIANT_CONFIRMATION_THRESHOLD,
-    # new config imports kept external in your config file
-    DEFAULT_CATCH_POOL_SIZE,
-    DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
-    DEFAULT_SOURCE_TEAM_POOL_SIZE,
-    DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
 )
 from src.pipeline.silver.inputs.connectors.pokeapi_moves import _build_member_detail, _build_member_moves
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id, normalize_key_part
+from src.pipeline.settings import SILVER_DIR
 
 
 logger = logging.getLogger(__name__)
+
+MAX_CANDIDATE_MOVES_PER_MEMBER = 8
 
 
 def _family_root_for_species(species: str) -> str:
@@ -46,31 +48,19 @@ def _family_root_for_species(species: str) -> str:
 def _dedupe_details_by_family(details: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
     seen_roots: set[str] = set()
     result: list[dict[str, Any]] = []
-    skipped_missing_name = 0
-    skipped_duplicate_family = 0
 
     for item in details:
         name = item.get("name")
         if not isinstance(name, str):
-            skipped_missing_name += 1
             continue
         family_root = _family_root_for_species(name)
         if family_root in seen_roots:
-            skipped_duplicate_family += 1
             continue
         seen_roots.add(family_root)
         result.append(item)
         if len(result) >= limit:
             break
 
-    logger.debug(
-        "[silver/teams] dedupe by family input=%s output=%s skipped_missing_name=%s skipped_duplicate_family=%s limit=%s",
-        len(details),
-        len(result),
-        skipped_missing_name,
-        skipped_duplicate_family,
-        limit,
-    )
     return result
 
 
@@ -78,22 +68,18 @@ def _stable_species_signature(species_names: Iterable[str]) -> str:
     return "|".join(sorted(normalize_key_part(name) for name in species_names if normalize_key_part(name)))
 
 
-def _member_moveset_variants(raw_moves: list[str]) -> list[list[str]]:
-    """Generate deterministic moveset variants for one member.
-
-    Still deterministic, but trimmed by config.
-    """
+def _trim_candidate_moves(raw_moves: list[str], max_moves: int = MAX_CANDIDATE_MOVES_PER_MEMBER) -> list[str]:
     moves = sorted({str(move).strip().lower() for move in raw_moves if str(move).strip()})
+    return moves[:max_moves]
+
+
+def _member_moveset_variants(raw_moves: list[str]) -> list[list[str]]:
+    moves = _trim_candidate_moves(raw_moves)
     if not moves:
         logger.debug("[silver/teams] member has no moves; emitting empty moveset variant")
         return [[]]
 
     if len(moves) <= MOVESET_WIDTH:
-        logger.debug(
-            "[silver/teams] member moves within width unique_moves=%s width=%s variants=1",
-            len(moves),
-            MOVESET_WIDTH,
-        )
         return [moves]
 
     variants: list[list[str]] = []
@@ -102,26 +88,7 @@ def _member_moveset_variants(raw_moves: list[str]) -> list[list[str]]:
         if len(variants) >= DEFAULT_MEMBER_COMBO_LIMIT:
             break
 
-    logger.debug(
-        "[silver/teams] generated moveset variants unique_moves=%s width=%s variant_count=%s combo_cap=%s",
-        len(moves),
-        MOVESET_WIDTH,
-        len(variants),
-        DEFAULT_MEMBER_COMBO_LIMIT,
-    )
     return variants if variants else [moves[:MOVESET_WIDTH]]
-
-
-def _score_species_candidate(species: str, chance_max: int, level_max: int, capture_rate: int) -> tuple[int, int, int, str]:
-    """Higher is better.
-
-    Sorting key:
-    - higher encounter chance
-    - higher reachable level
-    - higher capture rate
-    - stable name tie-breaker
-    """
-    return (chance_max, level_max, capture_rate, species)
 
 
 def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, int, int]]:
@@ -148,11 +115,7 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
                 capture_rate = _safe_int(encounter.get("capture_rate"))
                 slot = by_species.setdefault(
                     species,
-                    {
-                        "level_max": 0,
-                        "chance_max": 0,
-                        "capture_rate": 0,
-                    },
+                    {"level_max": 0, "chance_max": 0, "capture_rate": 0},
                 )
                 slot["level_max"] = max(slot["level_max"], level_max)
                 slot["chance_max"] = max(slot["chance_max"], chance_max)
@@ -170,20 +133,11 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
                         continue
                     by_species.setdefault(
                         species,
-                        {
-                            "level_max": 0,
-                            "chance_max": 0,
-                            "capture_rate": 0,
-                        },
+                        {"level_max": 0, "chance_max": 0, "capture_rate": 0},
                     )
 
     candidates = [
-        (
-            species,
-            payload["chance_max"],
-            payload["level_max"],
-            payload["capture_rate"],
-        )
+        (species, payload["chance_max"], payload["level_max"], payload["capture_rate"])
         for species, payload in by_species.items()
     ]
     candidates.sort(key=lambda item: (-item[1], -item[2], -item[3], item[0]))
@@ -191,7 +145,6 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
 
 
 def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> list[tuple[str, int, int, int]]:
-    """Keep at most one species per family in the base pool to maximize team diversity."""
     seen_roots: set[str] = set()
     result: list[tuple[str, int, int, int]] = []
     for species, chance_max, level_max, capture_rate in candidates:
@@ -204,14 +157,6 @@ def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> li
 
 
 def _base_team_diversity_score(species_combo: tuple[tuple[str, int, int, int], ...]) -> tuple[int, int, int, str]:
-    """Prefer strong-but-diverse combos.
-
-    Score components:
-    - sum of encounter chances
-    - sum of reachable levels
-    - sum of capture rates
-    - stable species signature
-    """
     chance_sum = sum(item[1] for item in species_combo)
     level_sum = sum(item[2] for item in species_combo)
     capture_sum = sum(item[3] for item in species_combo)
@@ -224,14 +169,6 @@ def _generate_diverse_species_combos(
     team_fill_size: int,
     combo_limit: int,
 ) -> list[list[str]]:
-    """Generate multiple distinct base-team species combinations.
-
-    Strategy:
-    - family-dedupe candidate pool first
-    - generate combinations from a larger pool
-    - sort by aggregate score descending
-    - return top-N deterministic combinations
-    """
     if team_fill_size <= 0:
         return [[]]
 
@@ -267,19 +204,9 @@ def _generate_diverse_species_combos(
 
 
 def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Build player team variants from one base team + one starter choice."""
     version = str(base_team.get("game_version", "unknown"))
     avg_level = int(base_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
     starter_species = resolve_starter_species_for_level(starter_base.lower().strip(), avg_level)
-
-    logger.debug(
-        "[silver/teams] building starter variant source_team_id=%s game_version=%s starter_base=%s starter_species=%s avg_level=%s",
-        base_team.get("team_id"),
-        version,
-        starter_base,
-        starter_species,
-        avg_level,
-    )
 
     starter_member = _build_member_detail(
         name=starter_species,
@@ -287,6 +214,7 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
         moves=[],
         game_version=version,
         origin="starter",
+        silver_dir=SILVER_DIR,
     )
 
     team_details: list[dict[str, Any]] = []
@@ -308,39 +236,28 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
 
             if not isinstance(name, str):
                 continue
-            moves = base_moves[idx] if idx < len(base_moves) else []
 
+            moves = base_moves[idx] if idx < len(base_moves) else []
             member_detail = _build_member_detail(
                 name=name,
                 level=level,
                 moves=list(moves) if isinstance(moves, list) else [],
                 game_version=version,
                 origin="progression",
+                silver_dir=SILVER_DIR,
             )
             if member_detail is not None:
                 team_details.append(member_detail)
 
     team_details = _dedupe_details_by_family(team_details, limit=DEFAULT_TEAM_MEMBER_LIMIT)
     if not team_details:
-        logger.warning(
-            "[silver/teams] no team details after dedupe source_team_id=%s game_version=%s starter_base=%s",
-            base_team.get("team_id"),
-            version,
-            starter_base,
-        )
         return [], {}
 
     per_member_variants = [_member_moveset_variants(list(member.get("moves", []))) for member in team_details]
+
     variant_space_size = 1
     for member_variants in per_member_variants:
         variant_space_size *= len(member_variants)
-
-    logger.debug(
-        "[silver/teams] starter variant space source_team_id=%s members=%s variant_space=%s",
-        base_team.get("team_id"),
-        len(team_details),
-        variant_space_size,
-    )
 
     effective_team_variant_limit = min(DEFAULT_TEAM_VARIANT_LIMIT, DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM)
     if variant_space_size > TEAM_VARIANT_CONFIRMATION_THRESHOLD and not ALLOW_LARGE_TEAM_VARIANTS:
@@ -399,6 +316,7 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
                 level=member_level,
                 moves=list(selected_moves),
                 game_version=version,
+                silver_dir=SILVER_DIR,
             )
             if member_moves is not None:
                 member_moves["pokemon_instance_id"] = instance_id
@@ -469,7 +387,6 @@ def build_progression_source_teams(
     boss_teams: list[dict[str, Any]],
     catch_pool_size: int = DEFAULT_CATCH_POOL_SIZE,
 ) -> list[dict[str, Any]]:
-    """Build multiple diverse base teams per progression record."""
     sources: list[dict[str, Any]] = []
     level_by_boss = _boss_level_lookup(boss_teams)
 
@@ -535,7 +452,6 @@ def build_progression_source_teams(
 def build_player_teams_from_progression_context(
     progression_source_teams: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Build player candidate teams from progression context (boss milestones + starter choices)."""
     started_at = time.perf_counter()
     variants: list[dict[str, Any]] = []
     all_moves: dict[str, Any] = {}
@@ -547,28 +463,12 @@ def build_player_teams_from_progression_context(
         game_version = team.get("game_version")
         if not isinstance(game_version, str):
             skipped_missing_game_version += 1
-            logger.debug(
-                "[silver/teams] skipping source team missing game_version source_team_id=%s",
-                team.get("team_id"),
-            )
             continue
 
         starters = get_starter_choices(game_version)
         if not starters:
             skipped_missing_starters += 1
-            logger.debug(
-                "[silver/teams] skipping source team without starters source_team_id=%s game_version=%s",
-                team.get("team_id"),
-                game_version,
-            )
             continue
-
-        logger.debug(
-            "[silver/teams] expanding source team source_team_id=%s game_version=%s starter_count=%s",
-            team.get("team_id"),
-            game_version,
-            len(starters),
-        )
 
         for starter in starters:
             team_dicts, move_dict = _build_starter_variant(team, starter)

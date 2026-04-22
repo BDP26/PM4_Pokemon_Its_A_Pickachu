@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+import gc
 import logging
 import shutil
 import time
@@ -7,7 +8,7 @@ from typing import Any, cast
 
 import pandas as pd
 
-from src.pipeline.common.io import read_json, read_jsonl, write_json, write_jsonl, write_parquet
+from src.pipeline.common.io import read_json, read_jsonl, write_json, write_parquet
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.config.game_config import get_games_config
@@ -56,6 +57,7 @@ from src.pipeline.silver.schemas.contracts import validate_team_payloads
 
 
 logger = logging.getLogger(__name__)
+
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
     by_reason = Counter()
@@ -119,6 +121,48 @@ def _build_team_metadata_rows(teams: list[dict[str, Any]]) -> list[dict[str, Any
     return rows
 
 
+def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
+    return {
+        "teams": simulation_dir / f"teams_{game_key}.parquet",
+        "team_members": simulation_dir / f"team_members_{game_key}.parquet",
+        "team_member_moves": simulation_dir / f"team_member_moves_{game_key}.parquet",
+        "learnable_moves": simulation_dir / f"learnable_moves_{game_key}.parquet",
+        "combat_pool": simulation_dir / f"pokemon_combat_pool_{game_key}.parquet",
+    }
+
+
+def _build_combat_pool_rows_for_game(
+    source_teams: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    for team in source_teams:
+        game_version = str(team.get("game_version") or "").strip().lower()
+        avg_level = int(team.get("avg_level") or 0)
+        pokemon = team.get("pokemon", [])
+        if not game_version or avg_level <= 0 or not isinstance(pokemon, list):
+            continue
+
+        for species in pokemon:
+            species_name = str(species or "").strip().lower()
+            if not species_name:
+                continue
+            key = (game_version, species_name, avg_level)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "game_version": game_version,
+                    "pokemon_species": species_name,
+                    "level": avg_level,
+                }
+            )
+
+    return rows
+
+
 def build_silver_from_bronze(
     bronze_dir: Path = BRONZE_DIR,
     silver_dir: Path = SILVER_DIR,
@@ -126,7 +170,6 @@ def build_silver_from_bronze(
     started_at = time.perf_counter()
     ensure_medallion_dirs()
 
-    # Ensure type chart is available
     type_chart_path = bronze_dir / "type_chart.json"
     if not type_chart_path.exists():
         chart = build_type_chart()
@@ -151,7 +194,6 @@ def build_silver_from_bronze(
             "Bronze inputs are missing. Run the bronze step first: python -m src.pipeline.run_pipeline layers bronze"
         )
 
-    # Get allowed versions from game config
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
 
@@ -179,29 +221,23 @@ def build_silver_from_bronze(
         }
     )
     previous_state = load_state(state_path)
-    if previous_state.get("input_signature") == current_signature:
-        expected_outputs = [
-            snapshots_dir,
-            mappings_dir / "location_to_area_map.json",
-            mappings_dir / "location_to_pokemon_map.json",
-            mappings_dir / "boss_mapping_by_version.json",
-            references_dir / "pokemon_reference.json",
-            references_dir / "encounter_methods_reference.json",
-            references_dir / "games.parquet",
-            references_dir / "bosses.parquet",
-            references_dir / "locations.parquet",
-            references_dir / "encounters.parquet",
-            references_dir / "move_reference.parquet",
-            references_dir / "learnable_moves.parquet",
-            references_dir / "pokemon_learnable_moves.parquet",
-            simulation_dir / "teams.parquet",
-            simulation_dir / "team_members.parquet",
-            simulation_dir / "team_member_moves.parquet",
-            simulation_dir / "move_data.json",
-        ]
-        if all(path.exists() for path in expected_outputs):
-            logger.info("[silver] incremental skip; input signature unchanged")
-            return
+
+    expected_outputs = [
+        snapshots_dir,
+        mappings_dir / "location_to_area_map.json",
+        mappings_dir / "location_to_pokemon_map.json",
+        mappings_dir / "boss_mapping_by_version.json",
+        references_dir / "pokemon_reference.json",
+        references_dir / "encounter_methods_reference.json",
+        references_dir / "games.parquet",
+        references_dir / "bosses.parquet",
+        references_dir / "locations.parquet",
+        references_dir / "encounters.parquet",
+    ]
+    if previous_state.get("input_signature") == current_signature and all(path.exists() for path in expected_outputs):
+        logger.info("[silver] incremental skip; input signature unchanged")
+        return
+
     logger.info("[silver] processing %s bulbapedia game files", len(game_files))
 
     for game_file in game_files:
@@ -253,16 +289,12 @@ def build_silver_from_bronze(
     write_json(mappings_dir / "location_to_area_map.json", area_map)
     write_json(mappings_dir / "location_to_pokemon_map.json", location_pokemon_map)
 
-    # Clear encounters file if exists (for fresh aggregation)
     encounters_file = references_dir / "encounters.jsonl"
     if encounters_file.exists():
         encounters_file.unlink()
 
-    # Clear snapshot files to avoid accumulating duplicate rows across reruns.
-    removed_snapshots = 0
     for snapshot_file in snapshots_dir.glob("*_boss_snapshots.jsonl"):
         snapshot_file.unlink()
-        removed_snapshots += 1
 
     all_pokemon_references = {}
 
@@ -283,11 +315,9 @@ def build_silver_from_bronze(
         len(all_pokemon_references),
     )
 
-    # Create centralized references
     create_pokemon_reference_index(all_pokemon_references, references_dir)
     create_encounter_methods_reference(all_records, references_dir)
 
-    # Build normalized reference/progression tables.
     games_table = build_games_table(games_config)
     bosses_table = build_bosses_table(boss_mapping_by_version)
     locations_table = build_locations_table(all_records, area_map, mapper.misses)
@@ -324,93 +354,147 @@ def build_silver_from_bronze(
 
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
-    # Build battle simulation data in separate stages (boss -> progression sources -> player variants)
     logger.info("[silver] extracting boss teams for simulation")
     teams_started_at = time.perf_counter()
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(
         bronze_dir,
         allowed_versions=allowed_versions,
     )
-    progression_source_teams = build_progression_source_teams(all_records, boss_teams)
-    progression_prefetch_entries: list[tuple[str, int, str, list[str]]] = []
-    for source_team in progression_source_teams:
-        game_version = str(source_team.get("game_version") or "").strip().lower()
-        avg_level = int(source_team.get("avg_level") or 0)
-        pokemon = source_team.get("pokemon", [])
-        if not game_version or avg_level <= 0 or not isinstance(pokemon, list):
+
+    all_move_data = dict(boss_move_data)
+
+    for pattern in [
+        "teams_*.parquet",
+        "team_members_*.parquet",
+        "team_member_moves_*.parquet",
+        "learnable_moves_*.parquet",
+        "pokemon_combat_pool_*.parquet",
+    ]:
+        for old_file in simulation_dir.glob(pattern):
+            old_file.unlink()
+
+    total_boss_teams = 0
+    total_player_teams = 0
+    total_team_members = 0
+
+    boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for team in boss_teams:
+        game_version = str(team.get("game_version") or "").strip().lower()
+        if game_version:
+            boss_teams_by_game[game_version].append(team)
+
+    for game_key, records in records_with_game_keys:
+        logger.info("[silver] building teams for game=%s records=%s", game_key, len(records))
+        game_started_at = time.perf_counter()
+
+        boss_teams_game = boss_teams_by_game.get(game_key, [])
+        progression_source_teams = build_progression_source_teams(records, boss_teams_game)
+
+        progression_prefetch_entries: list[tuple[str, int, str, list[str]]] = []
+        for source_team in progression_source_teams:
+            game_version = str(source_team.get("game_version") or "").strip().lower()
+            avg_level = int(source_team.get("avg_level") or 0)
+            pokemon = source_team.get("pokemon", [])
+            if not game_version or avg_level <= 0 or not isinstance(pokemon, list):
+                continue
+            for species in pokemon:
+                progression_prefetch_entries.append((str(species), avg_level, game_version, []))
+
+        if progression_prefetch_entries:
+            persisted_progression = persist_move_reference_cache(progression_prefetch_entries, silver_dir=silver_dir)
+            logger.info(
+                "[silver] persisted progression move cache game=%s entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
+                game_key,
+                persisted_progression.get("entry_count", 0),
+                persisted_progression.get("target_pairs", 0),
+                persisted_progression.get("learnable_rows", 0),
+                persisted_progression.get("move_rows", 0),
+            )
+
+        combat_pool_rows = _build_combat_pool_rows_for_game(progression_source_teams)
+        paths = _game_output_paths(simulation_dir, game_key)
+        write_parquet(paths["combat_pool"], combat_pool_rows)
+
+        # Persist per-game learnable move shard from current references.
+        references_learnable_path = references_dir / "learnable_moves.parquet"
+        if references_learnable_path.exists():
+            learnable_df = read_parquet(references_learnable_path)
+            if not learnable_df.empty and "game_version" in learnable_df.columns:
+                learnable_df = learnable_df[learnable_df["game_version"] == game_key]
+            write_parquet(paths["learnable_moves"], learnable_df)
+
+        player_teams, player_move_data = build_player_teams_from_progression_context(progression_source_teams)
+        all_move_data.update(player_move_data)
+
+        teams_data_game = boss_teams_game + player_teams
+        if not teams_data_game:
+            logger.warning("[silver] no teams for game=%s", game_key)
             continue
-        for species in pokemon:
-            progression_prefetch_entries.append((str(species), avg_level, game_version, []))
-    if progression_prefetch_entries:
-        persisted_progression = persist_move_reference_cache(progression_prefetch_entries, silver_dir=silver_dir)
+
+        validated_teams = validate_team_payloads(teams_data_game)
+        team_metadata_rows = _build_team_metadata_rows(validated_teams)
+        team_members = build_team_members_table(validated_teams)
+        team_member_moves = build_team_member_moves_table(validated_teams, all_move_data)
+
+        write_parquet(paths["teams"], team_metadata_rows)
+        write_parquet(paths["team_members"], team_members)
+        write_parquet(paths["team_member_moves"], team_member_moves)
+
+        total_boss_teams += len(boss_teams_game)
+        total_player_teams += len(player_teams)
+        total_team_members += len(team_members)
+
         logger.info(
-            "[silver] persisted progression move cache entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
-            persisted_progression.get("entry_count", 0),
-            persisted_progression.get("target_pairs", 0),
-            persisted_progression.get("learnable_rows", 0),
-            persisted_progression.get("move_rows", 0),
+            "[silver] wrote team shards game=%s boss_teams=%s player_teams=%s team_members=%s elapsed_s=%.2f",
+            game_key,
+            len(boss_teams_game),
+            len(player_teams),
+            len(team_members),
+            time.perf_counter() - game_started_at,
         )
-    player_teams, player_move_data = build_player_teams_from_progression_context(progression_source_teams)
-    teams_data = boss_teams + player_teams
-    all_move_data = {**boss_move_data, **player_move_data}
+
+        del progression_source_teams
+        del player_teams
+        del player_move_data
+        del teams_data_game
+        del validated_teams
+        del team_metadata_rows
+        del team_members
+        del team_member_moves
+        del combat_pool_rows
+        gc.collect()
+
+    move_reference = build_move_reference_table(all_move_data)
+    learnable_moves = build_learnable_moves_table(all_move_data)
+
+    write_validated_move_data(simulation_dir / "move_data.json", all_move_data)
+    write_parquet(references_dir / "move_reference.parquet", move_reference)
+    write_parquet(references_dir / "learnable_moves.parquet", learnable_moves, partition_cols=["game_version"])
+    write_parquet(references_dir / "pokemon_learnable_moves.parquet", learnable_moves, partition_cols=["game_version", "pokemon_species"])
+
+    relational_report = validate_normalized_silver_tables(
+        {
+            "games": pd.DataFrame(games_table),
+            "bosses": pd.DataFrame(bosses_table),
+            "locations": pd.DataFrame(locations_table),
+            "encounters": encounters_frame,
+            "move_reference": pd.DataFrame(move_reference),
+            "learnable_moves": pd.DataFrame(learnable_moves),
+        }
+    )
+    write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
+    if not relational_report.is_valid:
+        raise ValueError("Silver relational validation failed; see diagnostics/relational_validation.json")
+
     logger.info(
-        "[silver] team extraction done boss_teams=%s progression_sources=%s player_teams=%s teams_total=%s move_records=%s elapsed_s=%.2f",
-        len(boss_teams),
-        len(progression_source_teams),
-        len(player_teams),
-        len(teams_data),
+        "[silver] team extraction done boss_teams=%s player_teams=%s team_members=%s move_records=%s elapsed_s=%.2f",
+        total_boss_teams,
+        total_player_teams,
+        total_team_members,
         len(all_move_data),
         time.perf_counter() - teams_started_at,
     )
 
-    if teams_data:
-        _remove_if_exists(simulation_dir / "boss_teams.parquet")
-        _remove_if_exists(simulation_dir / "player_teams.parquet")
-        validated_teams = validate_team_payloads(teams_data)
-        team_metadata_rows = _build_team_metadata_rows(validated_teams)
-        write_parquet(simulation_dir / "teams.parquet", team_metadata_rows, partition_cols=["game_version", "team_role"])
-        write_jsonl(simulation_dir / "teams.jsonl", validated_teams)
-        validated_move_data = write_validated_move_data(simulation_dir / "move_data.json", all_move_data)
-
-        team_members = build_team_members_table(validated_teams)
-        team_member_moves = build_team_member_moves_table(validated_teams, all_move_data)
-        move_reference = build_move_reference_table(all_move_data)
-        learnable_moves = build_learnable_moves_table(all_move_data)
-
-        write_parquet(simulation_dir / "team_members.parquet", team_members, partition_cols=["game_version"])
-        write_parquet(simulation_dir / "team_member_moves.parquet", team_member_moves, partition_cols=["game_version"])
-        write_parquet(references_dir / "move_reference.parquet", move_reference)
-        write_parquet(references_dir / "learnable_moves.parquet", learnable_moves, partition_cols=["game_version"])
-        write_parquet(references_dir / "pokemon_learnable_moves.parquet", learnable_moves, partition_cols=["game_version", "pokemon_species"])
-
-        relational_report = validate_normalized_silver_tables(
-            {
-                "games": pd.DataFrame(games_table),
-                "bosses": pd.DataFrame(bosses_table),
-                "locations": pd.DataFrame(locations_table),
-                "encounters": encounters_frame,
-                "teams": pd.DataFrame(validated_teams),
-                "team_members": pd.DataFrame(team_members),
-                "team_member_moves": pd.DataFrame(team_member_moves),
-                "move_reference": pd.DataFrame(move_reference),
-                "learnable_moves": pd.DataFrame(learnable_moves),
-            }
-        )
-        write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
-        if not relational_report.is_valid:
-            raise ValueError("Silver relational validation failed; see diagnostics/relational_validation.json")
-
-        logger.info(
-            "[silver] wrote teams.parquet boss_teams=%s player_teams=%s team_members=%s move_records=%s",
-            len(boss_teams),
-            len(player_teams),
-            len(team_members),
-            len(validated_move_data),
-        )
-    else:
-        logger.warning("[silver] no teams found; simulation outputs will be skipped")
-
-    # Create manifest of available data
     create_silver_manifest(silver_dir)
 
     save_state(
@@ -419,15 +503,18 @@ def build_silver_from_bronze(
             "input_signature": current_signature,
             "updated_at": time.time(),
             "games_processed": len(records_with_game_keys),
-            "boss_teams": len(boss_teams),
-            "player_teams": len(player_teams),
+            "boss_teams": total_boss_teams,
+            "player_teams": total_player_teams,
             "move_records": len(all_move_data),
         },
     )
 
-    logger.info("[silver] build finished unmapped_events=%s records=%s elapsed_s=%.2f", len(mapper.misses), len(all_records), time.perf_counter() - started_at)
-
-
+    logger.info(
+        "[silver] build finished unmapped_events=%s records=%s elapsed_s=%.2f",
+        len(mapper.misses),
+        len(all_records),
+        time.perf_counter() - started_at,
+    )
 
 
 if __name__ == "__main__":
