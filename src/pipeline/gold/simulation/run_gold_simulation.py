@@ -63,21 +63,31 @@ def run_gold_simulation_from_silver(
     rng_seed: int = 42,
 ) -> None:
     started_at = time.perf_counter()
+    silver_simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     gold_simulation_dir = gold_dir / GOLD_SIMULATION_DIRNAME
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
 
+    teams_path = required_input_files.get("teams") if required_input_files else (silver_simulation_dir / "teams.parquet")
+    team_members_path = (
+        required_input_files.get("team_members") if required_input_files else (silver_simulation_dir / "team_members.parquet")
+    )
+    team_member_moves_path = (
+        required_input_files.get("team_member_moves")
+        if required_input_files
+        else (silver_simulation_dir / "team_member_moves.parquet")
+    )
+
     loader_kwargs: dict[str, Any] = {
         "silver_dir": silver_dir,
         "simulation_dirname": SILVER_SIMULATION_DIRNAME,
-        "teams_path": required_input_files.get("teams") if required_input_files else None,
-        "team_members_path": required_input_files.get("team_members") if required_input_files else None,
-        "team_member_moves_path": required_input_files.get("team_member_moves") if required_input_files else None,
+        "teams_path": teams_path,
+        "team_members_path": team_members_path,
+        "team_member_moves_path": team_member_moves_path,
     }
 
     reconstructed_teams = load_reconstructed_teams_from_silver(**loader_kwargs)
     teams_df = pd.DataFrame(reconstructed_teams)
-
     if teams_df.empty:
         logger.warning("[gold/simulation] reconstructed team dataset is empty; skipping simulation")
         return
@@ -87,7 +97,7 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
 
     sims_started_at = time.perf_counter()
-    logger.info("[gold/simulation] running team battle simulations with pyspark")
+    logger.info("[gold/simulation] running round-based team battle simulations")
     _run_gold_team_battle_simulations(
         teams_data=teams_data,
         gold_dir=gold_dir,
@@ -101,11 +111,11 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
     mc_started_at = time.perf_counter()
-    logger.info("[gold/simulation] running monte carlo optimizer trials=%s seed=%s", n_trials, rng_seed)
+    logger.info("[gold/simulation] summarizing simulation results trials=%s seed=%s", n_trials, rng_seed)
     _run_gold_monte_carlo_optimizer(
         gold_dir=gold_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
-    logger.info("[gold/simulation] monte carlo optimizer done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
+    logger.info("[gold/simulation] simulation summary done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
     logger.info("[gold/simulation] finished elapsed_s=%.2f", time.perf_counter() - started_at)

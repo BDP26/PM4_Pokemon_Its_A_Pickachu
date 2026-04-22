@@ -19,12 +19,21 @@ GOLD_SIMULATION_DIRNAME = "simulation"
 TYPE_CHART_CSV_PATH = BRONZE_DIR / "type_chart.csv"
 TYPE_CHART_JSON_PATH = BRONZE_DIR / "type_chart.json"
 
-
 BULBA_API = "https://bulbapedia.bulbagarden.net/w/api.php"
 POKEAPI = "https://pokeapi.co/api/v2"
 
 KAGGLE_GYM_LEADERS_DATASET = "maxiboo/pokemon-gen-1-9-gym-leaders-elite-four"
 KAGGLE_GYM_LEADERS_FILE_PATH = ""
+
+SIMULATION_CONFIG = {
+    "max_overlevel": 2,
+    "max_underlevel": 10,
+    "default_trials": 15,
+    "damage_randomness_min": 0.85,
+    "damage_randomness_max": 1.00,
+    "crit_chance": 0.0625,
+    "max_turns_per_duel": 100,
+}
 
 
 def ensure_medallion_dirs() -> None:
@@ -54,5 +63,3 @@ def get_gold_subdirs(base_dir: Path = GOLD_DIR) -> dict[str, Path]:
     return {
         "simulation": base_dir / GOLD_SIMULATION_DIRNAME,
     }
-
-

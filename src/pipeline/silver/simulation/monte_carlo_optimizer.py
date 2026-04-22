@@ -1,9 +1,12 @@
-"""Monte-Carlo resampling for simulation battle seeds."""
+"""Aggregate results from real round-based team simulations.
+
+This file no longer performs fake Bernoulli resampling from an already-known
+probability. It summarizes the probabilities produced by the actual battle engine.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-
-import numpy as np
 
 from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
@@ -16,50 +19,43 @@ def run_monte_carlo_team_optimizer(
     rng_seed: int = 42,
 ) -> int:
     simulation_dir = silver_dir / simulation_dirname
-    seeds_path = simulation_dir / "battle_seeds.parquet"
+    simulations_path = simulation_dir / "team_battle_simulations.parquet"
     output_path = simulation_dir / "monte_carlo_results.parquet"
 
-    if not seeds_path.exists():
-        print("[monte_carlo] no battle seeds found, skipping")
+    if not simulations_path.exists():
+        print("[monte_carlo] no team simulations found, skipping")
         return 0
 
-    seeds_df = read_parquet(seeds_path)
-    if seeds_df.empty:
-        print("[monte_carlo] battle_seeds.parquet is empty, skipping")
+    simulations_df = read_parquet(simulations_path)
+    if simulations_df.empty:
+        print("[monte_carlo] team_battle_simulations.parquet is empty, skipping")
         return 0
 
     required_cols = {
-        "scenario_id",
-        "player_team_id",
-        "boss_team_id",
-        "boss_name",
-        "game_version",
-        "predicted_player_win_chance",
-    }
-    missing = required_cols - set(seeds_df.columns)
-    if missing:
-        raise ValueError(f"battle_seeds.parquet missing required columns: {sorted(missing)}")
-
-    probs = seeds_df["predicted_player_win_chance"].astype(float).clip(lower=0.0, upper=1.0).to_numpy()
-    rng = np.random.default_rng(rng_seed)
-    wins = rng.binomial(n_trials, probs)
-
-    seeds_df = seeds_df.copy()
-    seeds_df["n_trials"] = int(n_trials)
-    seeds_df["rng_seed"] = int(rng_seed)
-    seeds_df["wins"] = wins
-    seeds_df["losses"] = n_trials - wins
-    seeds_df["mc_win_rate"] = seeds_df["wins"] / float(n_trials)
-
-    output_columns = [
-        "scenario_id",
-        "player_team_id",
-        "boss_team_id",
-        "boss_name",
-        "game_version",
+        "team_id_attacker",
+        "team_id_defender",
         "predicted_player_win_chance",
         "simulation_score",
-        "simulated_attacker_win",
+        "attacker_win",
+        "degraded_data",
+        "n_trials",
+    }
+    missing = required_cols - set(simulations_df.columns)
+    if missing:
+        raise ValueError(f"team_battle_simulations.parquet missing required columns: {sorted(missing)}")
+
+    result_df = simulations_df.copy()
+    result_df["mc_win_rate"] = result_df["predicted_player_win_chance"].astype(float)
+    result_df["wins"] = (result_df["mc_win_rate"] * result_df["n_trials"].astype(int)).round().astype(int)
+    result_df["losses"] = result_df["n_trials"].astype(int) - result_df["wins"]
+    result_df["rng_seed"] = int(rng_seed)
+
+    output_columns = [
+        "team_id_attacker",
+        "team_id_defender",
+        "predicted_player_win_chance",
+        "simulation_score",
+        "attacker_win",
         "degraded_data",
         "n_trials",
         "rng_seed",
@@ -67,9 +63,8 @@ def run_monte_carlo_team_optimizer(
         "losses",
         "mc_win_rate",
     ]
-    available_columns = [column for column in output_columns if column in seeds_df.columns]
-    records = seeds_df[available_columns].to_dict(orient="records")
+    records = result_df[output_columns].to_dict(orient="records")
     write_parquet(output_path, records)
 
-    print(f"[monte_carlo] simulated {len(records)} scenarios with n_trials={n_trials}")
+    print(f"[monte_carlo] summarized {len(records)} scenarios from real battle trials")
     return len(records)

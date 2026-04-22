@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import pandas as pd
 
-from src.pipeline.common.io import read_json, read_jsonl, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.config.game_config import get_games_config
@@ -29,7 +29,10 @@ from src.pipeline.silver.inputs.builders.player_teams import (
     build_progression_source_teams,
 )
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
-from src.pipeline.silver.inputs.connectors.pokeapi_moves import persist_move_reference_cache
+from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
+    bootstrap_move_reference_cache,
+    persist_move_reference_cache,
+)
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
 from src.pipeline.silver.enrichment.schema_normalizer import (
     write_normalized_silver,
@@ -161,6 +164,58 @@ def _build_combat_pool_rows_for_game(
             )
 
     return rows
+
+
+def _build_bootstrap_move_entries(
+    records_with_game_keys: list[tuple[str, list[dict[str, Any]]]],
+) -> list[tuple[str, int, str, list[str]]]:
+    bootstrap_entries: list[tuple[str, int, str, list[str]]] = []
+
+    for game_key, records in records_with_game_keys:
+        for record in records:
+            reachable_encounters = record.get("reachable_location_encounters", {})
+            if isinstance(reachable_encounters, dict):
+                for encounters in reachable_encounters.values():
+                    if not isinstance(encounters, list):
+                        continue
+                    for encounter in encounters:
+                        if not isinstance(encounter, dict):
+                            continue
+                        species = str(encounter.get("species") or "").strip().lower()
+                        if not species:
+                            continue
+                        try:
+                            level = int(
+                                encounter.get("level_max")
+                                or encounter.get("level")
+                                or record.get("boss_avg_level")
+                                or 20
+                            )
+                        except (TypeError, ValueError):
+                            level = 20
+                        bootstrap_entries.append((species, max(level, 1), game_key, []))
+
+            reachable_species = record.get("reachable_location_pokemon", {})
+            if isinstance(reachable_species, dict):
+                for species_list in reachable_species.values():
+                    if not isinstance(species_list, list):
+                        continue
+                    for species in species_list[:12]:
+                        species_name = str(species or "").strip().lower()
+                        if not species_name:
+                            continue
+                        bootstrap_entries.append((species_name, 20, game_key, []))
+
+    deduped_entries: list[tuple[str, int, str, list[str]]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for species, level, game_version, moves in bootstrap_entries:
+        key = (str(species).strip().lower(), int(level), str(game_version).strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_entries.append((species, level, game_version, moves))
+
+    return deduped_entries
 
 
 def build_silver_from_bronze(
@@ -354,6 +409,20 @@ def build_silver_from_bronze(
 
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
+    move_reference_path = references_dir / "move_reference.parquet"
+    learnable_moves_path = references_dir / "learnable_moves.parquet"
+    if not move_reference_path.exists() or not learnable_moves_path.exists():
+        logger.info("[silver] bootstrapping move reference parquet before team extraction")
+        bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
+        bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
+        logger.info(
+            "[silver] bootstrap move references done entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
+            bootstrap_stats.get("entry_count", 0),
+            bootstrap_stats.get("target_pairs", 0),
+            bootstrap_stats.get("learnable_rows", 0),
+            bootstrap_stats.get("move_rows", 0),
+        )
+
     logger.info("[silver] extracting boss teams for simulation")
     teams_started_at = time.perf_counter()
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(
@@ -415,10 +484,8 @@ def build_silver_from_bronze(
         paths = _game_output_paths(simulation_dir, game_key)
         write_parquet(paths["combat_pool"], combat_pool_rows)
 
-        # Persist per-game learnable move shard from current references.
-        references_learnable_path = references_dir / "learnable_moves.parquet"
-        if references_learnable_path.exists():
-            learnable_df = read_parquet(references_learnable_path)
+        if learnable_moves_path.exists():
+            learnable_df = read_parquet(learnable_moves_path)
             if not learnable_df.empty and "game_version" in learnable_df.columns:
                 learnable_df = learnable_df[learnable_df["game_version"] == game_key]
             write_parquet(paths["learnable_moves"], learnable_df)

@@ -1,18 +1,22 @@
 """Parquet-first helpers for team member move information.
 
-Strict mode:
-- reads move + learnable references from Silver parquet only
-- no API/bootstrap fallback
-- team creation and simulation must consume the same persisted move universe
+Design:
+- normal runtime is strict parquet-only
+- first-run bootstrap is explicit via bootstrap_move_reference_cache(...)
+- no hidden fallback during normal team generation/simulation
 """
 
 import logging
 from pathlib import Path
 from typing import Any
 
+import pokebase as pb
+
 from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import (
+    FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
+    GENERIC_FORM_SUFFIXES,
     SPECIES_SLUG_ALIASES,
 )
 from src.pipeline.settings import SILVER_DIR
@@ -49,7 +53,31 @@ def _normalize_move_name(move: Any) -> str:
     return normalized.replace(" ", "-")
 
 
+def _species_lookup_candidates(species_slug: str) -> list[str]:
+    candidates = [species_slug]
+    candidates.extend(FORM_LOOKUP_FALLBACKS.get(species_slug, ()))
+    for suffix in GENERIC_FORM_SUFFIXES:
+        candidates.append(f"{species_slug}-{suffix}")
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _clear_loaded_caches() -> None:
+    global _CACHE_SILVER_DIR
+    _MOVE_PROFILE_CACHE.clear()
+    _LEARNABLE_BY_GAME_SPECIES.clear()
+    _LEARNABLE_CACHE.clear()
+    _CACHE_SILVER_DIR = None
+
+
 def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
+    """Strict parquet-only runtime cache load."""
     global _CACHE_SILVER_DIR
 
     cache_key = str(Path(silver_dir).resolve())
@@ -70,7 +98,7 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
     if not move_reference_path.exists():
         raise FileNotFoundError(
             f"Missing move reference parquet: {move_reference_path}. "
-            "Build/persist move references before team generation."
+            "Run bootstrap_move_reference_cache(...) before team generation."
         )
 
     move_df = read_parquet(move_reference_path)
@@ -96,7 +124,7 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
     if learn_df is None:
         raise FileNotFoundError(
             f"Missing learnable move parquet under {references_dir}. "
-            "Build/persist learnable moves before team generation."
+            "Run bootstrap_move_reference_cache(...) before team generation."
         )
 
     grouped: dict[tuple[str, str], dict[str, int]] = {}
@@ -112,6 +140,131 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
 
     _LEARNABLE_BY_GAME_SPECIES.update(grouped)
     _CACHE_SILVER_DIR = cache_key
+
+
+def _api_move_profile(move_name: str) -> dict[str, Any]:
+    normalized = _normalize_move_name(move_name)
+    try:
+        move = pb.move(normalized)
+        return {
+            "move_name": normalized,
+            "power": int(getattr(move, "power", 0) or 0),
+            "damage_class": str(getattr(getattr(move, "damage_class", None), "name", "status") or "status"),
+            "type": str(getattr(getattr(move, "type", None), "name", "") or "") or None,
+            "accuracy": getattr(move, "accuracy", None),
+            "pp": getattr(move, "pp", None),
+        }
+    except Exception:
+        return {
+            "move_name": normalized,
+            "power": 0,
+            "damage_class": "status",
+            "type": None,
+            "accuracy": None,
+            "pp": None,
+        }
+
+
+def _api_learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
+    species_slug = _normalize_species_slug(species)
+    version_group = GAME_TO_VERSION_GROUP.get(game_version, game_version)
+
+    resolved_poke = None
+    for candidate in _species_lookup_candidates(species_slug):
+        try:
+            resolved_poke = pb.pokemon(candidate)
+            break
+        except Exception:
+            continue
+
+    if resolved_poke is None:
+        return {}
+
+    discovered: dict[str, int] = {}
+    for move_slot in getattr(resolved_poke, "moves", []):
+        move_name = _normalize_move_name(getattr(getattr(move_slot, "move", None), "name", "") or "")
+        if not move_name:
+            continue
+        for detail in getattr(move_slot, "version_group_details", []):
+            detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "").strip().lower()
+            if detail_group != version_group:
+                continue
+            learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "").strip().lower()
+            if learn_method != "level-up":
+                continue
+            learned_at = _normalize_learned_level(getattr(detail, "level_learned_at", None))
+            discovered[move_name] = min(discovered.get(move_name, learned_at), learned_at)
+
+    return discovered
+
+
+def bootstrap_move_reference_cache(
+    entries: list[tuple[str, int, str, list[str]]],
+    silver_dir: Path = SILVER_DIR,
+) -> dict[str, int]:
+    """Explicit first-run materialization from API -> parquet.
+
+    This is the only place allowed to call external move/species APIs.
+    """
+    target_pairs: set[tuple[str, str]] = set()
+    required_moves: set[str] = set()
+
+    for species, _, game_version, provided_moves in entries:
+        game_version_norm = str(game_version).strip().lower()
+        species_slug = _normalize_species_slug(species)
+        if not game_version_norm or not species_slug:
+            continue
+        target_pairs.add((game_version_norm, species_slug))
+        for move_name in provided_moves:
+            normalized = _normalize_move_name(move_name)
+            if normalized:
+                required_moves.add(normalized)
+
+    learnable_rows: list[dict[str, Any]] = []
+    all_referenced_moves: set[str] = set(required_moves)
+
+    for game_version, species_slug in sorted(target_pairs):
+        move_levels = _api_learnable_move_levels_for_species(species_slug, game_version)
+        for move_name, learned_level in sorted(move_levels.items()):
+            normalized_move = _normalize_move_name(move_name)
+            if not normalized_move:
+                continue
+            all_referenced_moves.add(normalized_move)
+            learnable_rows.append(
+                {
+                    "game_version": game_version,
+                    "pokemon_species": species_slug,
+                    "move_name": normalized_move,
+                    "learned_level": _normalize_learned_level(learned_level),
+                    "learn_method": "level-up",
+                }
+            )
+
+    move_rows: list[dict[str, Any]] = []
+    for move_name in sorted(all_referenced_moves):
+        move_rows.append(_api_move_profile(move_name))
+
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+
+    if learnable_rows:
+        write_parquet(references_dir / "learnable_moves.parquet", learnable_rows, partition_cols=["game_version"])
+        write_parquet(
+            references_dir / "pokemon_learnable_moves.parquet",
+            learnable_rows,
+            partition_cols=["game_version", "pokemon_species"],
+        )
+    if move_rows:
+        write_parquet(references_dir / "move_reference.parquet", move_rows)
+
+    _clear_loaded_caches()
+
+    return {
+        "entry_count": len(entries),
+        "target_pairs": len(target_pairs),
+        "learnable_rows": len(learnable_rows),
+        "move_rows": len(move_rows),
+    }
 
 
 def _move_profile(move_name: str, silver_dir: Path = SILVER_DIR) -> dict[str, Any]:
@@ -171,9 +324,7 @@ def _learnable_moves_for_species(species: str, level: int, game_version: str, si
 
     level_cap = int(level)
     move_levels = _learnable_move_levels_for_species(species_slug, game_version_norm, silver_dir=silver_dir)
-    filtered = tuple(
-        sorted(move for move, learned_level in move_levels.items() if int(learned_level) <= level_cap)
-    )
+    filtered = tuple(sorted(move for move, learned_level in move_levels.items() if int(learned_level) <= level_cap))
     _LEARNABLE_CACHE[cache_key] = filtered
     return filtered
 
@@ -190,12 +341,7 @@ def persist_move_reference_cache(
     entries: list[tuple[str, int, str, list[str]]],
     silver_dir: Path = SILVER_DIR,
 ) -> dict[str, int]:
-    """Materialize parquet references from current cache contents only.
-
-    This function is strict:
-    - it assumes learnable/profile information already exists in parquet cache
-    - it does not call external APIs
-    """
+    """Persist from already-materialized parquet caches only."""
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
 
     target_pairs: set[tuple[str, str]] = set()
@@ -260,8 +406,7 @@ def persist_move_reference_cache(
     if move_rows:
         write_parquet(references_dir / "move_reference.parquet", move_rows)
 
-    global _CACHE_SILVER_DIR
-    _CACHE_SILVER_DIR = None
+    _clear_loaded_caches()
 
     return {
         "entry_count": len(entries),
@@ -304,8 +449,7 @@ def _build_member_moves(
     for move_name in learnable_moves:
         if not _is_known_move(move_name, silver_dir=silver_dir):
             continue
-        profile = _move_profile(move_name, silver_dir=silver_dir)
-        move_details[move_name] = profile
+        move_details[move_name] = _move_profile(move_name, silver_dir=silver_dir)
 
     for move_name in cleaned_moves:
         if move_name in move_details or not _is_known_move(move_name, silver_dir=silver_dir):
