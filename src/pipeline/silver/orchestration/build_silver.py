@@ -33,6 +33,7 @@ from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
     bootstrap_move_reference_cache,
     persist_move_reference_cache,
 )
+from src.pipeline.silver.inputs.reference_context import load_reference_context, normalize_move_name, normalize_species_slug
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
 from src.pipeline.silver.enrichment.schema_normalizer import (
     write_normalized_silver,
@@ -216,6 +217,30 @@ def _build_bootstrap_move_entries(
         deduped_entries.append((species, level, game_version, moves))
 
     return deduped_entries
+
+
+def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str, Any]]]) -> list[tuple[str, int, str, list[str]]]:
+    entries: list[tuple[str, int, str, list[str]]] = []
+    for game_key, rows in kaggle_rows_by_game.items():
+        game_norm = str(game_key or "").strip().lower()
+        if not game_norm:
+            continue
+        for row in rows:
+            species = normalize_species_slug(row.get("Pokemon") or "")
+            if not species:
+                continue
+            try:
+                level = int(row.get("Level") or 20)
+            except (TypeError, ValueError):
+                level = 20
+            moves = [
+                normalize_move_name(row.get("Move 1", "")),
+                normalize_move_name(row.get("Move 2", "")),
+                normalize_move_name(row.get("Move 3", "")),
+                normalize_move_name(row.get("Move 4", "")),
+            ]
+            entries.append((species, max(level, 1), game_norm, [move for move in moves if move]))
+    return entries
 
 
 def build_silver_from_bronze(
@@ -422,12 +447,30 @@ def build_silver_from_bronze(
             bootstrap_stats.get("learnable_rows", 0),
             bootstrap_stats.get("move_rows", 0),
         )
+    kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(kaggle_rows_by_game)
+    if kaggle_bootstrap_entries:
+        persisted_kaggle = persist_move_reference_cache(kaggle_bootstrap_entries, silver_dir=silver_dir)
+        logger.info(
+            "[silver] persisted kaggle move cache entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
+            persisted_kaggle.get("entry_count", 0),
+            persisted_kaggle.get("target_pairs", 0),
+            persisted_kaggle.get("learnable_rows", 0),
+            persisted_kaggle.get("move_rows", 0),
+        )
+
+    reference_context = load_reference_context(silver_dir=silver_dir)
+    logger.info(
+        "[silver] loaded offline reference context move_profiles=%s species_pairs=%s",
+        len(reference_context.move_profiles),
+        len(reference_context.learnable_by_game_species),
+    )
 
     logger.info("[silver] extracting boss teams for simulation")
     teams_started_at = time.perf_counter()
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(
         bronze_dir,
         allowed_versions=allowed_versions,
+        reference_context=reference_context,
     )
 
     all_move_data = dict(boss_move_data)
@@ -459,27 +502,6 @@ def build_silver_from_bronze(
         boss_teams_game = boss_teams_by_game.get(game_key, [])
         progression_source_teams = build_progression_source_teams(records, boss_teams_game)
 
-        progression_prefetch_entries: list[tuple[str, int, str, list[str]]] = []
-        for source_team in progression_source_teams:
-            game_version = str(source_team.get("game_version") or "").strip().lower()
-            avg_level = int(source_team.get("avg_level") or 0)
-            pokemon = source_team.get("pokemon", [])
-            if not game_version or avg_level <= 0 or not isinstance(pokemon, list):
-                continue
-            for species in pokemon:
-                progression_prefetch_entries.append((str(species), avg_level, game_version, []))
-
-        if progression_prefetch_entries:
-            persisted_progression = persist_move_reference_cache(progression_prefetch_entries, silver_dir=silver_dir)
-            logger.info(
-                "[silver] persisted progression move cache game=%s entries=%s target_pairs=%s learnable_rows=%s move_rows=%s",
-                game_key,
-                persisted_progression.get("entry_count", 0),
-                persisted_progression.get("target_pairs", 0),
-                persisted_progression.get("learnable_rows", 0),
-                persisted_progression.get("move_rows", 0),
-            )
-
         combat_pool_rows = _build_combat_pool_rows_for_game(progression_source_teams)
         paths = _game_output_paths(simulation_dir, game_key)
         write_parquet(paths["combat_pool"], combat_pool_rows)
@@ -490,7 +512,10 @@ def build_silver_from_bronze(
                 learnable_df = learnable_df[learnable_df["game_version"] == game_key]
             write_parquet(paths["learnable_moves"], learnable_df)
 
-        player_teams, player_move_data = build_player_teams_from_progression_context(progression_source_teams)
+        player_teams, player_move_data = build_player_teams_from_progression_context(
+            progression_source_teams,
+            reference_context=reference_context,
+        )
         all_move_data.update(player_move_data)
 
         teams_data_game = boss_teams_game + player_teams

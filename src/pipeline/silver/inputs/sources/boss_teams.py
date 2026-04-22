@@ -8,13 +8,7 @@ from pathlib import Path
 from typing import Any, Collection
 
 from src.pipeline.silver.config.team_config import CSV_PROGRESS_LOG_INTERVAL, DEFAULT_MEMBER_LEVEL, KAGGLE_CSV_DELIMITER
-from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
-    _build_member_detail,
-    _build_member_moves,
-    prefetch_species_move_data,
-    persist_move_reference_cache,
-)
-from src.pipeline.settings import SILVER_DIR
+from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id
 
 
@@ -71,13 +65,6 @@ def _normalize_kaggle_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_prefetch_entries(rows: list[dict[str, Any]]) -> list[tuple[str, int, str, list[str]]]:
-    return [
-        (str(row.get("pokemon") or ""), int(row.get("level") or DEFAULT_MEMBER_LEVEL), str(row.get("game") or ""), list(row.get("moves") or [])[:4])
-        for row in rows
-    ]
-
-
 def _group_rows_by_team(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"members": [], "rows": [], "game": None, "gym": None, "gym_leader": None, "team_id": None}
@@ -94,7 +81,10 @@ def _group_rows_by_team(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return grouped
 
 
-def _build_team_members_and_moves(grouped_rows: dict[str, dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def _build_team_members_and_moves(
+    grouped_rows: dict[str, dict[str, Any]],
+    reference_context: MoveReferenceContext,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     move_storage: dict[str, Any] = {}
     processed_rows = 0
     kept_rows = sum(len(data.get("rows", [])) for data in grouped_rows.values())
@@ -114,7 +104,7 @@ def _build_team_members_and_moves(grouped_rows: dict[str, dict[str, Any]]) -> tu
             level = int(row.get("level") or DEFAULT_MEMBER_LEVEL)
             moves = list(row.get("moves") or [])[:4]
 
-            member_detail = _build_member_detail(
+            member_detail = reference_context.build_member_detail(
                 name=pokemon,
                 level=level,
                 moves=moves,
@@ -130,7 +120,7 @@ def _build_team_members_and_moves(grouped_rows: dict[str, dict[str, Any]]) -> tu
             member_detail["pokemon_instance_id"] = instance_id
             data["members"].append(member_detail)
 
-            move_details = _build_member_moves(name=pokemon, level=level, moves=moves, game_version=game)
+            move_details = reference_context.build_member_moves(name=pokemon, level=level, moves=moves, game_version=game)
             if move_details is not None:
                 move_details["pokemon_instance_id"] = instance_id
                 move_details["team_id"] = team_id
@@ -195,7 +185,10 @@ def _assemble_team_records(grouped_data: dict[str, dict[str, Any]]) -> list[dict
 def extract_boss_teams_from_kaggle_source(
     bronze_dir: Path,
     allowed_versions: Collection[str] | None = None,
+    reference_context: MoveReferenceContext | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if reference_context is None:
+        raise ValueError("reference_context is required for offline boss team creation")
     started_at = time.perf_counter()
     kaggle_file = bronze_dir / "kagglehub" / "gym_leaders_elite_four.csv"
     logger.info("[silver/teams] start extract file=%s", kaggle_file)
@@ -242,34 +235,6 @@ def extract_boss_teams_from_kaggle_source(
         )
 
         stage_started_at = time.perf_counter()
-        logger.info("[silver/teams] stage=prefetch_prepare start")
-        prefetch_entries = _build_prefetch_entries(normalized_rows)
-        logger.info(
-            "[silver/teams] stage=prefetch_prepare done entries=%s elapsed_s=%.2f",
-            len(prefetch_entries),
-            time.perf_counter() - stage_started_at,
-        )
-
-        stage_started_at = time.perf_counter()
-        logger.info("[silver/teams] stage=prefetch_species_move_data start entries=%s", len(prefetch_entries))
-        prefetch_species_move_data(prefetch_entries)
-        logger.info(
-            "[silver/teams] stage=prefetch_species_move_data done entries=%s elapsed_s=%.2f",
-            len(prefetch_entries),
-            time.perf_counter() - stage_started_at,
-        )
-        stage_started_at = time.perf_counter()
-        logger.info("[silver/teams] stage=persist_move_reference_cache start entries=%s", len(prefetch_entries))
-        persisted = persist_move_reference_cache(prefetch_entries, silver_dir=SILVER_DIR)
-        logger.info(
-            "[silver/teams] stage=persist_move_reference_cache done learnable_rows=%s move_rows=%s target_pairs=%s elapsed_s=%.2f",
-            persisted.get("learnable_rows", 0),
-            persisted.get("move_rows", 0),
-            persisted.get("target_pairs", 0),
-            time.perf_counter() - stage_started_at,
-        )
-
-        stage_started_at = time.perf_counter()
         logger.info("[silver/teams] stage=group_rows start")
         grouped_rows = _group_rows_by_team(normalized_rows)
         logger.info(
@@ -278,7 +243,7 @@ def extract_boss_teams_from_kaggle_source(
             time.perf_counter() - stage_started_at,
         )
 
-        teams_by_leader, move_storage = _build_team_members_and_moves(grouped_rows)
+        teams_by_leader, move_storage = _build_team_members_and_moves(grouped_rows, reference_context)
     except Exception as exc:
         logger.exception("[silver/teams] error while reading csv: %s", exc)
         return [], {}
@@ -306,6 +271,4 @@ def extract_boss_teams_from_kaggle_source(
         time.perf_counter() - started_at,
     )
     return teams, move_storage
-
-
 

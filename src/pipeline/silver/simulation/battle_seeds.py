@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.pipeline.common.io import read_parquet, write_parquet
+from src.pipeline.common.io import read_many_parquet, read_parquet, write_parquet
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
@@ -15,14 +15,17 @@ def build_battle_seeds(
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,
 ) -> None:
     simulation_dir = silver_dir / simulation_dirname
-    teams_file = simulation_dir / "teams.parquet"
     simulations_file = simulation_dir / "team_battle_simulations.parquet"
 
-    if not teams_file.exists():
-        print("[battle_seeds] no teams found, skipping")
-        return
-
-    teams_df = read_parquet(teams_file)
+    teams_shards = sorted(simulation_dir.glob("teams_*.parquet"))
+    if teams_shards:
+        teams_df = read_many_parquet(teams_shards)
+    else:
+        teams_file = simulation_dir / "teams.parquet"
+        if not teams_file.exists():
+            print("[battle_seeds] no teams found, skipping")
+            return
+        teams_df = read_parquet(teams_file)
     boss_teams = teams_df[teams_df["boss_name"].notna()].to_dict(orient="records")
 
     if simulations_file.exists():

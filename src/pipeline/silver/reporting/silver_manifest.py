@@ -110,16 +110,26 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": description,
         }
 
-    # Teams
-    teams_file = simulation_dir / "teams.parquet"
-    if teams_file.exists():
-        teams = read_parquet(teams_file)
+    # Teams (sharded parquet-first contract)
+    teams_shards = sorted(simulation_dir.glob("teams_*.parquet"))
+    if teams_shards:
         manifest["datasets"]["simulation_inputs_teams"] = {
-            "file": _relative_to(silver_dir, teams_file),
-            "count": len(teams),
+            "file": _relative_to(silver_dir, simulation_dir),
+            "glob": "teams_*.parquet",
+            "count": len(teams_shards),
             "format": "Parquet",
-            "description": "Partitioned team compositions consumed by gold"
+            "description": "Sharded team compositions consumed by gold",
         }
+    else:
+        teams_file = simulation_dir / "teams.parquet"
+        if teams_file.exists():
+            teams = read_parquet(teams_file)
+            manifest["datasets"]["simulation_inputs_teams"] = {
+                "file": _relative_to(silver_dir, teams_file),
+                "count": len(teams),
+                "format": "Parquet",
+                "description": "Partitioned team compositions consumed by gold",
+            }
 
     teams_jsonl_file = simulation_dir / "teams.jsonl"
     if teams_jsonl_file.exists():
@@ -149,24 +159,53 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Validated move metadata stored separately from team records",
         }
 
-    for simulation_name, description in [
-        ("team_members.parquet", "Team member fact table (one row per team slot)"),
-        ("team_member_moves.parquet", "Team-member move fact table (one row per move slot)"),
-    ]:
-        path = simulation_dir / simulation_name
-        if not path.exists():
-            continue
-        count = 0
-        try:
-            count = len(read_parquet(path))
-        except Exception:
-            count = 0
-        manifest["datasets"][simulation_name.replace(".parquet", "")] = {
-            "file": _relative_to(silver_dir, path),
-            "count": count,
+    sharded_team_members = sorted(simulation_dir.glob("team_members_*.parquet"))
+    if sharded_team_members:
+        manifest["datasets"]["team_members"] = {
+            "file": _relative_to(silver_dir, simulation_dir),
+            "glob": "team_members_*.parquet",
+            "count": len(sharded_team_members),
             "format": "Parquet",
-            "description": description,
+            "description": "Sharded team member fact table (one row per team slot)",
         }
+    else:
+        members_file = simulation_dir / "team_members.parquet"
+        if members_file.exists():
+            count = 0
+            try:
+                count = len(read_parquet(members_file))
+            except Exception:
+                count = 0
+            manifest["datasets"]["team_members"] = {
+                "file": _relative_to(silver_dir, members_file),
+                "count": count,
+                "format": "Parquet",
+                "description": "Team member fact table (one row per team slot)",
+            }
+
+    sharded_member_moves = sorted(simulation_dir.glob("team_member_moves_*.parquet"))
+    if sharded_member_moves:
+        manifest["datasets"]["team_member_moves"] = {
+            "file": _relative_to(silver_dir, simulation_dir),
+            "glob": "team_member_moves_*.parquet",
+            "count": len(sharded_member_moves),
+            "format": "Parquet",
+            "description": "Sharded team-member move fact table (one row per move slot)",
+        }
+    else:
+        member_moves_file = simulation_dir / "team_member_moves.parquet"
+        if member_moves_file.exists():
+            count = 0
+            try:
+                count = len(read_parquet(member_moves_file))
+            except Exception:
+                count = 0
+            manifest["datasets"]["team_member_moves"] = {
+                "file": _relative_to(silver_dir, member_moves_file),
+                "count": count,
+                "format": "Parquet",
+                "description": "Team-member move fact table (one row per move slot)",
+            }
 
 
     # Location maps
@@ -209,5 +248,4 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     print(f"  Available datasets: {len(manifest['datasets'])}")
     for dataset_name in manifest["datasets"]:
         print(f"    - {dataset_name}")
-
 
