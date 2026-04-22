@@ -51,7 +51,8 @@ GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
 # Moveset combination limits and safety checks.
 DEFAULT_MEMBER_COMBO_LIMIT = _env_int("PM4_MEMBER_COMBO_LIMIT", 25)
-DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 15000)
+# 0 means "no explicit cap"; effective truncation can still occur due to finite combination space.
+DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 15000, minimum=0)
 TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000)
 ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
 
@@ -60,12 +61,12 @@ DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 5)
 DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 12)
 DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 40)
 
-# Moveset expansion per team (VERY important balance lever)
-DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 120)
+# Moveset expansion per team (VERY important balance lever). 0 disables this safety cap.
+DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 120, minimum=0)
 
 # Team structure
-DEFAULT_TEAM_MEMBER_LIMIT = 10
-DEFAULT_MEMBER_LEVEL = 20
+DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 10)
+DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20)
 
 KAGGLE_CSV_DELIMITER = ";"
 CSV_PROGRESS_LOG_INTERVAL = 250
