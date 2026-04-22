@@ -30,9 +30,8 @@ from src.pipeline.silver.config.team_config import (
     MOVESET_WIDTH,
     TEAM_VARIANT_CONFIRMATION_THRESHOLD,
 )
-from src.pipeline.silver.inputs.connectors.pokeapi_moves import _build_member_detail, _build_member_moves
+from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id, normalize_key_part
-from src.pipeline.settings import SILVER_DIR
 
 
 logger = logging.getLogger(__name__)
@@ -203,18 +202,21 @@ def _generate_diverse_species_combos(
     return result
 
 
-def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _build_starter_variant(
+    base_team: dict[str, Any],
+    starter_base: str,
+    reference_context: MoveReferenceContext,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     version = str(base_team.get("game_version", "unknown"))
     avg_level = int(base_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
     starter_species = resolve_starter_species_for_level(starter_base.lower().strip(), avg_level)
 
-    starter_member = _build_member_detail(
+    starter_member = reference_context.build_member_detail(
         name=starter_species,
         level=avg_level,
         moves=[],
         game_version=version,
         origin="starter",
-        silver_dir=SILVER_DIR,
     )
 
     team_details: list[dict[str, Any]] = []
@@ -238,13 +240,12 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
                 continue
 
             moves = base_moves[idx] if idx < len(base_moves) else []
-            member_detail = _build_member_detail(
+            member_detail = reference_context.build_member_detail(
                 name=name,
                 level=level,
                 moves=list(moves) if isinstance(moves, list) else [],
                 game_version=version,
                 origin="progression",
-                silver_dir=SILVER_DIR,
             )
             if member_detail is not None:
                 team_details.append(member_detail)
@@ -311,12 +312,11 @@ def _build_starter_variant(base_team: dict[str, Any], starter_base: str) -> tupl
                     "pokemon_instance_id": instance_id,
                 }
             )
-            member_moves = _build_member_moves(
+            member_moves = reference_context.build_member_moves(
                 name=member_name,
                 level=member_level,
                 moves=list(selected_moves),
                 game_version=version,
-                silver_dir=SILVER_DIR,
             )
             if member_moves is not None:
                 member_moves["pokemon_instance_id"] = instance_id
@@ -451,7 +451,10 @@ def build_progression_source_teams(
 
 def build_player_teams_from_progression_context(
     progression_source_teams: list[dict[str, Any]],
+    reference_context: MoveReferenceContext | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if reference_context is None:
+        raise ValueError("reference_context is required for offline team generation")
     started_at = time.perf_counter()
     variants: list[dict[str, Any]] = []
     all_moves: dict[str, Any] = {}
@@ -471,7 +474,7 @@ def build_player_teams_from_progression_context(
             continue
 
         for starter in starters:
-            team_dicts, move_dict = _build_starter_variant(team, starter)
+            team_dicts, move_dict = _build_starter_variant(team, starter, reference_context)
             variants.extend(team_dicts)
             all_moves.update(move_dict)
 

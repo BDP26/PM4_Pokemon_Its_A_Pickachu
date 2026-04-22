@@ -24,6 +24,14 @@ from src.pipeline.silver.simulation.type_matchups import build_team_battle_simul
 logger = logging.getLogger(__name__)
 
 
+def _resolve_loader_path(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    if path.is_dir():
+        return None
+    return path
+
+
 def _run_gold_team_battle_simulations(
     *,
     teams_data: list[dict[str, Any]],
@@ -81,9 +89,9 @@ def run_gold_simulation_from_silver(
     loader_kwargs: dict[str, Any] = {
         "silver_dir": silver_dir,
         "simulation_dirname": SILVER_SIMULATION_DIRNAME,
-        "teams_path": teams_path,
-        "team_members_path": team_members_path,
-        "team_member_moves_path": team_member_moves_path,
+        "teams_path": _resolve_loader_path(teams_path),
+        "team_members_path": _resolve_loader_path(team_members_path),
+        "team_member_moves_path": _resolve_loader_path(team_member_moves_path),
     }
 
     reconstructed_teams = load_reconstructed_teams_from_silver(**loader_kwargs)
