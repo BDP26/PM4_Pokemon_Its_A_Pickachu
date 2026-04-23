@@ -49,6 +49,8 @@ def _write_non_partitioned_parquet(path: Path, dataframe: pd.DataFrame, cleanup_
         _remove_path_if_exists(path)
     elif path.exists() and path.is_dir():
         shutil.rmtree(path)
+    #print rows
+    print(dataframe.shape)
     dataframe.to_parquet(path, index=False)
 
 

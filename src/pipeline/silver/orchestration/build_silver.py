@@ -488,6 +488,9 @@ def build_silver_from_bronze(
     total_boss_teams = 0
     total_player_teams = 0
     total_team_members = 0
+    all_team_metadata_rows: list[dict[str, Any]] = []
+    all_team_members_rows: list[dict[str, Any]] = []
+    all_team_member_moves_rows: list[dict[str, Any]] = []
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for team in boss_teams:
@@ -527,6 +530,9 @@ def build_silver_from_bronze(
         team_metadata_rows = _build_team_metadata_rows(validated_teams)
         team_members = build_team_members_table(validated_teams)
         team_member_moves = build_team_member_moves_table(validated_teams, all_move_data)
+        all_team_metadata_rows.extend(team_metadata_rows)
+        all_team_members_rows.extend(team_members)
+        all_team_member_moves_rows.extend(team_member_moves)
 
         write_parquet(paths["teams"], team_metadata_rows)
         write_parquet(paths["team_members"], team_members)
@@ -570,6 +576,9 @@ def build_silver_from_bronze(
             "bosses": pd.DataFrame(bosses_table),
             "locations": pd.DataFrame(locations_table),
             "encounters": encounters_frame,
+            "teams": pd.DataFrame(all_team_metadata_rows),
+            "team_members": pd.DataFrame(all_team_members_rows),
+            "team_member_moves": pd.DataFrame(all_team_member_moves_rows),
             "move_reference": pd.DataFrame(move_reference),
             "learnable_moves": pd.DataFrame(learnable_moves),
         }
