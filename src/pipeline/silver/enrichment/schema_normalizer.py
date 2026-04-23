@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
+from src.pipeline.common.io import write_parquet
 from src.pipeline.silver.schemas.contracts import BossSnapshotContract
 
 
@@ -101,7 +104,7 @@ def write_normalized_silver(
     Files created:
     - {game_key}_boss_snapshots.jsonl: Lightweight boss metadata
     - encounters.jsonl: Normalized encounters (appended across all games)
-    - pokemon_reference.json: Centralized pokemon info (once per dataset)
+    - pokemon_reference.parquet: Centralized pokemon info (once per dataset)
     """
     boss_snapshots, pokemon_reference, encounters = normalize_boss_records(records)
     boss_snapshots = dedupe_boss_snapshots(boss_snapshots)
@@ -131,18 +134,49 @@ def create_pokemon_reference_index(
     all_pokemon_references: dict[str, dict],
     references_dir: Path,
 ) -> None:
-    """Create centralized pokemon reference (deduped across all games)."""
+    """Create centralized pokemon reference parquet (deduped across all games).
+
+    Also emits pokemon_stats.parquet when base-stat payloads are present.
+    """
     references_dir.mkdir(parents=True, exist_ok=True)
-    output_file = references_dir / "pokemon_reference.json"
+    output_file = references_dir / "pokemon_reference.parquet"
 
     # Deduplicate pokemon references
-    unique_pokemon = {}
+    unique_rows: list[dict[str, Any]] = []
+    stats_rows: list[dict[str, Any]] = []
+    seen_species: set[str] = set()
     for species, info in all_pokemon_references.items():
-        if species not in unique_pokemon:
-            unique_pokemon[species] = info
+        species_norm = str(species or "").strip().lower()
+        if not species_norm or species_norm in seen_species:
+            continue
+        seen_species.add(species_norm)
+        payload = info if isinstance(info, dict) else {}
+        unique_rows.append(
+            {
+                "pokemon_species": species_norm,
+                "name": str(payload.get("name") or species_norm).strip().lower(),
+                "url": str(payload.get("url") or "").strip() or None,
+            }
+        )
+        stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        if stats_payload:
+            stats_rows.append(
+                {
+                    "pokemon_species": species_norm,
+                    "hp": stats_payload.get("hp"),
+                    "attack": stats_payload.get("attack"),
+                    "defense": stats_payload.get("defense"),
+                    "sp_attack": stats_payload.get("sp_attack"),
+                    "sp_defense": stats_payload.get("sp_defense"),
+                    "speed": stats_payload.get("speed"),
+                    "type_1": payload.get("type_1"),
+                    "type_2": payload.get("type_2"),
+                }
+            )
 
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(unique_pokemon, f, ensure_ascii=False, indent=2)
+    write_parquet(output_file, pd.DataFrame(unique_rows))
+    if stats_rows:
+        write_parquet(references_dir / "pokemon_stats.parquet", pd.DataFrame(stats_rows))
 
 
 def create_encounter_methods_reference(
@@ -194,9 +228,6 @@ def analyze_schema_efficiency(records: list[dict]) -> dict[str, Any]:
         "num_encounters": len(encounters),
         "num_unique_pokemon": len(pokemon_ref),
     }
-
-
-
 
 
 

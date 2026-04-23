@@ -68,7 +68,7 @@ Primary outputs in `data/silver/`:
 - `mappings/location_to_area_map.json`
 - `mappings/location_to_pokemon_map.json`
 - `mappings/boss_mapping_by_version.json`
-- `references/pokemon_reference.json`
+- `references/pokemon_reference.parquet`
 - `references/encounter_methods_reference.json`
 - `references/encounters.jsonl`
 - `diagnostics/unmapped_locations_detailed.json`
@@ -93,7 +93,7 @@ Team tables in `data/silver/simulation/`:
 - `simulation/teams.jsonl` (line-delimited view)
 - `simulation/team_members.parquet` (one row per team slot)
 - `simulation/team_member_moves.parquet` (one row per move slot)
-- `simulation/move_data.json` (detailed move info: power, damage_class per move)
+- `simulation/move_data.parquet` (detailed move info: power, damage_class per move)
 
 **Team Structure (lean)**:
 ```json
@@ -110,7 +110,7 @@ Team tables in `data/silver/simulation/`:
 }
 ```
 
-**Move Data Structure** (stored separately in `move_data.json`):
+**Move Data Structure** (stored separately in `move_data.parquet`):
 ```javascript
 {
   "red:geodude:12": {
@@ -140,5 +140,4 @@ Validate Gold simulation artifacts after a full run:
 - Silver keeps a balance between normalized references and per-game snapshots.
 - Silver erzeugt keine vollständigen Moveset-Kombinationen mehr (Verantwortung von Gold).
 - Silver validiert FK/PK-Beziehungen über normalisierte Tabellen und bricht bei Fehlern ab.
-
 

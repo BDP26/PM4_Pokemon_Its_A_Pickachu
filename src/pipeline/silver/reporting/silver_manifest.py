@@ -2,7 +2,7 @@
 from pathlib import Path
 import logging
 
-from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json
+from src.pipeline.common.io import read_jsonl, read_parquet, write_json
 from src.pipeline.settings import SILVER_DIR, get_silver_subdirs
 
 logger = logging.getLogger(__name__)
@@ -74,13 +74,17 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Normalized location-pokemon encounter rows"
         }
 
-    logger.info("[silver_manifest] found %s encounters", encounter_count)
-
-    pokemon_reference_file = references_dir / "pokemon_reference.json"
+    pokemon_reference_file = references_dir / "pokemon_reference.parquet"
     if pokemon_reference_file.exists():
+        count = 0
+        try:
+            count = len(read_parquet(pokemon_reference_file))
+        except Exception:
+            count = 0
         manifest["datasets"]["pokemon_reference"] = {
             "file": _relative_to(silver_dir, pokemon_reference_file),
-            "format": "JSON",
+            "count": count,
+            "format": "Parquet",
             "description": "Centralized Pokemon URL and name reference"
         }
 
@@ -102,6 +106,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
         ("locations.parquet", "Location dimension with mapping status"),
         ("encounters.parquet", "Encounter fact table normalized by location and species"),
         ("snapshot_available_pokemon.parquet", "Pokemon availability fact per boss snapshot"),
+        ("pokemon_stats.parquet", "Pokemon base stats and typing reference (if available)"),
         ("move_reference.parquet", "Move reference dimension"),
         ("learnable_moves.parquet", "Unified learnable moves fact by game and species (authoritative move source)"),
     ]:
@@ -159,19 +164,16 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Line-delimited view of normalized team compositions"
         }
 
-    logger.info("[silver_manifest] found %s teams (JSONL)", teams_jsonl_count)
-
-    move_data_file = simulation_dir / "move_data.json"
+    move_data_file = simulation_dir / "move_data.parquet"
     if move_data_file.exists():
         try:
-            move_data = read_json(move_data_file)
-            move_count = len(move_data) if isinstance(move_data, dict) else 0
+            move_count = len(read_parquet(move_data_file))
         except Exception:
             move_count = 0
         manifest["datasets"]["move_data"] = {
             "file": _relative_to(silver_dir, move_data_file),
             "count": move_count,
-            "format": "JSON",
+            "format": "Parquet",
             "description": "Validated move metadata stored separately from team records",
         }
 

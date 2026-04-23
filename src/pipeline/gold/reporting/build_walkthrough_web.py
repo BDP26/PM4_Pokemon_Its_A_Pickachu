@@ -162,7 +162,7 @@ def _starter_name_from_team_id(team_id: str) -> str | None:
 def _load_pokemon_reference(silver_dir: Path, silver_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     reference_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "pokemon_reference")
     try:
-        payload = read_json(reference_path)
+        frame = read_parquet(reference_path)
     except Exception as exc:
         _raise_web_contract_error(
             "invalid_pokemon_reference",
@@ -170,21 +170,16 @@ def _load_pokemon_reference(silver_dir: Path, silver_manifest: dict[str, Any]) -
             dataset="pokemon_reference",
             path=reference_path,
         )
-    if not isinstance(payload, dict):
-        _raise_web_contract_error(
-            "invalid_pokemon_reference",
-            "pokemon_reference dataset must contain a JSON object.",
-            dataset="pokemon_reference",
-            path=reference_path,
-        )
 
     normalized: dict[str, dict[str, Any]] = {}
-    for species, info in cast(dict[str, Any], payload).items():
-        key = _species_slug(str(species))
-        entry = info if isinstance(info, dict) else {}
+    for row in frame.to_dict(orient="records"):
+        species = str(row.get("pokemon_species") or row.get("name") or "").strip().lower()
+        key = _species_slug(species)
+        if not key:
+            continue
         normalized[key] = {
-            "url": str(entry.get("url") or "").strip() or None,
-            "name": str(entry.get("name") or species).strip().lower(),
+            "url": str(row.get("url") or "").strip() or None,
+            "name": str(row.get("name") or species).strip().lower(),
         }
     return normalized
 
@@ -692,5 +687,4 @@ def build_walkthrough_best_teams_payload(
     output_path = gold_dir / "walkthrough_best_teams.json"
     write_json(output_path, _json_safe(output))
     return output_path
-
 
