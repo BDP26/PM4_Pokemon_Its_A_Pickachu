@@ -735,8 +735,7 @@ def _normalized_boss_label(value: Any) -> str | None:
 def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
     attacker_target = _normalized_boss_label(attacker_team.get("gym"))
     if attacker_target is None:
-        # Backward-compatible fallback for legacy player rows without gym context.
-        return True
+        return False
     defender_targets = {
         label
         for label in (
@@ -1158,7 +1157,7 @@ def _run_spark_simulations(
             F.col("a.gym_target").alias("attacker_target"),
             F.col("d.boss_target").alias("defender_target"),
         )
-        pairs_df = pairs_df.where(F.col("attacker_target").isNull() | (F.col("attacker_target") == F.col("defender_target")))
+        pairs_df = pairs_df.where(F.col("attacker_target") == F.col("defender_target"))
         if config.require_exact_version_match:
             pairs_df = pairs_df.where(F.col("attacker_game_version") == F.col("defender_game_version"))
         total_pairs = int(pairs_df.count())

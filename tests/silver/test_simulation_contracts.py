@@ -87,6 +87,25 @@ def test_only_intended_gym_matchups_are_simulated(tmp_path: Path) -> None:
     assert set(df["team_id_defender"].tolist()) == {"BROCK_red"}
 
 
+def test_player_without_gym_context_is_not_simulated(tmp_path: Path) -> None:
+    bronze_dir = tmp_path / "bronze"
+    silver_dir = tmp_path / "silver"
+    write_json(bronze_dir / "type_chart.json", {"Normal": {"Normal": 1.0}})
+    teams = _teams()
+    teams[0] = dict(teams[0])
+    teams[0].pop("gym", None)
+
+    build_team_battle_simulations(
+        teams_data=teams,
+        silver_dir=silver_dir,
+        bronze_dir=bronze_dir,
+        runtime_config=BattleSimulationConfig(n_battle_trials=1, require_exact_version_match=True),
+    )
+
+    df = pd.read_parquet(silver_dir / "simulation" / "team_battle_simulations.parquet")
+    assert df.empty
+
+
 def test_runtime_n_trials_propagates_to_outputs(tmp_path: Path) -> None:
     simulation_dir = tmp_path / "simulation"
     write_parquet(
