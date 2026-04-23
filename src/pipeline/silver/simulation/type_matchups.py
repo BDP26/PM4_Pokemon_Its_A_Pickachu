@@ -92,6 +92,7 @@ class BattleSimulationConfig:
     max_turns_per_duel: int = int(SIMULATION_CONFIG["max_turns_per_duel"])
     rng_seed: int = 42
     require_exact_version_match: bool = True
+    fail_on_degraded_data: bool = False
 
 
 class WarningCollector:
@@ -301,6 +302,28 @@ def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveP
     if not degraded:
         _LOCAL_MOVE_PROFILES[move_name] = profile
     return profile, degraded
+
+
+def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None:
+    required_species: set[str] = set()
+    required_moves: set[str] = set()
+    for team in teams_data:
+        for member in _team_members(team):
+            species_id = normalize_species_name(str(member.get("species") or ""))
+            if species_id:
+                required_species.add(species_id)
+            for move in cast(list[str], member.get("moves", [])):
+                normalized_move = _normalize_move_name(str(move))
+                if normalized_move:
+                    required_moves.add(normalized_move)
+
+    missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
+    missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
+    if missing_species or missing_moves:
+        raise ValueError(
+            "Simulation strict mode requires complete cached combat profiles: "
+            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)}"
+        )
 
 
 def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1076,6 +1099,8 @@ def build_team_battle_simulations(
     _persist_lookup_cache_to_disk()
 
     config = runtime_config or BattleSimulationConfig()
+    if config.fail_on_degraded_data:
+        _assert_profile_cache_completeness(teams_data)
     use_spark = _should_use_spark() if force_spark is None else bool(force_spark)
     logger.info("[type_matchups] engine=%s", "spark" if use_spark else "local")
 
@@ -1087,6 +1112,8 @@ def build_team_battle_simulations(
     incompatible_rows = [row for row in simulations if not bool(row.get("is_compatible_version", False))]
     if incompatible_rows:
         raise ValueError("Incompatible cross-version simulation rows detected; strict compatibility contract violated")
+    if config.fail_on_degraded_data and any(bool(row.get("degraded_data", False)) for row in simulations):
+        raise ValueError("Degraded simulation rows detected in strict mode; aborting output write")
 
     write_parquet(simulation_dir / "team_battle_simulations.parquet", simulations)
     logger.info(

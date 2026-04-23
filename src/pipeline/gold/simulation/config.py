@@ -69,7 +69,7 @@ class BattleSimulationConfig:
 
     validate_reconstructed_teams: bool = True
     validate_simulation_outputs: bool = True
-    fail_on_degraded_data: bool = False
+    fail_on_degraded_data: bool = True
     fail_on_validation_errors: bool = True
 
 
@@ -102,6 +102,6 @@ def load_battle_simulation_config() -> BattleSimulationConfig:
 
         validate_reconstructed_teams=_env_bool("PM4_SIM_VALIDATE_RECONSTRUCTED_TEAMS", True),
         validate_simulation_outputs=_env_bool("PM4_SIM_VALIDATE_SIMULATION_OUTPUTS", True),
-        fail_on_degraded_data=_env_bool("PM4_SIM_FAIL_ON_DEGRADED_DATA", False),
+        fail_on_degraded_data=_env_bool("PM4_SIM_FAIL_ON_DEGRADED_DATA", True),
         fail_on_validation_errors=_env_bool("PM4_SIM_FAIL_ON_VALIDATION_ERRORS", True),
     )

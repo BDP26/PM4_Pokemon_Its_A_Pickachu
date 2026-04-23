@@ -45,6 +45,7 @@ from src.pipeline.silver.enrichment.schema_normalizer import (
 from src.pipeline.silver.writers.outputs import (
     build_input_signature,
     fingerprint_path,
+    fingerprint_python_files,
     load_state,
     save_state,
     write_validated_move_data,
@@ -298,6 +299,14 @@ def build_silver_from_bronze(
     state_dir = silver_dir / "_state"
     state_dir.mkdir(parents=True, exist_ok=True)
     state_path = state_dir / "silver_state.json"
+    repo_root = Path(__file__).resolve().parents[4]
+    code_fingerprint = fingerprint_python_files(
+        [
+            repo_root / "src" / "pipeline" / "silver",
+            repo_root / "src" / "pipeline" / "gold" / "simulation" / "config.py",
+            repo_root / "src" / "pipeline" / "settings.py",
+        ]
+    )
     kaggle_csv_path = bronze_dir / "kagglehub" / "gym_leaders_elite_four.csv"
     current_signature = build_input_signature(
         {
@@ -308,6 +317,7 @@ def build_silver_from_bronze(
             "allowed_versions": sorted(allowed_versions),
             "runtime_team_config": runtime_team_config,
             "runtime_simulation_config": runtime_simulation_config,
+            "pipeline_code_fingerprint": code_fingerprint,
         }
     )
     previous_state = load_state(state_path)
@@ -636,6 +646,7 @@ def build_silver_from_bronze(
             "move_records": len(all_move_data),
             "runtime_team_config": runtime_team_config,
             "runtime_simulation_config": runtime_simulation_config,
+            "pipeline_code_fingerprint": code_fingerprint,
         },
     )
 
