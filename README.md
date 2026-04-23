@@ -101,6 +101,17 @@ Erforderliche Dataset-Keys fuer Gold:
 
 Bei fehlenden/ungueltigen Eintraegen bricht Gold sofort mit `GoldContractError` ab (z. B. `[gold.contract] missing_dataset_file ...`).
 
+### Canonical Simulation Schema Contract
+
+Die Monte-Carlo-Ausgabe nutzt jetzt durchgehend den kanonischen Schluesselraum und ist mit Gold/Validierung synchron:
+
+- `scenario_id`
+- `player_team_id`
+- `boss_team_id`
+- `mc_win_rate`
+
+`team_id_attacker`/`team_id_defender` bleiben auf dem Team-Battle-Artefakt, werden aber fuer Monte-Carlo intern auf die kanonischen Felder gemappt.
+
 Typischer Repair-Flow:
 
 ```bash
@@ -124,6 +135,18 @@ Hinweise:
 - `data/silver/simulation/teams.parquet`
 - `data/silver/simulation/teams.jsonl`
 - `data/silver/manifest.json`
+
+## Silver Orchestration Stages
+
+`build_silver_from_bronze` wurde in explizite Stages aufgeteilt (z. B. Parse-Stage in `src/pipeline/silver/orchestration/stages.py`), damit einzelne Schritte isoliert testbar und evolvierbar sind.
+
+## Team-Generierung: Scored constrained search
+
+Die Kandidatenbildung fuer Spielerteams nutzt jetzt einen scored constrained pool statt rein frueher Trunkierung:
+
+- Scoring-Signale: Encounter-Chance, Capture-Rate, Level-Realismus zum Boss-Level
+- Family-Dedupe vor Pool-Limit
+- Diagnostik im Log: `pruned_candidates`, `family_pruned_candidates`, `pruned_combos`
 
 ## Gold-Outputs
 
@@ -161,4 +184,3 @@ python3 -m http.server 8000 --bind 127.0.0.1
 
 Dann im Browser oeffnen:
 - `http://127.0.0.1:8000/docs/walkthrough_teams.html`
-

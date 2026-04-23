@@ -4,7 +4,7 @@ import importlib
 
 import pytest
 
-from src.pipeline.silver.inputs.builders.player_teams import build_player_teams_from_progression_context
+from src.pipeline.silver.inputs.builders.player_teams import _rank_candidate_pool, build_player_teams_from_progression_context
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
 
 
@@ -26,3 +26,16 @@ def test_team_generation_modules_do_not_import_connector_runtime() -> None:
     assert "_build_member_moves" not in vars(player_module)
     assert "_build_member_detail" not in vars(boss_module)
     assert "_build_member_moves" not in vars(boss_module)
+
+
+def test_candidate_pool_ranking_prefers_level_realism() -> None:
+    ranked, diagnostics = _rank_candidate_pool(
+        [
+            ("species_far", 90, 60, 50),
+            ("species_close", 60, 20, 50),
+        ],
+        boss_level=20,
+        pool_size=2,
+    )
+    assert ranked[0][0] == "species_close"
+    assert diagnostics["output"] == 2

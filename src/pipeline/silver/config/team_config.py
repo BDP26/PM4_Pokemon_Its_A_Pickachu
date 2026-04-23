@@ -65,12 +65,14 @@ DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 40)
 DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 80, minimum=0)
 
 # Team structure
-DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 10)
+# Pokémon battle teams are capped at six members in core games.
+DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 6)
 DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20)
 
 KAGGLE_CSV_DELIMITER = ";"
 CSV_PROGRESS_LOG_INTERVAL = 250
 PLAYER_TEAM_PROGRESS_LOG_INTERVAL = _env_int("PM4_PLAYER_TEAM_PROGRESS_LOG_INTERVAL", 100)
+PARSER_MIN_BOSS_COVERAGE = max(0.0, min(1.0, float(os.getenv("PM4_PARSER_MIN_BOSS_COVERAGE", "0.85"))))
 
 REQUIRED_MOVES_PROGRESS_INTERVAL = 100
 SLOW_LOOKUP_WARNING_SECONDS = 2.0
@@ -83,3 +85,19 @@ SPECIES_SLUG_ALIASES: dict[str, str] = {
     "nidoran f": "nidoran-f",
     "nidoran m": "nidoran-m",
 }
+
+
+def resolve_runtime_team_config() -> dict[str, object]:
+    return {
+        "member_combo_limit": DEFAULT_MEMBER_COMBO_LIMIT,
+        "team_variant_limit": DEFAULT_TEAM_VARIANT_LIMIT,
+        "team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
+        "allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
+        "catch_pool_size": DEFAULT_CATCH_POOL_SIZE,
+        "source_team_pool_size": DEFAULT_SOURCE_TEAM_POOL_SIZE,
+        "source_team_combo_limit": DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
+        "moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+        "team_member_limit": DEFAULT_TEAM_MEMBER_LIMIT,
+        "member_level": DEFAULT_MEMBER_LEVEL,
+        "parser_min_boss_coverage": PARSER_MIN_BOSS_COVERAGE,
+    }

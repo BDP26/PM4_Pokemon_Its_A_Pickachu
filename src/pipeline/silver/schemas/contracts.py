@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.silver.transforms.keys import (
     make_boss_snapshot_id,
     make_pokemon_instance_id,
@@ -159,6 +160,10 @@ class TeamContract:
             raise ValueError(f"pokemon_instance_ids must align with pokemon for team_id={self.team_id}")
         if not self.pokemon:
             raise ValueError(f"team must contain at least one pokemon for team_id={self.team_id}")
+        if len(self.pokemon) > DEFAULT_TEAM_MEMBER_LIMIT:
+            raise ValueError(
+                f"team exceeds max member limit ({DEFAULT_TEAM_MEMBER_LIMIT}) for team_id={self.team_id}"
+            )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -225,5 +230,4 @@ def validate_move_payloads(records: list[dict[str, Any]]) -> list[dict[str, Any]
         move.validate()
         validated.append(move.as_dict())
     return validated
-
 

@@ -174,3 +174,27 @@ def extract_game_data(game_payload: dict, mapper: LocationMapper) -> list[dict]:
     return [boss_by_name[boss] for boss in expected_bosses if boss in boss_by_name]
 
 
+def enforce_parser_coverage(
+    *,
+    game_key: str,
+    records: list[dict],
+    expected_bosses: list[str],
+    min_coverage: float,
+) -> dict[str, float | int | str]:
+    expected = len(expected_bosses)
+    extracted = len(records)
+    coverage = (extracted / expected) if expected else 1.0
+    report: dict[str, float | int | str] = {
+        "game_key": game_key,
+        "expected_bosses": expected,
+        "extracted_bosses": extracted,
+        "coverage": coverage,
+        "min_coverage": min_coverage,
+    }
+    if coverage < min_coverage:
+        raise ValueError(
+            f"[silver] parser coverage gate failed for {game_key}: {extracted}/{expected} ({coverage:.2%}) "
+            f"below threshold {min_coverage:.2%}"
+        )
+    return report
+

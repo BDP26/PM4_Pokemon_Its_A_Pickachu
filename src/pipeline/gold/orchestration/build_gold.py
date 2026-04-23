@@ -37,6 +37,11 @@ _REQUIRED_MANIFEST_DATASET_FILES = (
     "snapshot_available_pokemon",
     "encounters",
 )
+_STRICT_SHARDED_DATASET_KEYS = {
+    "simulation_inputs_teams",
+    "team_members",
+    "team_member_moves",
+}
 
 
 def _raise_contract_error(code: str, message: str, *, dataset: str | None = None, path: Path | None = None) -> NoReturn:
@@ -102,7 +107,7 @@ def _manifest_datasets(manifest: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], datasets)
 
 
-def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], dataset_key: str) -> Path:
+def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], dataset_key: str) -> Path | list[Path]:
     datasets = _manifest_datasets(manifest)
     dataset_entry = datasets.get(dataset_key)
     if not isinstance(dataset_entry, dict):
@@ -111,6 +116,39 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
             f"Add datasets.{dataset_key} to silver/manifest.json.",
             dataset=dataset_key,
         )
+    files_entry = dataset_entry.get("files")
+    if dataset_key in _STRICT_SHARDED_DATASET_KEYS:
+        if isinstance(files_entry, list) and files_entry:
+            resolved_files: list[Path] = []
+            for index, rel in enumerate(cast(list[Any], files_entry)):
+                if not isinstance(rel, str) or not rel.strip():
+                    _raise_contract_error(
+                        "invalid_dataset_files_entry",
+                        f"datasets.{dataset_key}.files[{index}] must be a non-empty string path.",
+                        dataset=dataset_key,
+                    )
+                candidate = silver_dir / rel
+                if not candidate.exists() or not candidate.is_file():
+                    _raise_contract_error(
+                        "missing_dataset_file",
+                        "Regenerate Silver outputs so all strict contract files exist.",
+                        dataset=dataset_key,
+                        path=candidate,
+                    )
+                resolved_files.append(candidate)
+            return sorted(set(resolved_files))
+        if dataset_entry.get("file"):
+            _raise_contract_error(
+                "strict_sharded_contract_violation",
+                f"datasets.{dataset_key} must use files[]; directory/file-only entries are not allowed.",
+                dataset=dataset_key,
+            )
+        _raise_contract_error(
+            "missing_dataset_files",
+            f"Set datasets.{dataset_key}.files in silver/manifest.json.",
+            dataset=dataset_key,
+        )
+
     rel_path = dataset_entry.get("file")
     if not isinstance(rel_path, str) or not rel_path.strip():
         _raise_contract_error(
@@ -119,8 +157,7 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
             dataset=dataset_key,
         )
     path = silver_dir / cast(str, rel_path)
-    # Silver may publish partitioned parquet datasets as directories.
-    if not path.exists():
+    if not path.exists() or not path.is_file():
         _raise_contract_error(
             "missing_dataset_file",
             "Regenerate Silver outputs so all contract files exist.",
@@ -179,7 +216,7 @@ def _load_and_validate_gold_contract(silver_dir: Path) -> dict[str, Any]:
     manifest = _load_silver_manifest(silver_dir)
     snapshot_files = _resolve_snapshot_files_from_manifest(silver_dir, manifest)
 
-    required_files: dict[str, Path] = {}
+    required_files: dict[str, Path | list[Path]] = {}
     for dataset_key in _REQUIRED_MANIFEST_DATASET_FILES:
         required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
 
@@ -507,7 +544,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
 
     contract = _load_and_validate_gold_contract(silver_dir)
     manifest_snapshot_files = contract["snapshot_files"]
-    required_files: dict[str, Path] = contract["required_files"]
+    required_files: dict[str, Path | list[Path]] = contract["required_files"]
     logger.info("[gold] using strict manifest snapshot inputs count=%s", len(manifest_snapshot_files))
 
     simulation_kwargs: dict[str, Any] = {
@@ -700,5 +737,3 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
 
 if __name__ == "__main__":
     build_gold_from_silver()
-
-

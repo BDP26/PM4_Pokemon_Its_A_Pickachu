@@ -174,6 +174,41 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
     return candidates
 
 
+def _rank_candidate_pool(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    boss_level: int,
+    pool_size: int,
+) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
+    """Score + constrain candidate pool instead of truncating by raw source order."""
+    if not candidates:
+        return [], {"input": 0, "output": 0, "pruned": 0, "family_pruned": 0}
+
+    family_deduped = _dedupe_species_by_family(candidates)
+    family_pruned = max(0, len(candidates) - len(family_deduped))
+    scored: list[tuple[float, tuple[str, int, int, int]]] = []
+
+    for species, chance_max, level_max, capture_rate in family_deduped:
+        level_gap = abs(int(level_max or 0) - int(boss_level or DEFAULT_MEMBER_LEVEL))
+        level_realism = max(0.0, 1.0 - min(level_gap, 25) / 25.0)
+        chance_signal = min(max(float(chance_max), 0.0), 100.0) / 100.0
+        capture_signal = min(max(float(capture_rate), 0.0), 255.0) / 255.0
+        score = (0.45 * chance_signal) + (0.25 * capture_signal) + (0.30 * level_realism)
+        scored.append((score, (species, chance_max, level_max, capture_rate)))
+
+    scored.sort(key=lambda item: (-item[0], -item[1][1], -item[1][2], -item[1][3], item[1][0]))
+    ranked = [row for _, row in scored]
+    constrained = ranked[: max(1, pool_size)]
+
+    diagnostics = {
+        "input": len(candidates),
+        "output": len(constrained),
+        "pruned": max(0, len(ranked) - len(constrained)),
+        "family_pruned": family_pruned,
+    }
+    return constrained, diagnostics
+
+
 def build_boss_progression_pools(
     progression_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -510,6 +545,8 @@ def build_progression_source_teams(
     team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
     candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
     total_pruned_combos = 0
+    total_pruned_candidates = 0
+    total_family_pruned_candidates = 0
 
     for pool in progression_pools:
         game_version = pool["game_version"]
@@ -519,7 +556,13 @@ def build_progression_source_teams(
         if not candidates:
             continue
 
-        candidate_pool = candidates[:candidate_pool_size]
+        candidate_pool, pool_diagnostics = _rank_candidate_pool(
+            candidates,
+            boss_level=boss_level,
+            pool_size=candidate_pool_size,
+        )
+        total_pruned_candidates += pool_diagnostics["pruned"]
+        total_family_pruned_candidates += pool_diagnostics["family_pruned"]
         species_combos = _generate_diverse_species_combos(
             candidates=candidate_pool,
             team_fill_size=team_fill_size,
@@ -560,13 +603,15 @@ def build_progression_source_teams(
             )
 
     logger.info(
-        "[silver/teams] built progression source teams bosses=%s sources=%s source_team_size=%s candidate_pool_size=%s source_team_combo_limit=%s pruned=%s",
+        "[silver/teams] built progression source teams bosses=%s sources=%s source_team_size=%s candidate_pool_size=%s source_team_combo_limit=%s pruned_combos=%s pruned_candidates=%s family_pruned_candidates=%s",
         len(progression_pools),
         len(sources),
         team_fill_size,
         candidate_pool_size,
         DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
         total_pruned_combos,
+        total_pruned_candidates,
+        total_family_pruned_candidates,
     )
     return sources
 

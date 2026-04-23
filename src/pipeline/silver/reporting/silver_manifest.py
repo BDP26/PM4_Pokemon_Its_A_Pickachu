@@ -113,7 +113,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     teams_shards = sorted(simulation_dir.glob("teams_*.parquet"))
     if teams_shards:
         manifest["datasets"]["simulation_inputs_teams"] = {
-            "file": _relative_to(silver_dir, simulation_dir),
+            "files": [_relative_to(silver_dir, shard) for shard in teams_shards],
             "glob": "teams_*.parquet",
             "count": len(teams_shards),
             "format": "Parquet",
@@ -161,7 +161,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     sharded_team_members = sorted(simulation_dir.glob("team_members_*.parquet"))
     if sharded_team_members:
         manifest["datasets"]["team_members"] = {
-            "file": _relative_to(silver_dir, simulation_dir),
+            "files": [_relative_to(silver_dir, shard) for shard in sharded_team_members],
             "glob": "team_members_*.parquet",
             "count": len(sharded_team_members),
             "format": "Parquet",
@@ -185,7 +185,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     sharded_member_moves = sorted(simulation_dir.glob("team_member_moves_*.parquet"))
     if sharded_member_moves:
         manifest["datasets"]["team_member_moves"] = {
-            "file": _relative_to(silver_dir, simulation_dir),
+            "files": [_relative_to(silver_dir, shard) for shard in sharded_member_moves],
             "glob": "team_member_moves_*.parquet",
             "count": len(sharded_member_moves),
             "format": "Parquet",

@@ -1,14 +1,11 @@
-import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
-from src.pipeline.common.http import build_session
 from src.pipeline.common.io import read_json, write_json
-from src.pipeline.settings import POKEAPI
-from src.pipeline.settings import SILVER_DIR
+from src.pipeline.settings import BRONZE_DIR, SILVER_DIR
 
 
 def _normalize_version_key(version_name: str) -> str:
@@ -148,32 +145,6 @@ def _serialize_encounter_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fetch_capture_rate(
-    session: Any,
-    pokemon_url: str,
-    capture_rate_cache: dict[str, int | None],
-) -> int | None:
-    if not pokemon_url:
-        return None
-    if pokemon_url in capture_rate_cache:
-        return capture_rate_cache[pokemon_url]
-
-    try:
-        pokemon_id = pokemon_url.rstrip("/").split("/")[-1]
-        species_url = f"{POKEAPI}/pokemon-species/{pokemon_id}"
-        response = session.get(species_url, timeout=10)
-        if response.status_code == 200:
-            payload = response.json()
-            value = payload.get("capture_rate")
-            capture_rate_cache[pokemon_url] = int(value) if isinstance(value, int) else None
-        else:
-            capture_rate_cache[pokemon_url] = None
-    except Exception:
-        capture_rate_cache[pokemon_url] = None
-
-    return capture_rate_cache[pokemon_url]
-
-
 def _pick_species_for_version(version_to_species: dict[str, list[str]], game_version: str) -> list[str]:
     game_key = _normalize_version_key(game_version)
     direct = version_to_species.get(game_key)
@@ -226,21 +197,20 @@ def _save_location_cache(cache_path: Path, payload: dict[str, dict[str, Any]]) -
 
 def get_location_area_and_pokemon_maps(
     location_slugs: list[str],
-    throttle_seconds: float = 0.1,
     allowed_versions: set[str] | None = None,
     silver_dir: Path = SILVER_DIR,
+    bronze_dir: Path = BRONZE_DIR,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, Any]]]:
-    session = build_session()
     state_dir = silver_dir / "_state"
-    location_cache_path = state_dir / "location_pokemon_cache.json"
-    capture_rate_cache_path = state_dir / "capture_rate_cache.json"
-
-    location_cache = _load_location_cache(location_cache_path)
-    loaded_capture_rate_cache = _load_location_cache(capture_rate_cache_path)
-    capture_rate_cache: dict[str, int | None] = {
-        str(key): (int(value) if isinstance(value, int) else None)
-        for key, value in loaded_capture_rate_cache.items()
-    }
+    snapshot_path = bronze_dir / "pokeapi" / "location_pokemon_snapshot.json"
+    if not snapshot_path.exists():
+        raise FileNotFoundError(
+            f"Missing Bronze location snapshot: {snapshot_path}. Run bronze fetch before Silver."
+        )
+    snapshot = read_json(snapshot_path)
+    snapshot_map = (snapshot or {}).get("location_pokemon_map", {}) if isinstance(snapshot, dict) else {}
+    if not isinstance(snapshot_map, dict):
+        snapshot_map = {}
 
     area_map: dict[str, list[str]] = {}
     location_pokemon_map: dict[str, dict[str, Any]] = {}
@@ -255,117 +225,20 @@ def get_location_area_and_pokemon_maps(
     unique_locations = sorted(set(location_slugs))
     diagnostics["locations_total"] = len(unique_locations)
     for slug in tqdm(unique_locations, desc="[silver] mapping locations + pokemon"):
-        cached_location = location_cache.get(slug)
-        if isinstance(cached_location, dict):
-            area_map[slug] = list(cached_location.get("area_names", []))
-            location_pokemon_map[slug] = dict(cached_location.get("payload", {}))
+        slug_payload = snapshot_map.get(slug)
+        if not isinstance(slug_payload, dict):
+            diagnostics["location_errors"].append({"location_slug": slug, "reason": "missing_in_bronze_snapshot"})
+            area_map[slug] = []
+            location_pokemon_map[slug] = {"all": [], "by_version": {}, "all_encounters": [], "by_version_encounters": {}, "areas": [], "areas_detail": {}}
             continue
+        area_map[slug] = [str(area) for area in slug_payload.get("areas", []) if isinstance(area, str)]
 
-        version_species = defaultdict[str, set[str]](set)
-        version_encounters_by_species = defaultdict[str, dict[str, dict[str, Any]]](dict)
-        area_details: dict[str, dict[str, Any]] = {}
-        area_names: list[str] = []
-
-        try:
-            response = session.get(f"{POKEAPI}/location/{slug}", timeout=10)
-            if response.status_code == 200:
-                payload = response.json()
-                area_names = [entry["name"] for entry in payload.get("areas", []) if entry.get("name")]
-            else:
-                diagnostics["location_errors"].append(
-                    {"location_slug": slug, "status_code": int(response.status_code), "reason": "location_http_error"}
-                )
-        except Exception:
-            diagnostics["location_errors"].append({"location_slug": slug, "reason": "location_request_exception"})
-            area_names = []
-
-        for area_name in area_names:
-            try:
-                area_response = session.get(f"{POKEAPI}/location-area/{area_name}", timeout=10)
-                if area_response.status_code != 200:
-                    diagnostics["area_errors"].append(
-                        {
-                            "location_slug": slug,
-                            "area_slug": area_name,
-                            "status_code": int(area_response.status_code),
-                            "reason": "location_area_http_error",
-                        }
-                    )
-                    continue
-                area_payload = area_response.json()
-                area_species = _extract_area_species_by_version(area_payload)
-                area_encounters = _aggregate_area_encounters_by_version(area_payload)
-                area_details[area_name] = {
-                    "by_version": {
-                        version_name: sorted(species_set)
-                        for version_name, species_set in sorted(area_species.items())
-                        if version_name != "all"
-                    },
-                    "all": sorted(area_species.get("all", set())),
-                    "by_version_encounters": {
-                        version_name: [
-                            _serialize_encounter_entry(entry)
-                            for _, entry in sorted(species_map.items())
-                        ]
-                        for version_name, species_map in sorted(area_encounters.items())
-                        if version_name != "all"
-                    },
-                    "all_encounters": [
-                        _serialize_encounter_entry(entry)
-                        for _, entry in sorted(area_encounters.get("all", {}).items())
-                    ],
-                }
-                for version_name, species_set in area_species.items():
-                    version_species[version_name].update(species_set)
-                for version_name, entries in area_encounters.items():
-                    for species_name, entry in entries.items():
-                        existing = version_encounters_by_species[version_name].get(species_name)
-                        if not existing:
-                            version_encounters_by_species[version_name][species_name] = entry
-                            continue
-
-                        if entry["level_min"] is not None and (
-                            existing["level_min"] is None or entry["level_min"] < existing["level_min"]
-                        ):
-                            existing["level_min"] = entry["level_min"]
-                        if entry["level_max"] is not None and (
-                            existing["level_max"] is None or entry["level_max"] > existing["level_max"]
-                        ):
-                            existing["level_max"] = entry["level_max"]
-                        existing["encounter_methods"].update(entry["encounter_methods"])
-                        existing["encounter_method_urls"].update(entry["encounter_method_urls"])
-                        if entry.get("encounter_chance_min") is not None:
-                            if existing.get("encounter_chance_min") is None or entry["encounter_chance_min"] < existing["encounter_chance_min"]:
-                                existing["encounter_chance_min"] = entry["encounter_chance_min"]
-                        if entry.get("encounter_chance_max") is not None:
-                            if existing.get("encounter_chance_max") is None or entry["encounter_chance_max"] > existing["encounter_chance_max"]:
-                                existing["encounter_chance_max"] = entry["encounter_chance_max"]
-                        if existing.get("capture_rate") is None:
-                            existing["capture_rate"] = entry.get("capture_rate")
-            except Exception:
-                diagnostics["area_errors"].append(
-                    {"location_slug": slug, "area_slug": area_name, "reason": "location_area_request_exception"}
-                )
-                continue
-
-            time.sleep(throttle_seconds)
-
-        area_map[slug] = area_names
-
-        for species_map in version_encounters_by_species.values():
-            for entry in species_map.values():
-                if entry.get("capture_rate") is None:
-                    entry["capture_rate"] = _fetch_capture_rate(session, str(entry.get("pokemon_url") or ""), capture_rate_cache)
-                    if entry["capture_rate"] is None:
-                        diagnostics["capture_rate_errors"].append(
-                            {
-                                "location_slug": slug,
-                                "species": entry.get("species"),
-                                "pokemon_url": entry.get("pokemon_url"),
-                                "reason": "capture_rate_unavailable",
-                            }
-                        )
-
+        version_species = slug_payload.get("by_version", {}) if isinstance(slug_payload.get("by_version", {}), dict) else {}
+        version_encounters_by_species = (
+            slug_payload.get("by_version_encounters", {})
+            if isinstance(slug_payload.get("by_version_encounters", {}), dict)
+            else {}
+        )
         # Filter versions to only include allowed_versions if specified
         filtered_versions = set(version_species.keys())
         if allowed_versions:
@@ -380,35 +253,26 @@ def get_location_area_and_pokemon_maps(
             for version_name, species_set in sorted(version_species.items())
             if version_name in filtered_versions and version_name != "all"
         }
-        by_version_encounters = {
-            version_name: [
-                _serialize_encounter_entry(entry)
-                for _, entry in sorted(species_map.items())
-            ]
-            for version_name, species_map in sorted(version_encounters_by_species.items())
-            if version_name in filtered_versions and version_name != "all"
-        }
+        by_version_encounters: dict[str, list[dict[str, Any]]] = {}
+        for version_name, species_map in sorted(version_encounters_by_species.items()):
+            if version_name not in filtered_versions or version_name == "all":
+                continue
+            if isinstance(species_map, dict):
+                by_version_encounters[version_name] = [
+                    _serialize_encounter_entry(entry)
+                    for _, entry in sorted(species_map.items())
+                ]
+            elif isinstance(species_map, list):
+                by_version_encounters[version_name] = [entry for entry in species_map if isinstance(entry, dict)]
         location_pokemon_map[slug] = {
-            "all": sorted(version_species.get("all", set())),
+            "all": [str(species) for species in slug_payload.get("all", []) if isinstance(species, str)],
             "by_version": by_version_species,
-            "all_encounters": [
-                _serialize_encounter_entry(entry)
-                for _, entry in sorted(version_encounters_by_species.get("all", {}).items())
-            ],
+            "all_encounters": list(slug_payload.get("all_encounters", [])),
             "by_version_encounters": by_version_encounters,
-            "areas": sorted(area_names),
-            "areas_detail": {name: area_details[name] for name in sorted(area_details)},
+            "areas": sorted(area_map[slug]),
+            "areas_detail": dict(slug_payload.get("areas_detail", {})),
         }
 
-        location_cache[slug] = {
-            "area_names": area_map[slug],
-            "payload": location_pokemon_map[slug],
-        }
-
-        time.sleep(throttle_seconds)
-
-    _save_location_cache(location_cache_path, location_cache)
-    _save_location_cache(capture_rate_cache_path, {k: v for k, v in capture_rate_cache.items() if k})
     _save_location_cache(state_dir / "location_enrichment_diagnostics.json", diagnostics)
 
     return area_map, location_pokemon_map

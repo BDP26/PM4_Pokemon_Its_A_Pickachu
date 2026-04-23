@@ -1,7 +1,8 @@
 import re
 import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from bs4 import BeautifulSoup
 
@@ -101,6 +102,120 @@ def _fetch_pokeapi_location_index(session) -> dict[str, object]:
             area_results if isinstance(area_results, list) else []
         ),
     }
+
+
+def _fetch_capture_rate(session, pokemon_url: str, capture_rate_cache: dict[str, int | None]) -> int | None:
+    if not pokemon_url:
+        return None
+    if pokemon_url in capture_rate_cache:
+        return capture_rate_cache[pokemon_url]
+    try:
+        pokemon_id = pokemon_url.rstrip("/").split("/")[-1]
+        species_url = f"{POKEAPI}/pokemon-species/{pokemon_id}"
+        response = session.get(species_url, timeout=15)
+        if response.status_code == 200:
+            payload = response.json()
+            value = payload.get("capture_rate")
+            capture_rate_cache[pokemon_url] = int(value) if isinstance(value, int) else None
+        else:
+            capture_rate_cache[pokemon_url] = None
+    except Exception:
+        capture_rate_cache[pokemon_url] = None
+    return capture_rate_cache[pokemon_url]
+
+
+def _build_location_pokemon_snapshot(session, location_index: dict[str, object]) -> dict[str, object]:
+    diagnostics: dict[str, object] = {"location_errors": [], "area_errors": [], "capture_rate_errors": []}
+    payload: dict[str, dict[str, object]] = {}
+    capture_rate_cache: dict[str, int | None] = {}
+
+    location_rows = location_index.get("results", [])
+    for location in location_rows if isinstance(location_rows, list) else []:
+        slug = str((location or {}).get("name") or "").strip()
+        if not slug:
+            continue
+        try:
+            location_response = session.get(f"{POKEAPI}/location/{slug}", timeout=15)
+            if location_response.status_code != 200:
+                cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "status": location_response.status_code})
+                continue
+            area_names = [str(entry.get("name") or "").strip() for entry in location_response.json().get("areas", []) if entry.get("name")]
+        except Exception:
+            cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "reason": "request_exception"})
+            continue
+
+        version_species = defaultdict[str, set[str]](set)
+        version_encounters = defaultdict[str, dict[str, dict[str, object]]](dict)
+        area_details: dict[str, dict[str, object]] = {}
+        for area_name in area_names:
+            try:
+                area_response = session.get(f"{POKEAPI}/location-area/{area_name}", timeout=15)
+                if area_response.status_code != 200:
+                    cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "status": area_response.status_code})
+                    continue
+                area_payload = area_response.json()
+            except Exception:
+                cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "reason": "request_exception"})
+                continue
+
+            by_version_species = defaultdict[str, set[str]](set)
+            by_version_encounters = defaultdict[str, dict[str, dict[str, object]]](dict)
+            for encounter in area_payload.get("pokemon_encounters", []):
+                pokemon = encounter.get("pokemon") or {}
+                species = str(pokemon.get("name") or "").strip()
+                pokemon_url = str(pokemon.get("url") or "").strip()
+                if not species:
+                    continue
+                version_details = encounter.get("version_details", []) or [{"version": {"name": "all"}, "encounter_details": []}]
+                for detail in version_details:
+                    version_name = str(((detail.get("version") or {}).get("name") or "all")).strip().lower()
+                    by_version_species[version_name].add(species)
+                    by_version_species["all"].add(species)
+                    details = detail.get("encounter_details", []) or [{}]
+                    entry = by_version_encounters[version_name].setdefault(species, {"species": species, "pokemon_url": pokemon_url, "level_min": None, "level_max": None, "encounter_chance_min": None, "encounter_chance_max": None, "capture_rate": None})
+                    all_entry = by_version_encounters["all"].setdefault(species, {"species": species, "pokemon_url": pokemon_url, "level_min": None, "level_max": None, "encounter_chance_min": None, "encounter_chance_max": None, "capture_rate": None})
+                    for point in details:
+                        for target in (entry, all_entry):
+                            for key in ("min_level", "max_level", "chance"):
+                                value = point.get(key)
+                                if not isinstance(value, int):
+                                    continue
+                                if key == "min_level":
+                                    target["level_min"] = value if target["level_min"] is None else min(int(target["level_min"]), value)
+                                elif key == "max_level":
+                                    target["level_max"] = value if target["level_max"] is None else max(int(target["level_max"]), value)
+                                elif key == "chance":
+                                    target["encounter_chance_min"] = value if target["encounter_chance_min"] is None else min(int(target["encounter_chance_min"]), value)
+                                    target["encounter_chance_max"] = value if target["encounter_chance_max"] is None else max(int(target["encounter_chance_max"]), value)
+            for version_name, species_set in by_version_species.items():
+                version_species[version_name].update(species_set)
+            for version_name, species_map in by_version_encounters.items():
+                for species_name, entry in species_map.items():
+                    version_encounters[version_name].setdefault(species_name, entry)
+            area_details[area_name] = {
+                "by_version": {k: sorted(v) for k, v in by_version_species.items() if k != "all"},
+                "all": sorted(by_version_species.get("all", set())),
+                "by_version_encounters": {k: sorted(v.values(), key=lambda x: str(x.get("species") or "")) for k, v in by_version_encounters.items() if k != "all"},
+                "all_encounters": sorted(by_version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or "")),
+            }
+
+        for species_map in version_encounters.values():
+            for entry in species_map.values():
+                if entry.get("capture_rate") is None:
+                    entry["capture_rate"] = _fetch_capture_rate(session, str(entry.get("pokemon_url") or ""), capture_rate_cache)
+                    if entry["capture_rate"] is None:
+                        cast(list[dict[str, object]], diagnostics["capture_rate_errors"]).append({"slug": slug, "species": entry.get("species")})
+
+        payload[slug] = {
+            "all": sorted(version_species.get("all", set())),
+            "by_version": {k: sorted(v) for k, v in version_species.items() if k != "all"},
+            "all_encounters": sorted(version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or "")),
+            "by_version_encounters": {k: sorted(v.values(), key=lambda x: str(x.get("species") or "")) for k, v in version_encounters.items() if k != "all"},
+            "areas": sorted(area_names),
+            "areas_detail": {name: area_details[name] for name in sorted(area_details)},
+        }
+
+    return {"location_pokemon_map": payload, "diagnostics": diagnostics}
 
 
 def get_walkthrough_parts(session, root_title: str) -> list[dict]:
@@ -205,11 +320,16 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
     location_signature = stable_signature(location_index)
     if _should_write_source(source_state, "pokeapi:location_index", location_signature):
         write_json(pokeapi_dir / "location_index.json", location_index)
+        location_snapshot = _build_location_pokemon_snapshot(session, location_index)
+        write_json(pokeapi_dir / "location_pokemon_snapshot.json", location_snapshot)
         source_state["pokeapi:location_index"] = BronzeSourceState(
             source="pokeapi:location_index",
             signature=location_signature,
             updated_at_utc=now_utc_iso(),
-            output_paths=[str((pokeapi_dir / "location_index.json").relative_to(output))],
+            output_paths=[
+                str((pokeapi_dir / "location_index.json").relative_to(output)),
+                str((pokeapi_dir / "location_pokemon_snapshot.json").relative_to(output)),
+            ],
         ).as_dict()
         updated_sources.append("pokeapi:location_index")
     else:
@@ -303,4 +423,3 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
 
 if __name__ == "__main__":
     fetch_bronze_sources()
-
