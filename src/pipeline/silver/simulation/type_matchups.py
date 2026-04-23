@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from src.pipeline.common.io import read_json, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_parquet, write_json, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.settings import (
     BRONZE_DIR,
@@ -1143,8 +1143,86 @@ def _run_spark_simulations(
         spark.stop()
 
 
-def _load_move_and_pokemon_profiles_from_disk(silver_dir: Path) -> None:
-    _load_lookup_cache_from_disk(silver_dir)
+def _hydrate_profiles_from_simulation_inputs(teams_data: list[dict[str, Any]], silver_dir: Path) -> None:
+    simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
+    references_dir = silver_dir / "references"
+    move_data_path = simulation_dir / "move_data.json"
+    move_reference_path = references_dir / "move_reference.parquet"
+
+    hydrated_moves = 0
+    if move_reference_path.exists():
+        try:
+            move_reference = read_parquet(move_reference_path)
+        except Exception:
+            move_reference = None
+        if move_reference is not None and not move_reference.empty:
+            for row in move_reference.to_dict(orient="records"):
+                move_name = _normalize_move_name(str(row.get("move_name") or row.get("name") or ""))
+                if not move_name or move_name in _LOCAL_MOVE_PROFILES:
+                    continue
+                _LOCAL_MOVE_PROFILES[move_name] = {
+                    "name": str(row.get("name") or move_name),
+                    "type": str(row.get("type") or "Normal"),
+                    "power": int(row.get("power") or 0),
+                    "damage_class": str(row.get("damage_class") or "physical"),
+                    "accuracy": row.get("accuracy"),
+                    "pp": row.get("pp"),
+                    "level_learned_at": int(row.get("level_learned_at") or 0),
+                    "version_group": str(row.get("version_group") or ""),
+                    "degraded_data": bool(row.get("degraded_data", False)),
+                }
+                hydrated_moves += 1
+
+    if move_data_path.exists():
+        try:
+            payload = read_json(move_data_path)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            for move_name, raw_profile in payload.items():
+                normalized_name = _normalize_move_name(str(move_name))
+                if not normalized_name or normalized_name in _LOCAL_MOVE_PROFILES:
+                    continue
+                if not isinstance(raw_profile, dict):
+                    continue
+                _LOCAL_MOVE_PROFILES[normalized_name] = {
+                    "name": str(raw_profile.get("name", normalized_name)),
+                    "type": str(raw_profile.get("type", "Normal")),
+                    "power": int(raw_profile.get("power", 0) or 0),
+                    "damage_class": str(raw_profile.get("damage_class", "physical")),
+                    "accuracy": raw_profile.get("accuracy"),
+                    "pp": raw_profile.get("pp"),
+                    "level_learned_at": int(raw_profile.get("level_learned_at", 0) or 0),
+                    "version_group": str(raw_profile.get("version_group", "")),
+                    "degraded_data": bool(raw_profile.get("degraded_data", False)),
+                }
+                hydrated_moves += 1
+
+    hydrated_species = 0
+    required_species: set[str] = set()
+    for team in teams_data:
+        for member in _team_members(team):
+            species_id = normalize_species_name(str(member.get("species") or ""))
+            if species_id:
+                required_species.add(species_id)
+
+    for species_id in required_species:
+        if species_id in _LOCAL_POKEMON_PROFILES:
+            continue
+        _LOCAL_POKEMON_PROFILES[species_id] = {
+            "name": species_id,
+            "types": ["Normal"],
+            "stats": _default_stats(),
+            "moves": [],
+        }
+        hydrated_species += 1
+
+    if hydrated_moves or hydrated_species:
+        logger.info(
+            "[type_matchups] hydrated lookup cache from simulation inputs species=%s moves=%s",
+            hydrated_species,
+            hydrated_moves,
+        )
 
 
 def build_team_battle_simulations(
@@ -1159,8 +1237,8 @@ def build_team_battle_simulations(
     simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     simulation_dir.mkdir(parents=True, exist_ok=True)
 
-    _load_move_and_pokemon_profiles_from_disk(silver_dir)
-    _persist_lookup_cache_to_disk()
+    _install_lookup_cache({}, {})
+    _hydrate_profiles_from_simulation_inputs(teams_data, silver_dir)
 
     config = runtime_config or BattleSimulationConfig()
     if config.fail_on_degraded_data:

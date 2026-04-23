@@ -28,13 +28,13 @@ logger = logging.getLogger(__name__)
 def _run_gold_team_battle_simulations(
     *,
     teams_data: list[dict[str, Any]],
-    gold_dir: Path,
+    silver_dir: Path,
     bronze_dir: Path,
     runtime_config: BattleSimulationConfig,
 ) -> None:
     build_team_battle_simulations(
         teams_data=teams_data,
-        silver_dir=gold_dir,
+        silver_dir=silver_dir,
         bronze_dir=bronze_dir,
         force_spark=None,
         runtime_config=runtime_config,
@@ -117,7 +117,7 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] running round-based team battle simulations")
     _run_gold_team_battle_simulations(
         teams_data=teams_data,
-        gold_dir=gold_dir,
+        silver_dir=silver_dir,
         bronze_dir=bronze_dir,
         runtime_config=runtime_config,
     )

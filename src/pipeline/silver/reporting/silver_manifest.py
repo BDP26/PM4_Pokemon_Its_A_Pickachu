@@ -1,8 +1,11 @@
 """Silver Layer manifest for harmonized and enriched intermediate data."""
 from pathlib import Path
+import logging
 
 from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json
 from src.pipeline.settings import SILVER_DIR, get_silver_subdirs
+
+logger = logging.getLogger(__name__)
 
 
 def _relative_to(base: Path, target: Path) -> str:
@@ -55,6 +58,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Boss team data with reachable locations and Pokemon"
         }
 
+    logger.info("[silver_manifest] found %s boss records", len(game_files))
+
     encounters_file = references_dir / "encounters.jsonl"
     if encounters_file.exists():
         try:
@@ -69,6 +74,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Normalized location-pokemon encounter rows"
         }
 
+    logger.info("[silver_manifest] found %s encounters", encounter_count)
+
     pokemon_reference_file = references_dir / "pokemon_reference.json"
     if pokemon_reference_file.exists():
         manifest["datasets"]["pokemon_reference"] = {
@@ -77,6 +84,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Centralized Pokemon URL and name reference"
         }
 
+    logger.info("[silver_manifest] found %s pokemon reference entries", len(read_json(pokemon_reference_file)))
+
     encounter_methods_file = references_dir / "encounter_methods_reference.json"
     if encounter_methods_file.exists():
         manifest["datasets"]["encounter_methods_reference"] = {
@@ -84,6 +93,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "format": "JSON",
             "description": "Deduplicated encounter-method lookup table"
         }
+
+    logger.info("[silver_manifest] found %s encounter methods reference entries", len(read_json(encounter_methods_file)))
 
     for reference_name, description in [
         ("games.parquet", "Game dimension with region, generation, and version groups"),
@@ -109,6 +120,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": description,
         }
 
+    logger.info("[silver_manifest] found %s reference entries", count)
+
     # Teams (sharded parquet-first contract)
     teams_shards = sorted(simulation_dir.glob("teams_*.parquet"))
     if teams_shards:
@@ -130,6 +143,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
                 "description": "Partitioned team compositions consumed by gold",
             }
 
+    logger.info("[silver_manifest] found %s teams", len(teams) if isinstance(teams, list) else 0)
+
     teams_jsonl_file = simulation_dir / "teams.jsonl"
     if teams_jsonl_file.exists():
         try:
@@ -144,6 +159,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Line-delimited view of normalized team compositions"
         }
 
+    logger.info("[silver_manifest] found %s teams (JSONL)", teams_jsonl_count)
+
     move_data_file = simulation_dir / "move_data.json"
     if move_data_file.exists():
         try:
@@ -157,6 +174,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "format": "JSON",
             "description": "Validated move metadata stored separately from team records",
         }
+
+    logger.info("[silver_manifest] found %s move data", move_count)
 
     sharded_team_members = sorted(simulation_dir.glob("team_members_*.parquet"))
     if sharded_team_members:
@@ -182,6 +201,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
                 "description": "Team member fact table (one row per team slot)",
             }
 
+    logger.info("[silver_manifest] found %s team members", count)
+
     sharded_member_moves = sorted(simulation_dir.glob("team_member_moves_*.parquet"))
     if sharded_member_moves:
         manifest["datasets"]["team_member_moves"] = {
@@ -205,7 +226,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
                 "format": "Parquet",
                 "description": "Team-member move fact table (one row per move slot)",
             }
-
+    logger.info("[silver_manifest] found %s team member moves", count)
 
     # Location maps
     location_area_file = mappings_dir / "location_to_area_map.json"
@@ -216,6 +237,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Maps location slugs to game areas"
         }
 
+        logger.info("[silver_manifest] found %s location area mappings", len(read_json(location_area_file)))
+
     location_pokemon_file = mappings_dir / "location_to_pokemon_map.json"
     if location_pokemon_file.exists():
         manifest["datasets"]["location_to_pokemon_map"] = {
@@ -223,6 +246,9 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "format": "JSON",
             "description": "Maps locations to available Pokemon species"
         }
+
+        logger.info("[silver_manifest] found %s location-pokemon mappings", len(read_json(location_pokemon_file)))
+
 
     # Boss mapping
     boss_mapping_file = mappings_dir / "boss_mapping_by_version.json"
@@ -233,6 +259,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "description": "Boss team configurations per game version"
         }
 
+        logger.info("[silver_manifest] found %s boss mappings", len(read_json(boss_mapping_file)))
+
     relational_validation_file = silver_subdirs["diagnostics"] / "relational_validation.json"
     if relational_validation_file.exists():
         manifest["datasets"]["relational_validation"] = {
@@ -240,6 +268,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "format": "JSON",
             "description": "FK/PK validation report for normalized silver tables",
         }
+
+        logger.info("[silver_manifest] found %s relational validation report", len(read_json(relational_validation_file)))
 
     write_json(silver_dir / "manifest.json", manifest)
 
