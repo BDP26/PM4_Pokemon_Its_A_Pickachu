@@ -65,20 +65,25 @@ class TeamBattleResult(TypedDict):
     team_id_defender: Any
     attacker_win: bool
     winner_team_id: Any
-    attacker_remaining_pokemon: int
-    defender_remaining_pokemon: int
-    attacker_total_remaining_hp: int
-    defender_total_remaining_hp: int
-    battle_turns: int
+    attacker_remaining_pokemon: float
+    defender_remaining_pokemon: float
+    attacker_total_remaining_hp: float
+    defender_total_remaining_hp: float
+    battle_turns: float
     simulation_score: float
     degraded_data: bool
     warnings: list[str]
     duel_summaries: list[dict[str, Any]]
     predicted_player_win_chance: float
+    attacker_wins: int
+    attacker_losses: int
     n_trials: int
     attacker_game_version: str | None
     defender_game_version: str | None
     is_compatible_version: bool
+    representative_simulation_score: float
+    representative_duel_summaries: list[dict[str, Any]]
+    representative_warnings: list[str]
 
 
 @dataclass
@@ -651,10 +656,7 @@ def _simulation_score(
 
 
 def _is_player_candidate_team(team: dict[str, Any]) -> bool:
-    if bool(team.get("is_player_candidate")):
-        return True
-    team_id = str(team.get("team_id") or "")
-    return team_id.startswith("STARTER_")
+    return bool(team.get("is_player_candidate"))
 
 
 def _is_boss_team(team: dict[str, Any]) -> bool:
@@ -812,10 +814,21 @@ def simulate_team_battle_once(
         "warnings": warnings.all(),
         "duel_summaries": duel_summaries,
         "predicted_player_win_chance": 1.0 if attacker_win else 0.0,
+        "attacker_wins": 1 if attacker_win else 0,
+        "attacker_losses": 0 if attacker_win else 1,
         "n_trials": 1,
         "attacker_game_version": _normalized_game_version(attacker_game_version),
         "defender_game_version": _normalized_game_version(defender_game_version),
         "is_compatible_version": _is_version_compatible(attacker_game_version, defender_game_version, config),
+        "representative_simulation_score": _simulation_score(
+            attacker_win,
+            attacker_remaining_pokemon,
+            defender_remaining_pokemon,
+            attacker_total_remaining_hp,
+            defender_total_remaining_hp,
+        ),
+        "representative_duel_summaries": duel_summaries,
+        "representative_warnings": warnings.all(),
     }
 
 
@@ -845,10 +858,15 @@ def simulate_team_battle(
             "warnings": ["incompatible_game_versions"],
             "duel_summaries": [],
             "predicted_player_win_chance": 0.0,
+            "attacker_wins": 0,
+            "attacker_losses": n_trials,
             "n_trials": n_trials,
             "attacker_game_version": _normalized_game_version(attacker_game_version),
             "defender_game_version": _normalized_game_version(defender_game_version),
             "is_compatible_version": False,
+            "representative_simulation_score": -999.0,
+            "representative_duel_summaries": [],
+            "representative_warnings": ["incompatible_game_versions"],
         }
 
     if not _apply_level_plausibility_filter(attacker_team, defender_team, config):
@@ -867,10 +885,15 @@ def simulate_team_battle(
             "warnings": ["level_plausibility_filter_failed"],
             "duel_summaries": [],
             "predicted_player_win_chance": 0.0,
+            "attacker_wins": 0,
+            "attacker_losses": n_trials,
             "n_trials": n_trials,
             "attacker_game_version": _normalized_game_version(attacker_game_version),
             "defender_game_version": _normalized_game_version(defender_game_version),
             "is_compatible_version": True,
+            "representative_simulation_score": -999.0,
+            "representative_duel_summaries": [],
+            "representative_warnings": ["level_plausibility_filter_failed"],
         }
 
     trial_results: list[TeamBattleResult] = []
@@ -891,13 +914,53 @@ def simulate_team_battle(
         if result["attacker_win"]:
             wins += 1
 
-    best_result = max(trial_results, key=lambda r: r["simulation_score"])
-    best_result["predicted_player_win_chance"] = round(wins / max(1, n_trials), 4)
-    best_result["n_trials"] = n_trials
-    best_result["attacker_game_version"] = _normalized_game_version(attacker_game_version)
-    best_result["defender_game_version"] = _normalized_game_version(defender_game_version)
-    best_result["is_compatible_version"] = True
-    return best_result
+    representative_result = max(trial_results, key=lambda r: r["simulation_score"])
+    losses = max(0, n_trials - wins)
+    avg_attacker_remaining_pokemon = round(
+        sum(row["attacker_remaining_pokemon"] for row in trial_results) / max(1, n_trials),
+        3,
+    )
+    avg_defender_remaining_pokemon = round(
+        sum(row["defender_remaining_pokemon"] for row in trial_results) / max(1, n_trials),
+        3,
+    )
+    avg_attacker_remaining_hp = round(
+        sum(row["attacker_total_remaining_hp"] for row in trial_results) / max(1, n_trials),
+        3,
+    )
+    avg_defender_remaining_hp = round(
+        sum(row["defender_total_remaining_hp"] for row in trial_results) / max(1, n_trials),
+        3,
+    )
+    avg_turns = round(sum(row["battle_turns"] for row in trial_results) / max(1, n_trials), 3)
+    avg_sim_score = round(sum(row["simulation_score"] for row in trial_results) / max(1, n_trials), 3)
+    attacker_win = wins >= losses
+
+    return {
+        "team_id_attacker": attacker_team.get("team_id"),
+        "team_id_defender": defender_team.get("team_id"),
+        "attacker_win": attacker_win,
+        "winner_team_id": attacker_team.get("team_id") if attacker_win else defender_team.get("team_id"),
+        "attacker_remaining_pokemon": avg_attacker_remaining_pokemon,
+        "defender_remaining_pokemon": avg_defender_remaining_pokemon,
+        "attacker_total_remaining_hp": avg_attacker_remaining_hp,
+        "defender_total_remaining_hp": avg_defender_remaining_hp,
+        "battle_turns": avg_turns,
+        "simulation_score": avg_sim_score,
+        "degraded_data": any(bool(row["degraded_data"]) for row in trial_results),
+        "warnings": sorted({warning for row in trial_results for warning in row["warnings"]}),
+        "duel_summaries": [],
+        "predicted_player_win_chance": round(wins / max(1, n_trials), 4),
+        "attacker_wins": wins,
+        "attacker_losses": losses,
+        "n_trials": n_trials,
+        "attacker_game_version": _normalized_game_version(attacker_game_version),
+        "defender_game_version": _normalized_game_version(defender_game_version),
+        "is_compatible_version": True,
+        "representative_simulation_score": float(representative_result["simulation_score"]),
+        "representative_duel_summaries": cast(list[dict[str, Any]], representative_result.get("duel_summaries", [])),
+        "representative_warnings": cast(list[str], representative_result.get("warnings", [])),
+    }
 
 
 def _run_local_simulations(
@@ -1115,10 +1178,32 @@ def build_team_battle_simulations(
     if config.fail_on_degraded_data and any(bool(row.get("degraded_data", False)) for row in simulations):
         raise ValueError("Degraded simulation rows detected in strict mode; aborting output write")
 
-    write_parquet(simulation_dir / "team_battle_simulations.parquet", simulations)
+    aggregate_rows: list[dict[str, Any]] = []
+    diagnostic_rows: list[dict[str, Any]] = []
+    for row in simulations:
+        aggregate_rows.append(
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"representative_simulation_score", "representative_duel_summaries", "representative_warnings"}
+            }
+        )
+        diagnostic_rows.append(
+            {
+                "team_id_attacker": row.get("team_id_attacker"),
+                "team_id_defender": row.get("team_id_defender"),
+                "representative_simulation_score": row.get("representative_simulation_score"),
+                "representative_duel_summaries": row.get("representative_duel_summaries", []),
+                "representative_warnings": row.get("representative_warnings", []),
+            }
+        )
+
+    write_parquet(simulation_dir / "team_battle_simulations.parquet", aggregate_rows)
+    write_parquet(simulation_dir / "team_battle_simulation_diagnostics.parquet", diagnostic_rows)
     logger.info(
-        "[type_matchups] wrote team_battle_simulations rows=%s elapsed_s=%.2f",
-        len(simulations),
+        "[type_matchups] wrote team_battle_simulations rows=%s and diagnostics rows=%s elapsed_s=%.2f",
+        len(aggregate_rows),
+        len(diagnostic_rows),
         time.perf_counter() - started_at,
     )
 

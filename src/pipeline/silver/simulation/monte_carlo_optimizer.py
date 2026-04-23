@@ -1,9 +1,9 @@
-"""Summarize simulated matchup win probabilities with analytic uncertainty bounds."""
+"""Run Monte Carlo resampling over simulation outcomes to estimate uncertainty bounds."""
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
+import random
 from typing import Any
 
 from src.pipeline.common.io import read_parquet, write_parquet
@@ -60,22 +60,25 @@ def run_monte_carlo_team_optimizer(
     ci_high: list[float] = []
     empirical_rates: list[float] = []
 
-    def _wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
-        if trials <= 0:
-            return 0.0, 0.0
-        p_hat = successes / trials
-        denom = 1 + (z * z / trials)
-        center = (p_hat + (z * z) / (2 * trials)) / denom
-        margin = (z / denom) * math.sqrt((p_hat * (1 - p_hat) / trials) + ((z * z) / (4 * trials * trials)))
-        return max(0.0, center - margin), min(1.0, center + margin)
+    rng = random.Random(rng_seed)
 
     for _, row in result_df.iterrows():
         p = float(row.get("predicted_player_win_chance", 0.0) or 0.0)
         p = max(0.0, min(1.0, p))
         battle_trials = max(1, int(row.get("n_trials", 1) or 1))
-        wins = int(round(p * battle_trials))
+        if row.get("attacker_wins") is not None:
+            wins = max(0, min(battle_trials, int(row.get("attacker_wins") or 0)))
+        else:
+            wins = int(round(p * battle_trials))
         losses = battle_trials - wins
-        lower, upper = _wilson_interval(wins, battle_trials)
+        posterior_alpha = 1 + wins
+        posterior_beta = 1 + losses
+        samples = [rng.betavariate(posterior_alpha, posterior_beta) for _ in range(max(1, n_trials))]
+        samples.sort()
+        lower_idx = int(0.025 * (len(samples) - 1))
+        upper_idx = int(0.975 * (len(samples) - 1))
+        lower = samples[lower_idx]
+        upper = samples[upper_idx]
         wins_list.append(wins)
         losses_list.append(losses)
         empirical_rates.append(round(wins / battle_trials, 6))
@@ -89,7 +92,7 @@ def run_monte_carlo_team_optimizer(
     result_df["win_rate_ci95_high"] = ci_high
     result_df["rng_seed"] = int(rng_seed)
     result_df["mc_resamples"] = int(n_trials)
-    result_df["interval_method"] = "wilson_95"
+    result_df["interval_method"] = "beta_posterior_mc_95"
 
     records: list[dict[str, Any]] = []
     for row in result_df.to_dict(orient="records"):
@@ -118,7 +121,7 @@ def run_monte_carlo_team_optimizer(
                 "win_rate_ci95_low": float(row.get("win_rate_ci95_low") or 0.0),
                 "win_rate_ci95_high": float(row.get("win_rate_ci95_high") or 0.0),
                 "mc_resamples": int(row.get("mc_resamples") or n_trials),
-                "interval_method": row.get("interval_method") or "wilson_95",
+                "interval_method": row.get("interval_method") or "beta_posterior_mc_95",
             }
         )
     write_parquet(output_path, records)

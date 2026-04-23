@@ -8,6 +8,7 @@ from typing import Any, cast
 import pandas as pd
 
 from src.pipeline.common.io import write_parquet
+from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
 from src.pipeline.settings import (
     BRONZE_DIR,
@@ -19,7 +20,6 @@ from src.pipeline.settings import (
 from src.pipeline.silver.simulation.battle_seeds import build_battle_seeds
 from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, build_team_battle_simulations
-from src.pipeline.gold.simulation.config import load_battle_simulation_config
 
 
 logger = logging.getLogger(__name__)
@@ -98,17 +98,17 @@ def run_gold_simulation_from_silver(
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
     write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
-    runtime_policy = load_battle_simulation_config()
+    runtime_policy = load_runtime_battle_policy_config()
     base_config = BattleSimulationConfig()
     runtime_config = BattleSimulationConfig(
         max_overlevel=base_config.max_overlevel,
         max_underlevel=base_config.max_underlevel,
-        n_battle_trials=int(n_trials),
+        n_battle_trials=int(n_trials or runtime_policy.n_battle_trials),
         damage_randomness_min=runtime_policy.damage_random_min,
         damage_randomness_max=runtime_policy.damage_random_max,
         crit_chance=runtime_policy.crit_chance_default,
         max_turns_per_duel=base_config.max_turns_per_duel,
-        rng_seed=int(rng_seed),
+        rng_seed=int(rng_seed or runtime_policy.rng_seed),
         require_exact_version_match=not bool(runtime_policy.allow_cross_version_fallback),
         fail_on_degraded_data=bool(runtime_policy.fail_on_degraded_data),
     )
