@@ -33,6 +33,8 @@ _REQUIRED_MANIFEST_DATASET_FILES = (
     "simulation_inputs_teams",
     "team_members",
     "team_member_moves",
+)
+_OPTIONAL_MANIFEST_DATASET_FILES = (
     "pokemon_reference",
     "snapshot_available_pokemon",
     "encounters",
@@ -149,18 +151,38 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
             dataset=dataset_key,
         )
 
+    if isinstance(files_entry, list) and files_entry:
+        resolved_files: list[Path] = []
+        for index, rel in enumerate(cast(list[Any], files_entry)):
+            if not isinstance(rel, str) or not rel.strip():
+                _raise_contract_error(
+                    "invalid_dataset_files_entry",
+                    f"datasets.{dataset_key}.files[{index}] must be a non-empty string path.",
+                    dataset=dataset_key,
+                )
+            candidate = silver_dir / rel
+            if not candidate.exists():
+                _raise_contract_error(
+                    "missing_dataset_file",
+                    "Regenerate Silver outputs so all contract files or partition folders exist.",
+                    dataset=dataset_key,
+                    path=candidate,
+                )
+            resolved_files.append(candidate)
+        return sorted(set(resolved_files))
+
     rel_path = dataset_entry.get("file")
     if not isinstance(rel_path, str) or not rel_path.strip():
         _raise_contract_error(
             "missing_dataset_file_path",
-            f"Set datasets.{dataset_key}.file in silver/manifest.json.",
+            f"Set datasets.{dataset_key}.file or datasets.{dataset_key}.files in silver/manifest.json.",
             dataset=dataset_key,
         )
     path = silver_dir / cast(str, rel_path)
-    if not path.exists() or not path.is_file():
+    if not path.exists():
         _raise_contract_error(
             "missing_dataset_file",
-            "Regenerate Silver outputs so all contract files exist.",
+            "Regenerate Silver outputs so all contract files or partition folders exist.",
             dataset=dataset_key,
             path=path,
         )
@@ -219,6 +241,20 @@ def _load_and_validate_gold_contract(silver_dir: Path) -> dict[str, Any]:
     required_files: dict[str, Path | list[Path]] = {}
     for dataset_key in _REQUIRED_MANIFEST_DATASET_FILES:
         required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
+
+    datasets = _manifest_datasets(manifest)
+    for dataset_key in _OPTIONAL_MANIFEST_DATASET_FILES:
+        if dataset_key not in datasets:
+            logger.warning(
+                "[gold.contract] optional_dataset_missing dataset=%s action=\"Rebuild Silver to include this dataset if required by downstream analyses.\"",
+                dataset_key,
+            )
+            continue
+        try:
+            required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
+        except GoldContractError as exc:
+            logger.warning("%s", str(exc))
+            continue
 
     logger.info(
         "[gold.contract] validated snapshots=%s required_datasets=%s",
