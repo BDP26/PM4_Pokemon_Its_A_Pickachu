@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from src.pipeline.common.io import read_json, write_json, write_parquet
+from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
@@ -341,7 +342,7 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(pokemon_entries, list):
         return members
 
-    for slot_idx, entry in enumerate(pokemon_entries[:6]):
+    for slot_idx, entry in enumerate(pokemon_entries[:DEFAULT_TEAM_MEMBER_LIMIT]):
         species = entry.get("name") if isinstance(entry, dict) else entry
         if not isinstance(species, str) or not species:
             continue
