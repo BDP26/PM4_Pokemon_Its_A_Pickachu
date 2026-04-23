@@ -37,6 +37,19 @@ def test_cross_version_pairing_is_blocked(tmp_path: Path) -> None:
 def test_runtime_n_trials_propagates_to_outputs(tmp_path: Path) -> None:
     simulation_dir = tmp_path / "simulation"
     write_parquet(
+        simulation_dir / "battle_seeds.parquet",
+        [
+            {
+                "scenario_id": "A_vs_B",
+                "player_team_id": "A",
+                "boss_team_id": "B",
+                "boss_name": "Brock",
+                "game_version": "red",
+                "boss_level": 10,
+            }
+        ],
+    )
+    write_parquet(
         simulation_dir / "team_battle_simulations.parquet",
         [
             {
@@ -52,6 +65,8 @@ def test_runtime_n_trials_propagates_to_outputs(tmp_path: Path) -> None:
     )
     run_monte_carlo_team_optimizer(silver_dir=tmp_path, n_trials=50, rng_seed=11)
     out = pd.read_parquet(simulation_dir / "monte_carlo_results.parquet")
+    assert set(["scenario_id", "player_team_id", "boss_team_id", "mc_win_rate"]).issubset(set(out.columns))
+    assert out.iloc[0]["scenario_id"] == "A_vs_B"
     assert int(out.iloc[0]["n_trials"]) == 7
     assert int(out.iloc[0]["mc_resamples"]) == 50
 

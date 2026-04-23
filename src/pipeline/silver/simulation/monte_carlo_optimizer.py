@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 from src.pipeline.common.io import read_parquet, write_parquet
+from src.pipeline.silver.simulation.schema_contract import canonical_scenario_id, row_player_boss_ids
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
@@ -17,6 +19,7 @@ def run_monte_carlo_team_optimizer(
 ) -> int:
     simulation_dir = silver_dir / simulation_dirname
     simulations_path = simulation_dir / "team_battle_simulations.parquet"
+    seeds_path = simulation_dir / "battle_seeds.parquet"
     output_path = simulation_dir / "monte_carlo_results.parquet"
 
     if not simulations_path.exists():
@@ -40,6 +43,15 @@ def run_monte_carlo_team_optimizer(
     missing = required_cols - set(simulations_df.columns)
     if missing:
         raise ValueError(f"team_battle_simulations.parquet missing required columns: {sorted(missing)}")
+
+    seed_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+    if seeds_path.exists():
+        seeds_df = read_parquet(seeds_path)
+        for row in seeds_df.to_dict(orient="records"):
+            player_team_id, boss_team_id = row_player_boss_ids(row)
+            if not player_team_id or not boss_team_id:
+                continue
+            seed_by_pair[(player_team_id, boss_team_id)] = row
 
     result_df = simulations_df.copy()
     wins_list: list[int] = []
@@ -79,24 +91,36 @@ def run_monte_carlo_team_optimizer(
     result_df["mc_resamples"] = int(n_trials)
     result_df["interval_method"] = "wilson_95"
 
-    output_columns = [
-        "team_id_attacker",
-        "team_id_defender",
-        "predicted_player_win_chance",
-        "simulation_score",
-        "attacker_win",
-        "degraded_data",
-        "n_trials",
-        "rng_seed",
-        "wins",
-        "losses",
-        "empirical_win_rate",
-        "win_rate_ci95_low",
-        "win_rate_ci95_high",
-        "mc_resamples",
-        "interval_method",
-    ]
-    records = result_df[output_columns].to_dict(orient="records")
+    records: list[dict[str, Any]] = []
+    for row in result_df.to_dict(orient="records"):
+        player_team_id, boss_team_id = row_player_boss_ids(row)
+        seed_row = seed_by_pair.get((player_team_id, boss_team_id), {})
+        scenario_id = str(seed_row.get("scenario_id") or canonical_scenario_id(player_team_id, boss_team_id)).strip()
+        mc_win_rate = round(float(row.get("empirical_win_rate") or 0.0), 6)
+
+        records.append(
+            {
+                "scenario_id": scenario_id,
+                "player_team_id": player_team_id,
+                "boss_team_id": boss_team_id,
+                "boss_name": seed_row.get("boss_name"),
+                "game_version": seed_row.get("game_version"),
+                "boss_level": seed_row.get("boss_level"),
+                "predicted_player_win_chance": float(row.get("predicted_player_win_chance") or 0.0),
+                "simulation_score": float(row.get("simulation_score") or 0.0),
+                "simulated_attacker_win": bool(row.get("attacker_win", False)),
+                "degraded_data": bool(row.get("degraded_data", False)),
+                "n_trials": int(row.get("n_trials") or 1),
+                "rng_seed": int(row.get("rng_seed") or rng_seed),
+                "wins": int(row.get("wins") or 0),
+                "losses": int(row.get("losses") or 0),
+                "mc_win_rate": mc_win_rate,
+                "win_rate_ci95_low": float(row.get("win_rate_ci95_low") or 0.0),
+                "win_rate_ci95_high": float(row.get("win_rate_ci95_high") or 0.0),
+                "mc_resamples": int(row.get("mc_resamples") or n_trials),
+                "interval_method": row.get("interval_method") or "wilson_95",
+            }
+        )
     write_parquet(output_path, records)
 
     print(f"[monte_carlo] resampled {len(records)} scenarios")

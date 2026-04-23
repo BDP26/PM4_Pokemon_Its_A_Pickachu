@@ -12,12 +12,9 @@ from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_js
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.config.game_config import get_games_config
-from src.pipeline.silver.config.team_config import PARSER_MIN_BOSS_COVERAGE, resolve_runtime_team_config
+from src.pipeline.silver.config.team_config import resolve_runtime_team_config
 from src.pipeline.gold.simulation.config import load_battle_simulation_config
 from src.pipeline.silver.inputs.kaggle_boss_mapping import (
-    build_boss_mapping_payload,
-    build_harmonized_candidates_by_boss,
-    enrich_boss_records,
     load_kaggle_rows_by_game,
 )
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
@@ -25,11 +22,11 @@ from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     enrich_records_with_location_pokemon,
     get_location_area_and_pokemon_maps,
 )
-from src.pipeline.silver.inputs.parser import enforce_parser_coverage, extract_game_data
 from src.pipeline.silver.inputs.builders.player_teams import (
     build_player_teams_from_progression_context,
     build_progression_source_teams,
 )
+from src.pipeline.silver.orchestration.stages import run_parse_stage
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
 from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
     bootstrap_move_reference_cache,
@@ -290,11 +287,6 @@ def build_silver_from_bronze(
     mapper = LocationMapper(location_index)
     kaggle_rows_by_game = load_kaggle_rows_by_game(bronze_dir)
 
-    all_records: list[dict] = []
-    all_slugs: list[str] = []
-    boss_mapping_by_version: dict[str, dict] = {}
-    records_with_game_keys: list[tuple[str, list[dict]]] = []
-
     game_files = sorted(bulbapedia_dir.glob("*.json"))
     state_dir = silver_dir / "_state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -355,38 +347,15 @@ def build_silver_from_bronze(
 
     logger.info("[silver] processing %s bulbapedia game files", len(game_files))
 
-    for game_file in game_files:
-        game_payload = cast(dict[str, Any], read_json(game_file))
-        records = extract_game_data(game_payload, mapper)
-        game_key = game_payload["game_key"]
-        expected_bosses = game_payload.get("bosses", [])
-        enforce_parser_coverage(
-            game_key=game_key,
-            records=records,
-            expected_bosses=expected_bosses,
-            min_coverage=PARSER_MIN_BOSS_COVERAGE,
-        )
-
-        harmonized_candidates_by_boss = build_harmonized_candidates_by_boss(
-            game_key=game_key,
-            expected_bosses=expected_bosses,
-            kaggle_rows_by_game=kaggle_rows_by_game,
-        )
-        records = enrich_boss_records(records, expected_bosses, harmonized_candidates_by_boss)
-        boss_mapping_by_version[game_key] = build_boss_mapping_payload(
-            game_key,
-            expected_bosses,
-            harmonized_candidates_by_boss,
-        )
-
-        if not records:
-            logger.warning("[silver] skipped %s: no boss records extracted", game_file.name)
-            continue
-
-        all_records.extend(records)
-        records_with_game_keys.append((game_key, records))
-        for record in records:
-            all_slugs.extend(record["reachable_locations"])
+    parse_output = run_parse_stage(
+        game_files=game_files,
+        mapper=mapper,
+        kaggle_rows_by_game=kaggle_rows_by_game,
+    )
+    all_records = parse_output.all_records
+    all_slugs = parse_output.all_slugs
+    boss_mapping_by_version = parse_output.boss_mapping_by_version
+    records_with_game_keys = parse_output.records_with_game_keys
 
     logger.info(
         "[silver] parsing complete games_with_records=%s total_records=%s unique_location_slugs=%s",

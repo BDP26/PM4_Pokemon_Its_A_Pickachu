@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.pipeline.common.io import read_many_parquet, read_parquet, write_parquet
+from src.pipeline.silver.simulation.schema_contract import canonical_scenario_id
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
@@ -56,7 +57,7 @@ def build_battle_seeds(
 
             scenarios.append(
                 {
-                    "scenario_id": f"{player_id}_vs_{boss_id}",
+                    "scenario_id": canonical_scenario_id(player_id, boss_id),
                     "player_team_id": player_id,
                     "boss_team_id": boss_id,
                     "boss_name": boss_name,
