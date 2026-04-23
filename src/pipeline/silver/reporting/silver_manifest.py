@@ -92,8 +92,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
         ("encounters.parquet", "Encounter fact table normalized by location and species"),
         ("snapshot_available_pokemon.parquet", "Pokemon availability fact per boss snapshot"),
         ("move_reference.parquet", "Move reference dimension"),
-        ("learnable_moves.parquet", "Learnable moves fact by game and species"),
-        ("pokemon_learnable_moves.parquet", "Explicit pokemon->learnable moves table by game version"),
+        ("learnable_moves.parquet", "Unified learnable moves fact by game and species (authoritative move source)"),
     ]:
         path = references_dir / reference_name
         if not path.exists():
@@ -248,4 +247,3 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     print(f"  Available datasets: {len(manifest['datasets'])}")
     for dataset_name in manifest["datasets"]:
         print(f"    - {dataset_name}")
-

@@ -12,13 +12,14 @@ from typing import Any
 
 import pokebase as pb
 
-from src.pipeline.common.io import read_parquet, write_parquet
+from src.pipeline.common.io import write_parquet
 from src.pipeline.silver.config.team_config import (
     FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
     GENERIC_FORM_SUFFIXES,
     SPECIES_SLUG_ALIASES,
 )
+from src.pipeline.silver.inputs.reference_context import load_move_reference_tables
 from src.pipeline.settings import SILVER_DIR
 
 
@@ -90,54 +91,22 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
 
     references_dir = silver_dir / "references"
     move_reference_path = references_dir / "move_reference.parquet"
-    learnable_candidates = [
-        references_dir / "pokemon_learnable_moves.parquet",
-        references_dir / "learnable_moves.parquet",
-    ]
+    learnable_path = references_dir / "learnable_moves.parquet"
 
     if not move_reference_path.exists():
         raise FileNotFoundError(
             f"Missing move reference parquet: {move_reference_path}. "
             "Run bootstrap_move_reference_cache(...) before team generation."
         )
-
-    move_df = read_parquet(move_reference_path)
-    for row in move_df.to_dict(orient="records"):
-        move_name = _normalize_move_name(row.get("move_name"))
-        if not move_name:
-            continue
-        _MOVE_PROFILE_CACHE[move_name] = {
-            "move_name": move_name,
-            "power": int(row.get("power") or 0),
-            "damage_class": str(row.get("damage_class") or "status"),
-            "type": row.get("type"),
-            "accuracy": row.get("accuracy"),
-            "pp": row.get("pp"),
-        }
-
-    learn_df = None
-    for learnable_path in learnable_candidates:
-        if learnable_path.exists():
-            learn_df = read_parquet(learnable_path)
-            break
-
-    if learn_df is None:
+    if not learnable_path.exists():
         raise FileNotFoundError(
-            f"Missing learnable move parquet under {references_dir}. "
+            f"Missing learnable move parquet: {learnable_path}. "
             "Run bootstrap_move_reference_cache(...) before team generation."
         )
 
-    grouped: dict[tuple[str, str], dict[str, int]] = {}
-    for row in learn_df.to_dict(orient="records"):
-        game_version = str(row.get("game_version") or "").strip().lower()
-        species = _normalize_species_slug(row.get("pokemon_species") or "")
-        move_name = _normalize_move_name(row.get("move_name"))
-        if not game_version or not species or not move_name:
-            continue
-        learned_level = _normalize_learned_level(row.get("learned_level"))
-        slot = grouped.setdefault((game_version, species), {})
-        slot[move_name] = min(slot.get(move_name, learned_level), learned_level)
+    move_profiles, grouped = load_move_reference_tables(silver_dir=silver_dir)
 
+    _MOVE_PROFILE_CACHE.update(move_profiles)
     _LEARNABLE_BY_GAME_SPECIES.update(grouped)
     _CACHE_SILVER_DIR = cache_key
 
@@ -261,7 +230,7 @@ def bootstrap_move_reference_cache(
 
     if learnable_rows:
         write_parquet(
-            references_dir / "pokemon_learnable_moves.parquet",
+            references_dir / "learnable_moves.parquet",
             learnable_rows,
             partition_cols=["game_version", "pokemon_species"],
         )
@@ -429,7 +398,7 @@ def persist_move_reference_cache(
 
     if learnable_rows:
         write_parquet(
-            references_dir / "pokemon_learnable_moves.parquet",
+            references_dir / "learnable_moves.parquet",
             learnable_rows,
             partition_cols=["game_version", "pokemon_species"],
         )

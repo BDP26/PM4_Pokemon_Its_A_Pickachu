@@ -40,6 +40,7 @@ from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_t
 logger = logging.getLogger(__name__)
 
 MAX_CANDIDATE_MOVES_PER_MEMBER = 8
+MAX_SOURCE_TEAM_SIZE = 5
 
 
 def _effective_team_variant_limit(variant_space_size: int) -> int | None:
@@ -170,6 +171,90 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
     ]
     candidates.sort(key=lambda item: (-item[1], -item[2], -item[3], item[0]))
     return candidates
+
+
+def build_boss_progression_pools(
+    progression_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build cumulative boss pools with incremental deltas.
+
+    Pool growth is keyed by game and derived from newly-reachable locations only,
+    so downstream team generation avoids recomputing full encounter universes
+    for every boss.
+    """
+    pools: list[dict[str, Any]] = []
+    seen_locations_by_game: dict[str, set[str]] = {}
+    cumulative_candidates_by_game: dict[str, dict[str, tuple[str, int, int, int]]] = {}
+
+    for record in progression_records:
+        game_version = normalize_key_part(record.get("game") or record.get("version"))
+        boss_name = normalize_key_part(record.get("boss_name"))
+        if not game_version or not boss_name:
+            continue
+
+        location_to_encounters = record.get("reachable_location_encounters", {})
+        known_locations = seen_locations_by_game.setdefault(game_version, set())
+        cumulative_candidates = cumulative_candidates_by_game.setdefault(game_version, {})
+
+        delta_locations: list[str] = []
+        for location_slug in record.get("reachable_locations", []):
+            location = normalize_key_part(location_slug)
+            if not location or location in known_locations:
+                continue
+            delta_locations.append(location)
+
+        delta_species_count = 0
+        for location in delta_locations:
+            encounters = location_to_encounters.get(location, [])
+            if not isinstance(encounters, list):
+                continue
+            for encounter in encounters:
+                if not isinstance(encounter, dict):
+                    continue
+                species = normalize_key_part(encounter.get("species"))
+                if not species:
+                    continue
+                chance_max = int(encounter.get("encounter_chance_max") or 0)
+                level_max = int(encounter.get("level_max") or 0)
+                capture_rate = int(encounter.get("capture_rate") or 0)
+                prior = cumulative_candidates.get(species)
+                updated = (
+                    species,
+                    max((prior[1] if prior else 0), chance_max),
+                    max((prior[2] if prior else 0), level_max),
+                    max((prior[3] if prior else 0), capture_rate),
+                )
+                if prior is None:
+                    delta_species_count += 1
+                cumulative_candidates[species] = updated
+
+        known_locations.update(delta_locations)
+        pool_candidates = sorted(
+            cumulative_candidates.values(),
+            key=lambda item: (-item[1], -item[2], -item[3], item[0]),
+        )
+        pools.append(
+            {
+                "game_version": game_version,
+                "boss_name": boss_name,
+                "part": normalize_key_part(record.get("part")),
+                "pool_candidates": pool_candidates,
+                "pool_species_count": len(pool_candidates),
+                "delta_location_count": len(delta_locations),
+                "delta_species_count": delta_species_count,
+            }
+        )
+
+        logger.info(
+            "[silver/teams] boss progression pool game=%s boss=%s species_pool=%s delta_locations=%s delta_species=%s",
+            game_version,
+            boss_name,
+            len(pool_candidates),
+            len(delta_locations),
+            delta_species_count,
+        )
+
+    return pools
 
 
 def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> list[tuple[str, int, int, int]]:
@@ -419,18 +504,17 @@ def build_progression_source_teams(
 ) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     level_by_boss = _boss_level_lookup(boss_teams)
+    progression_pools = build_boss_progression_pools(progression_records)
 
-    team_fill_size = max(1, min(catch_pool_size, DEFAULT_TEAM_MEMBER_LIMIT - 1))
+    team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
     candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
+    total_pruned_combos = 0
 
-    for record in progression_records:
-        game_version = normalize_key_part(record.get("game") or record.get("version"))
-        boss_name = normalize_key_part(record.get("boss_name"))
-        if not game_version or not boss_name:
-            continue
-
+    for pool in progression_pools:
+        game_version = pool["game_version"]
+        boss_name = pool["boss_name"]
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
-        candidates = _extract_species_candidates(record)
+        candidates = list(pool["pool_candidates"])
         if not candidates:
             continue
 
@@ -447,7 +531,9 @@ def build_progression_source_teams(
                 continue
             species_combos = [fallback_species]
 
-        part = normalize_key_part(record.get("part"))
+        theoretical_combo_count = max(0, len(candidate_pool) - team_fill_size + 1)
+        total_pruned_combos += max(0, theoretical_combo_count - len(species_combos))
+        part = pool.get("part")
 
         for combo_index, selected_species in enumerate(species_combos, start=1):
             source_team_id = make_team_id(
@@ -460,7 +546,7 @@ def build_progression_source_teams(
                 {
                     "team_id": source_team_id,
                     "game_version": game_version,
-                    "gym": str(record.get("boss_name") or "").strip() or None,
+                    "gym": str(boss_name).strip() or None,
                     "avg_level": boss_level,
                     "pokemon": selected_species,
                     "levels": [boss_level for _ in selected_species],
@@ -469,12 +555,13 @@ def build_progression_source_teams(
             )
 
     logger.info(
-        "[silver/teams] built progression source teams records=%s sources=%s catch_pool_size=%s candidate_pool_size=%s source_team_combo_limit=%s",
-        len(progression_records),
+        "[silver/teams] built progression source teams bosses=%s sources=%s source_team_size=%s candidate_pool_size=%s source_team_combo_limit=%s pruned=%s",
+        len(progression_pools),
         len(sources),
         team_fill_size,
         candidate_pool_size,
         DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
+        total_pruned_combos,
     )
     return sources
 

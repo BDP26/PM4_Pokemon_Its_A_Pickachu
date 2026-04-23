@@ -143,20 +143,17 @@ class MoveReferenceContext:
         }
 
 
-def load_reference_context(silver_dir: Path = SILVER_DIR) -> MoveReferenceContext:
+def load_move_reference_tables(
+    silver_dir: Path = SILVER_DIR,
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, int]]]:
     references_dir = silver_dir / "references"
     move_reference_path = references_dir / "move_reference.parquet"
-    learnable_candidates = [
-        references_dir / "pokemon_learnable_moves.parquet",
-        references_dir / "learnable_moves.parquet",
-    ]
+    learnable_path = references_dir / "learnable_moves.parquet"
 
     if not move_reference_path.exists():
         raise FileNotFoundError(f"Missing move reference parquet: {move_reference_path}")
-
-    learnable_path = next((path for path in learnable_candidates if path.exists()), None)
-    if learnable_path is None:
-        raise FileNotFoundError(f"Missing learnable moves parquet under {references_dir}")
+    if not learnable_path.exists():
+        raise FileNotFoundError(f"Missing learnable moves parquet: {learnable_path}")
 
     move_profiles: dict[str, dict[str, Any]] = {}
     for row in read_parquet(move_reference_path).to_dict(orient="records"):
@@ -186,8 +183,12 @@ def load_reference_context(silver_dir: Path = SILVER_DIR) -> MoveReferenceContex
         slot = learnable_by_game_species.setdefault((game_version, species), {})
         slot[move_name] = min(slot.get(move_name, learned_level), learned_level)
 
+    return move_profiles, learnable_by_game_species
+
+
+def load_reference_context(silver_dir: Path = SILVER_DIR) -> MoveReferenceContext:
+    move_profiles, learnable_by_game_species = load_move_reference_tables(silver_dir=silver_dir)
     return MoveReferenceContext(
         move_profiles=move_profiles,
         learnable_by_game_species=learnable_by_game_species,
     )
-
