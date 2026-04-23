@@ -433,8 +433,8 @@ def build_silver_from_bronze(
 
     move_reference_path = references_dir / "move_reference.parquet"
     learnable_moves_path = references_dir / "learnable_moves.parquet"
-    pokemon_learnable_moves_path = references_dir / "pokemon_learnable_moves.parquet"
-    has_learnable_reference = learnable_moves_path.exists() or pokemon_learnable_moves_path.exists()
+    legacy_pokemon_learnable_moves_path = references_dir / "pokemon_learnable_moves.parquet"
+    has_learnable_reference = learnable_moves_path.exists()
     if not move_reference_path.exists() or not has_learnable_reference:
         logger.info("[silver] bootstrapping move reference parquet before team extraction")
         bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
@@ -456,6 +456,9 @@ def build_silver_from_bronze(
             persisted_kaggle.get("learnable_rows", 0),
             persisted_kaggle.get("move_rows", 0),
         )
+    if legacy_pokemon_learnable_moves_path.exists():
+        legacy_pokemon_learnable_moves_path.unlink()
+        logger.info("[silver] removed legacy learnable move parquet output=%s", legacy_pokemon_learnable_moves_path.name)
 
     reference_context = load_reference_context(silver_dir=silver_dir)
     logger.info(
@@ -491,14 +494,7 @@ def build_silver_from_bronze(
     all_team_member_moves_rows: list[dict[str, Any]] = []
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    learnable_reference_path = (
-        pokemon_learnable_moves_path
-        if pokemon_learnable_moves_path.exists()
-        else learnable_moves_path
-    )
-    learnable_reference_df = (
-        read_parquet(learnable_reference_path) if learnable_reference_path.exists() else pd.DataFrame()
-    )
+    learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
 
     for team in boss_teams:
         game_version = str(team.get("game_version") or "").strip().lower()
