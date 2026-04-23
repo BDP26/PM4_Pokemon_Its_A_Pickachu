@@ -8,6 +8,7 @@ Final refactor:
 """
 
 import logging
+import math
 import time
 from itertools import combinations, islice, product
 from typing import Any, Iterable
@@ -531,7 +532,11 @@ def build_progression_source_teams(
                 continue
             species_combos = [fallback_species]
 
-        theoretical_combo_count = max(0, len(candidate_pool) - team_fill_size + 1)
+        theoretical_combo_count = (
+            math.comb(len(candidate_pool), team_fill_size)
+            if len(candidate_pool) >= team_fill_size
+            else 0
+        )
         total_pruned_combos += max(0, theoretical_combo_count - len(species_combos))
         part = pool.get("part")
 

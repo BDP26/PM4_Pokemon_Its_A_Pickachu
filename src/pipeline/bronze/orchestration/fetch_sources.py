@@ -67,6 +67,42 @@ def resolve_existing_root_title(session, candidate_titles: list[str]) -> Optiona
     return None
 
 
+def _build_location_area_parent_map(area_rows: list[dict[str, object]]) -> dict[str, str]:
+    parent_map: dict[str, str] = {}
+    for area in area_rows:
+        area_name = str(area.get("name") or "").strip()
+        if not area_name:
+            continue
+        if area_name.endswith("-area"):
+            parent_map[area_name] = area_name.removesuffix("-area")
+            continue
+        if "-area-" in area_name:
+            parent_map[area_name] = area_name.split("-area-", 1)[0]
+    return parent_map
+
+
+def _fetch_pokeapi_location_index(session) -> dict[str, object]:
+    location_response = session.get(f"{POKEAPI}/location", params={"limit": 2000}, timeout=30)
+    location_response.raise_for_status()
+    location_payload = location_response.json()
+    results = location_payload.get("results", [])
+
+    area_response = session.get(f"{POKEAPI}/location-area", params={"limit": 20000}, timeout=30)
+    area_response.raise_for_status()
+    area_payload = area_response.json()
+    area_results = area_payload.get("results", [])
+
+    return {
+        "count": location_payload.get("count"),
+        "results": results if isinstance(results, list) else [],
+        "location_area_count": area_payload.get("count"),
+        "location_area_results": area_results if isinstance(area_results, list) else [],
+        "location_area_parent_map": _build_location_area_parent_map(
+            area_results if isinstance(area_results, list) else []
+        ),
+    }
+
+
 def get_walkthrough_parts(session, root_title: str) -> list[dict]:
     response = session.get(
         BULBA_API,
@@ -165,7 +201,7 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
 
     session = build_session()
 
-    location_index = session.get(f"{POKEAPI}/location", params={"limit": 2000}, timeout=30).json()
+    location_index = _fetch_pokeapi_location_index(session)
     location_signature = stable_signature(location_index)
     if _should_write_source(source_state, "pokeapi:location_index", location_signature):
         write_json(pokeapi_dir / "location_index.json", location_index)
@@ -267,5 +303,4 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
 
 if __name__ == "__main__":
     fetch_bronze_sources()
-
 

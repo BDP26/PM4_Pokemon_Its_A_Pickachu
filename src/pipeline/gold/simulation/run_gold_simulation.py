@@ -42,7 +42,7 @@ def _run_gold_team_battle_simulations(
         teams_data=teams_data,
         silver_dir=gold_dir,
         bronze_dir=bronze_dir,
-        force_spark=True,
+        force_spark=None,
     )
 
 

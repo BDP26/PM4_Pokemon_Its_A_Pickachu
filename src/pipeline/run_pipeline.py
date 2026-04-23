@@ -27,8 +27,6 @@ def parse_args() -> argparse.Namespace:
         "all",
         help="Run all layers in order: bronze -> silver -> gold",
     )
-    all_parser = subparsers.choices["all"]
-
     layer_parser = subparsers.add_parser(
         "layers",
         help="Run one or more specific layers",
@@ -60,7 +58,9 @@ def main() -> None:
 
     layer_runners = {
         "bronze": fetch_bronze_sources,
-        "silver": lambda: build_silver_from_bronze(),
+        "silver": lambda: build_silver_from_bronze(
+            hard_cleanup=bool(getattr(args, "hard_cleanup", False))
+        ),
         "gold": build_gold_from_silver,
     }
 
@@ -77,4 +77,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
