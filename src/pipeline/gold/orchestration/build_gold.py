@@ -34,6 +34,7 @@ _REQUIRED_MANIFEST_DATASET_FILES = (
     "team_members",
     "team_member_moves",
     "pokemon_reference",
+    "snapshot_available_pokemon",
     "encounters",
 )
 
@@ -699,6 +700,5 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
 
 if __name__ == "__main__":
     build_gold_from_silver()
-
 
 

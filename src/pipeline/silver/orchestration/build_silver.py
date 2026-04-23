@@ -243,6 +243,7 @@ def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str
 def build_silver_from_bronze(
     bronze_dir: Path = BRONZE_DIR,
     silver_dir: Path = SILVER_DIR,
+    hard_cleanup: bool = False,
 ) -> None:
     started_at = time.perf_counter()
     ensure_medallion_dirs()
@@ -262,6 +263,12 @@ def build_silver_from_bronze(
     references_dir = silver_subdirs["references"]
     diagnostics_dir = silver_subdirs["diagnostics"]
     simulation_dir = silver_subdirs["simulation"]
+
+    if hard_cleanup:
+        logger.info("[silver] hard cleanup enabled; removing prior silver artifacts")
+        for cleanup_path in (snapshots_dir, mappings_dir, references_dir, diagnostics_dir, simulation_dir):
+            _remove_if_exists(cleanup_path)
+            cleanup_path.mkdir(parents=True, exist_ok=True)
 
     location_index_path = bronze_dir / "pokeapi" / "location_index.json"
     bulbapedia_dir = bronze_dir / "bulbapedia"
@@ -300,7 +307,6 @@ def build_silver_from_bronze(
     previous_state = load_state(state_path)
 
     expected_outputs = [
-        snapshots_dir,
         mappings_dir / "location_to_area_map.json",
         mappings_dir / "location_to_pokemon_map.json",
         mappings_dir / "boss_mapping_by_version.json",
@@ -310,8 +316,24 @@ def build_silver_from_bronze(
         references_dir / "bosses.parquet",
         references_dir / "locations.parquet",
         references_dir / "encounters.parquet",
+        references_dir / "move_reference.parquet",
+        references_dir / "learnable_moves.parquet",
+        silver_dir / "manifest.json",
     ]
-    if previous_state.get("input_signature") == current_signature and all(path.exists() for path in expected_outputs):
+    expected_snapshot_files = [snapshots_dir / f"{game['game_key']}_boss_snapshots.jsonl" for game in games_config]
+    expected_team_shards = [simulation_dir / f"teams_{game['game_key']}.parquet" for game in games_config]
+    expected_member_shards = [simulation_dir / f"team_members_{game['game_key']}.parquet" for game in games_config]
+    expected_move_shards = [simulation_dir / f"team_member_moves_{game['game_key']}.parquet" for game in games_config]
+    expected_combat_pool_shards = [simulation_dir / f"pokemon_combat_pool_{game['game_key']}.parquet" for game in games_config]
+    skip_outputs = (
+        expected_outputs
+        + expected_snapshot_files
+        + expected_team_shards
+        + expected_member_shards
+        + expected_move_shards
+        + expected_combat_pool_shards
+    )
+    if previous_state.get("input_signature") == current_signature and all(path.exists() for path in skip_outputs):
         logger.info("[silver] incremental skip; input signature unchanged")
         return
 

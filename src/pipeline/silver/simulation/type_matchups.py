@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import logging
 import math
 import os
@@ -9,8 +10,6 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
-
-import pokebase as pb
 
 from src.pipeline.common.io import read_json, write_json, write_parquet
 from src.pipeline.settings import (
@@ -241,101 +240,39 @@ def _normalize_move_name(name: str) -> str:
 
 
 def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bool, str | None]:
-    try:
-        poke = pb.pokemon(species_id)
-    except Exception as exc:
-        return (
-            {
-                "name": species_id,
-                "types": ["Normal"],
-                "stats": _default_stats(),
-                "moves": [],
-            },
-            True,
-            f"Pokemon lookup failed for '{species_id}': {exc}",
-        )
-
-    stats: dict[str, int] = _default_stats()
-    for stat in getattr(poke, "stats", []):
-        stat_name = (getattr(getattr(stat, "stat", None), "name", "") or "").replace("-", "_")
-        if stat_name == "special_attack":
-            stat_name = "sp_attack"
-        elif stat_name == "special_defense":
-            stat_name = "sp_defense"
-        base_stat = getattr(stat, "base_stat", None)
-        if stat_name and isinstance(base_stat, int):
-            stats[stat_name] = base_stat
-
-    moves: list[dict[str, Any]] = []
-    for move_slot in getattr(poke, "moves", []):
-        move_name = getattr(getattr(move_slot, "move", None), "name", "") or ""
-        if not move_name:
-            continue
-
-        version_group_details: list[dict[str, Any]] = []
-        for detail in getattr(move_slot, "version_group_details", []):
-            version_group_details.append(
-                {
-                    "version_group": getattr(getattr(detail, "version_group", None), "name", "") or "",
-                    "learn_method": getattr(getattr(detail, "move_learn_method", None), "name", "") or "",
-                    "level_learned_at": int(getattr(detail, "level_learned_at", 0) or 0),
-                }
-            )
-
-        moves.append(
-            {
-                "move_name": move_name,
-                "version_group_details": version_group_details,
-            }
-        )
-
     return (
         {
-            "name": getattr(poke, "name", species_id),
-            "types": [getattr(t.type, "name", "Normal").title() for t in getattr(poke, "types", [])] or ["Normal"],
-            "stats": stats,
-            "moves": moves,
+            "name": species_id,
+            "types": ["Normal"],
+            "stats": _default_stats(),
+            "moves": [],
         },
-        False,
-        None,
+        True,
+        f"Pokemon profile not found in local cache for '{species_id}'; using deterministic fallback profile",
     )
 
 
 def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str | None]:
-    try:
-        move = pb.move(move_name)
-    except Exception as exc:
-        return (
-            {
-                "name": move_name,
-                "type": "Normal",
-                "power": 40,
-                "damage_class": "physical",
-                "accuracy": 100,
-                "pp": 1,
-                "level_learned_at": 0,
-                "version_group": "fallback",
-                "degraded_data": True,
-            },
-            True,
-            f"Move lookup failed for '{move_name}': {exc}",
-        )
-
     return (
         {
-            "name": getattr(move, "name", move_name),
-            "type": str(getattr(getattr(move, "type", None), "name", "Normal") or "Normal").title(),
-            "power": int(getattr(move, "power", 0) or 0),
-            "damage_class": str(getattr(getattr(move, "damage_class", None), "name", "physical") or "physical"),
-            "accuracy": getattr(move, "accuracy", None),
-            "pp": getattr(move, "pp", None),
+            "name": move_name,
+            "type": "Normal",
+            "power": 40,
+            "damage_class": "physical",
+            "accuracy": 100,
+            "pp": 1,
             "level_learned_at": 0,
-            "version_group": "",
-            "degraded_data": False,
+            "version_group": "fallback",
+            "degraded_data": True,
         },
-        False,
-        None,
+        True,
+        f"Move profile not found in local cache for '{move_name}'; using deterministic fallback profile",
     )
+
+
+def _stable_pair_seed(attacker_team_id: Any, defender_team_id: Any, base_seed: int) -> int:
+    payload = f"{attacker_team_id}|{defender_team_id}|{int(base_seed)}".encode("utf-8")
+    return int(hashlib.sha256(payload).hexdigest()[:8], 16)
 
 
 def _get_pokemon_profile(species_id: str, warnings: WarningCollector) -> tuple[dict[str, Any], bool]:
@@ -920,7 +857,7 @@ def _run_local_simulations(
                 attacker_game_version=cast(str | None, attacker_team.get("game_version")),
                 defender_game_version=cast(str | None, defender_team.get("game_version")),
                 n_trials=config.n_battle_trials,
-                rng_seed=(hash((attacker_team.get("team_id"), defender_team.get("team_id"), config.rng_seed)) & 0xFFFFFFFF),
+                rng_seed=_stable_pair_seed(attacker_team.get("team_id"), defender_team.get("team_id"), config.rng_seed),
                 config=config,
             )
             simulations.append(result)
@@ -1033,7 +970,11 @@ def _run_spark_simulations(
                     attacker_game_version=cast(str | None, attacker_team.get("game_version")),
                     defender_game_version=cast(str | None, defender_team.get("game_version")),
                     n_trials=local_config.n_battle_trials,
-                    rng_seed=(hash((attacker_team.get("team_id"), defender_team.get("team_id"), local_config.rng_seed)) & 0xFFFFFFFF),
+                    rng_seed=_stable_pair_seed(
+                        attacker_team.get("team_id"),
+                        defender_team.get("team_id"),
+                        local_config.rng_seed,
+                    ),
                     config=local_config,
                 )
                 yield Row(**result)
