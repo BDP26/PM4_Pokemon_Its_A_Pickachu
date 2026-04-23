@@ -12,6 +12,8 @@ import time
 from itertools import combinations, islice, product
 from typing import Any, Iterable
 
+from tqdm import tqdm
+
 from src.pipeline.silver.config.game_config import (
     get_starter_family_root,
     get_starter_choices,
@@ -28,6 +30,7 @@ from src.pipeline.silver.config.team_config import (
     DEFAULT_TEAM_MEMBER_LIMIT,
     DEFAULT_TEAM_VARIANT_LIMIT,
     MOVESET_WIDTH,
+    PLAYER_TEAM_PROGRESS_LOG_INTERVAL,
     TEAM_VARIANT_CONFIRMATION_THRESHOLD,
 )
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
@@ -383,7 +386,7 @@ def _build_starter_variant(
             variant_space_size,
         )
 
-    logger.info(
+    logger.debug(
         "[silver/teams] built starter variants source_team_id=%s game_version=%s starter_base=%s team_variants=%s move_records=%s",
         base_team.get("team_id"),
         version,
@@ -488,8 +491,17 @@ def build_player_teams_from_progression_context(
 
     skipped_missing_game_version = 0
     skipped_missing_starters = 0
+    processed_source_teams = 0
+    total_source_teams = len(progression_source_teams)
+    progress_interval = max(1, PLAYER_TEAM_PROGRESS_LOG_INTERVAL)
 
-    for team in progression_source_teams:
+    progress_bar = tqdm(
+        progression_source_teams,
+        desc="[silver/teams] generating player teams",
+        unit="source_team",
+    )
+    for team in progress_bar:
+        processed_source_teams += 1
         game_version = team.get("game_version")
         if not isinstance(game_version, str):
             skipped_missing_game_version += 1
@@ -505,13 +517,26 @@ def build_player_teams_from_progression_context(
             variants.extend(team_dicts)
             all_moves.update(move_dict)
 
+        if processed_source_teams % progress_interval == 0 or processed_source_teams == total_source_teams:
+            progress_bar.set_postfix(
+                {
+                    "player_teams": len(variants),
+                    "move_records": len(all_moves),
+                    "skip_gv": skipped_missing_game_version,
+                    "skip_starters": skipped_missing_starters,
+                },
+                refresh=False,
+            )
+
     logger.info(
-        "[silver/teams] built player teams from progression source_teams=%s player_teams=%s move_records=%s skipped_missing_game_version=%s skipped_missing_starters=%s elapsed_s=%.2f",
+        "[silver/teams] built player teams from progression source_teams=%s processed=%s player_teams=%s move_records=%s skipped_missing_game_version=%s skipped_missing_starters=%s progress_interval=%s elapsed_s=%.2f",
         len(progression_source_teams),
+        processed_source_teams,
         len(variants),
         len(all_moves),
         skipped_missing_game_version,
         skipped_missing_starters,
+        progress_interval,
         time.perf_counter() - started_at,
     )
     return variants, all_moves
