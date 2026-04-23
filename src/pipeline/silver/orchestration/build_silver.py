@@ -13,7 +13,7 @@ from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs,
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.silver.config.team_config import resolve_runtime_team_config
-from src.pipeline.gold.simulation.config import load_battle_simulation_config
+from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.silver.inputs.kaggle_boss_mapping import (
     load_kaggle_rows_by_game,
 )
@@ -281,7 +281,7 @@ def build_silver_from_bronze(
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
     runtime_team_config = resolve_runtime_team_config()
-    runtime_simulation_config = load_battle_simulation_config().__dict__
+    runtime_simulation_config = load_runtime_battle_policy_config().__dict__
 
     location_index = cast(dict[str, Any], read_json(location_index_path))
     mapper = LocationMapper(location_index)
@@ -295,7 +295,7 @@ def build_silver_from_bronze(
     code_fingerprint = fingerprint_python_files(
         [
             repo_root / "src" / "pipeline" / "silver",
-            repo_root / "src" / "pipeline" / "gold" / "simulation" / "config.py",
+            repo_root / "src" / "pipeline" / "common" / "simulation_config.py",
             repo_root / "src" / "pipeline" / "settings.py",
         ]
     )
