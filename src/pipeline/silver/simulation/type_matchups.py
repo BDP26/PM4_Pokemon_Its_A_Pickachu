@@ -76,6 +76,9 @@ class TeamBattleResult(TypedDict):
     duel_summaries: list[dict[str, Any]]
     predicted_player_win_chance: float
     n_trials: int
+    attacker_game_version: str | None
+    defender_game_version: str | None
+    is_compatible_version: bool
 
 
 @dataclass
@@ -88,6 +91,7 @@ class BattleSimulationConfig:
     crit_chance: float = float(SIMULATION_CONFIG["crit_chance"])
     max_turns_per_duel: int = int(SIMULATION_CONFIG["max_turns_per_duel"])
     rng_seed: int = 42
+    require_exact_version_match: bool = True
 
 
 class WarningCollector:
@@ -661,6 +665,25 @@ def _apply_level_plausibility_filter(attacker_team: dict[str, Any], defender_tea
     )
 
 
+def _normalized_game_version(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _is_version_compatible(
+    attacker_game_version: str | None,
+    defender_game_version: str | None,
+    config: BattleSimulationConfig,
+) -> bool:
+    attacker = _normalized_game_version(attacker_game_version)
+    defender = _normalized_game_version(defender_game_version)
+    if not config.require_exact_version_match:
+        return True
+    return attacker is not None and defender is not None and attacker == defender
+
+
 def load_type_chart(bronze_dir: Path = BRONZE_DIR) -> dict[str, dict[str, float]]:
     type_chart_path = bronze_dir / "type_chart.json"
     if not type_chart_path.exists():
@@ -767,6 +790,9 @@ def simulate_team_battle_once(
         "duel_summaries": duel_summaries,
         "predicted_player_win_chance": 1.0 if attacker_win else 0.0,
         "n_trials": 1,
+        "attacker_game_version": _normalized_game_version(attacker_game_version),
+        "defender_game_version": _normalized_game_version(defender_game_version),
+        "is_compatible_version": _is_version_compatible(attacker_game_version, defender_game_version, config),
     }
 
 
@@ -780,6 +806,28 @@ def simulate_team_battle(
     rng_seed: int,
     config: BattleSimulationConfig,
 ) -> TeamBattleResult:
+    if not _is_version_compatible(attacker_game_version, defender_game_version, config):
+        return {
+            "team_id_attacker": attacker_team.get("team_id"),
+            "team_id_defender": defender_team.get("team_id"),
+            "attacker_win": False,
+            "winner_team_id": defender_team.get("team_id"),
+            "attacker_remaining_pokemon": 0,
+            "defender_remaining_pokemon": 0,
+            "attacker_total_remaining_hp": 0,
+            "defender_total_remaining_hp": 0,
+            "battle_turns": 0,
+            "simulation_score": -999.0,
+            "degraded_data": False,
+            "warnings": ["incompatible_game_versions"],
+            "duel_summaries": [],
+            "predicted_player_win_chance": 0.0,
+            "n_trials": n_trials,
+            "attacker_game_version": _normalized_game_version(attacker_game_version),
+            "defender_game_version": _normalized_game_version(defender_game_version),
+            "is_compatible_version": False,
+        }
+
     if not _apply_level_plausibility_filter(attacker_team, defender_team, config):
         return {
             "team_id_attacker": attacker_team.get("team_id"),
@@ -797,6 +845,9 @@ def simulate_team_battle(
             "duel_summaries": [],
             "predicted_player_win_chance": 0.0,
             "n_trials": n_trials,
+            "attacker_game_version": _normalized_game_version(attacker_game_version),
+            "defender_game_version": _normalized_game_version(defender_game_version),
+            "is_compatible_version": True,
         }
 
     trial_results: list[TeamBattleResult] = []
@@ -820,6 +871,9 @@ def simulate_team_battle(
     best_result = max(trial_results, key=lambda r: r["simulation_score"])
     best_result["predicted_player_win_chance"] = round(wins / max(1, n_trials), 4)
     best_result["n_trials"] = n_trials
+    best_result["attacker_game_version"] = _normalized_game_version(attacker_game_version)
+    best_result["defender_game_version"] = _normalized_game_version(defender_game_version)
+    best_result["is_compatible_version"] = True
     return best_result
 
 
@@ -850,12 +904,16 @@ def _run_local_simulations(
 
     for attacker_team in attackers:
         for defender_team in defenders:
+            attacker_game_version = cast(str | None, attacker_team.get("game_version"))
+            defender_game_version = cast(str | None, defender_team.get("game_version"))
+            if not _is_version_compatible(attacker_game_version, defender_game_version, config):
+                continue
             result = simulate_team_battle(
                 attacker_team=attacker_team,
                 defender_team=defender_team,
                 type_chart=type_chart,
-                attacker_game_version=cast(str | None, attacker_team.get("game_version")),
-                defender_game_version=cast(str | None, defender_team.get("game_version")),
+                attacker_game_version=attacker_game_version,
+                defender_game_version=defender_game_version,
                 n_trials=config.n_battle_trials,
                 rng_seed=_stable_pair_seed(attacker_team.get("team_id"), defender_team.get("team_id"), config.rng_seed),
                 config=config,
@@ -933,6 +991,7 @@ def _run_spark_simulations(
                 "team_id": str(team.get("team_id")),
                 "is_player_candidate": bool(_is_player_candidate_team(team)),
                 "is_boss": bool(_is_boss_team(team)),
+                "game_version": _normalized_game_version(cast(str | None, team.get("game_version"))),
             }
             for team in teams_with_id
         ]
@@ -941,16 +1000,21 @@ def _run_spark_simulations(
                 T.StructField("team_id", T.StringType(), False),
                 T.StructField("is_player_candidate", T.BooleanType(), False),
                 T.StructField("is_boss", T.BooleanType(), False),
+                T.StructField("game_version", T.StringType(), True),
             ]
         )
 
         teams_df = spark.createDataFrame(team_rows, schema=schema)
-        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id")
-        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id")
+        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version")
+        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version")
         pairs_df = attackers_df.alias("a").crossJoin(defenders_df.alias("d")).select(
             F.col("a.team_id").alias("attacker_id"),
             F.col("d.team_id").alias("defender_id"),
+            F.col("a.game_version").alias("attacker_game_version"),
+            F.col("d.game_version").alias("defender_game_version"),
         )
+        if config.require_exact_version_match:
+            pairs_df = pairs_df.where(F.col("attacker_game_version") == F.col("defender_game_version"))
 
         team_lookup_bc = spark.sparkContext.broadcast(team_lookup)
         chart_bc = spark.sparkContext.broadcast(type_chart)
@@ -963,12 +1027,16 @@ def _run_spark_simulations(
             for row in rows:
                 attacker_team = local_teams[str(row.attacker_id)]
                 defender_team = local_teams[str(row.defender_id)]
+                attacker_game_version = cast(str | None, row.attacker_game_version)
+                defender_game_version = cast(str | None, row.defender_game_version)
+                if not _is_version_compatible(attacker_game_version, defender_game_version, local_config):
+                    continue
                 result = simulate_team_battle(
                     attacker_team=attacker_team,
                     defender_team=defender_team,
                     type_chart=local_chart,
-                    attacker_game_version=cast(str | None, attacker_team.get("game_version")),
-                    defender_game_version=cast(str | None, defender_team.get("game_version")),
+                    attacker_game_version=attacker_game_version,
+                    defender_game_version=defender_game_version,
                     n_trials=local_config.n_battle_trials,
                     rng_seed=_stable_pair_seed(
                         attacker_team.get("team_id"),
@@ -997,6 +1065,7 @@ def build_team_battle_simulations(
     silver_dir: Path = SILVER_DIR,
     bronze_dir: Path = BRONZE_DIR,
     force_spark: bool | None = None,
+    runtime_config: BattleSimulationConfig | None = None,
 ) -> None:
     started_at = time.perf_counter()
     type_chart = load_type_chart(bronze_dir)
@@ -1006,7 +1075,7 @@ def build_team_battle_simulations(
     _load_move_and_pokemon_profiles_from_disk(silver_dir)
     _persist_lookup_cache_to_disk()
 
-    config = BattleSimulationConfig()
+    config = runtime_config or BattleSimulationConfig()
     use_spark = _should_use_spark() if force_spark is None else bool(force_spark)
     logger.info("[type_matchups] engine=%s", "spark" if use_spark else "local")
 
@@ -1014,6 +1083,10 @@ def build_team_battle_simulations(
         simulations = _run_spark_simulations(teams_data, type_chart, config)
     else:
         simulations = _run_local_simulations(teams_data, type_chart, config)
+
+    incompatible_rows = [row for row in simulations if not bool(row.get("is_compatible_version", False))]
+    if incompatible_rows:
+        raise ValueError("Incompatible cross-version simulation rows detected; strict compatibility contract violated")
 
     write_parquet(simulation_dir / "team_battle_simulations.parquet", simulations)
     logger.info(

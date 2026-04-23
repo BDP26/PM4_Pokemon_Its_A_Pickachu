@@ -18,7 +18,8 @@ from src.pipeline.settings import (
 )
 from src.pipeline.silver.simulation.battle_seeds import build_battle_seeds
 from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
-from src.pipeline.silver.simulation.type_matchups import build_team_battle_simulations
+from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, build_team_battle_simulations
+from src.pipeline.gold.simulation.config import load_battle_simulation_config
 
 
 logger = logging.getLogger(__name__)
@@ -37,12 +38,14 @@ def _run_gold_team_battle_simulations(
     teams_data: list[dict[str, Any]],
     gold_dir: Path,
     bronze_dir: Path,
+    runtime_config: BattleSimulationConfig,
 ) -> None:
     build_team_battle_simulations(
         teams_data=teams_data,
         silver_dir=gold_dir,
         bronze_dir=bronze_dir,
         force_spark=None,
+        runtime_config=runtime_config,
     )
 
 
@@ -103,6 +106,19 @@ def run_gold_simulation_from_silver(
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
     write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
+    runtime_policy = load_battle_simulation_config()
+    base_config = BattleSimulationConfig()
+    runtime_config = BattleSimulationConfig(
+        max_overlevel=base_config.max_overlevel,
+        max_underlevel=base_config.max_underlevel,
+        n_battle_trials=int(n_trials),
+        damage_randomness_min=runtime_policy.damage_random_min,
+        damage_randomness_max=runtime_policy.damage_random_max,
+        crit_chance=runtime_policy.crit_chance_default,
+        max_turns_per_duel=base_config.max_turns_per_duel,
+        rng_seed=int(rng_seed),
+        require_exact_version_match=not bool(runtime_policy.allow_cross_version_fallback),
+    )
 
     sims_started_at = time.perf_counter()
     logger.info("[gold/simulation] running round-based team battle simulations")
@@ -110,6 +126,7 @@ def run_gold_simulation_from_silver(
         teams_data=teams_data,
         gold_dir=gold_dir,
         bronze_dir=bronze_dir,
+        runtime_config=runtime_config,
     )
     logger.info("[gold/simulation] team battle simulations done elapsed_s=%.2f", time.perf_counter() - sims_started_at)
 

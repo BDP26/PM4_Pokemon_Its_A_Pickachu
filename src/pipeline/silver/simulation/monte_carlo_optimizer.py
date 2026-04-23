@@ -1,11 +1,8 @@
-"""Aggregate results from real round-based team simulations.
-
-This file no longer performs fake Bernoulli resampling from an already-known
-probability. It summarizes the probabilities produced by the actual battle engine.
-"""
+"""Run Monte Carlo resampling over simulated matchup win probabilities."""
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 from src.pipeline.common.io import read_parquet, write_parquet
@@ -45,10 +42,40 @@ def run_monte_carlo_team_optimizer(
         raise ValueError(f"team_battle_simulations.parquet missing required columns: {sorted(missing)}")
 
     result_df = simulations_df.copy()
-    result_df["mc_win_rate"] = result_df["predicted_player_win_chance"].astype(float)
-    result_df["wins"] = (result_df["mc_win_rate"] * result_df["n_trials"].astype(int)).round().astype(int)
-    result_df["losses"] = result_df["n_trials"].astype(int) - result_df["wins"]
+    rng = random.Random(int(rng_seed))
+
+    mc_win_rates: list[float] = []
+    wins_list: list[int] = []
+    losses_list: list[int] = []
+    ci_low: list[float] = []
+    ci_high: list[float] = []
+
+    for _, row in result_df.iterrows():
+        p = float(row.get("predicted_player_win_chance", 0.0) or 0.0)
+        p = max(0.0, min(1.0, p))
+        battle_trials = max(1, int(row.get("n_trials", 1) or 1))
+        draws: list[float] = []
+        for _ in range(max(1, int(n_trials))):
+            wins = sum(1 for _ in range(battle_trials) if rng.random() <= p)
+            draws.append(wins / battle_trials)
+        draws.sort()
+        mean_rate = sum(draws) / len(draws)
+        wins_mc = int(round(mean_rate * battle_trials))
+        wins_list.append(wins_mc)
+        losses_list.append(battle_trials - wins_mc)
+        mc_win_rates.append(round(mean_rate, 6))
+        lower_idx = int(0.025 * (len(draws) - 1))
+        upper_idx = int(0.975 * (len(draws) - 1))
+        ci_low.append(round(draws[lower_idx], 6))
+        ci_high.append(round(draws[upper_idx], 6))
+
+    result_df["mc_win_rate"] = mc_win_rates
+    result_df["wins"] = wins_list
+    result_df["losses"] = losses_list
+    result_df["mc_ci95_low"] = ci_low
+    result_df["mc_ci95_high"] = ci_high
     result_df["rng_seed"] = int(rng_seed)
+    result_df["mc_resamples"] = int(n_trials)
 
     output_columns = [
         "team_id_attacker",
@@ -62,9 +89,12 @@ def run_monte_carlo_team_optimizer(
         "wins",
         "losses",
         "mc_win_rate",
+        "mc_ci95_low",
+        "mc_ci95_high",
+        "mc_resamples",
     ]
     records = result_df[output_columns].to_dict(orient="records")
     write_parquet(output_path, records)
 
-    print(f"[monte_carlo] summarized {len(records)} scenarios from real battle trials")
+    print(f"[monte_carlo] resampled {len(records)} scenarios")
     return len(records)

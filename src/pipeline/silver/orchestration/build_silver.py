@@ -12,6 +12,8 @@ from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_js
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.silver.config.game_config import get_games_config
+from src.pipeline.silver.config.team_config import PARSER_MIN_BOSS_COVERAGE, resolve_runtime_team_config
+from src.pipeline.gold.simulation.config import load_battle_simulation_config
 from src.pipeline.silver.inputs.kaggle_boss_mapping import (
     build_boss_mapping_payload,
     build_harmonized_candidates_by_boss,
@@ -23,7 +25,7 @@ from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     enrich_records_with_location_pokemon,
     get_location_area_and_pokemon_maps,
 )
-from src.pipeline.silver.inputs.parser import extract_game_data
+from src.pipeline.silver.inputs.parser import enforce_parser_coverage, extract_game_data
 from src.pipeline.silver.inputs.builders.player_teams import (
     build_player_teams_from_progression_context,
     build_progression_source_teams,
@@ -280,6 +282,8 @@ def build_silver_from_bronze(
 
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
+    runtime_team_config = resolve_runtime_team_config()
+    runtime_simulation_config = load_battle_simulation_config().__dict__
 
     location_index = cast(dict[str, Any], read_json(location_index_path))
     mapper = LocationMapper(location_index)
@@ -302,6 +306,8 @@ def build_silver_from_bronze(
             "kaggle": fingerprint_path(kaggle_csv_path) if kaggle_csv_path.exists() else None,
             "type_chart": fingerprint_path(type_chart_path),
             "allowed_versions": sorted(allowed_versions),
+            "runtime_team_config": runtime_team_config,
+            "runtime_simulation_config": runtime_simulation_config,
         }
     )
     previous_state = load_state(state_path)
@@ -344,6 +350,12 @@ def build_silver_from_bronze(
         records = extract_game_data(game_payload, mapper)
         game_key = game_payload["game_key"]
         expected_bosses = game_payload.get("bosses", [])
+        enforce_parser_coverage(
+            game_key=game_key,
+            records=records,
+            expected_bosses=expected_bosses,
+            min_coverage=PARSER_MIN_BOSS_COVERAGE,
+        )
 
         harmonized_candidates_by_boss = build_harmonized_candidates_by_boss(
             game_key=game_key,
@@ -378,6 +390,7 @@ def build_silver_from_bronze(
         all_slugs,
         allowed_versions=allowed_versions,
         silver_dir=silver_dir,
+        bronze_dir=bronze_dir,
     )
     logger.info(
         "[silver] mapping locations+pokemon done elapsed_s=%.2f locations=%s pokemon_locations=%s",
@@ -621,6 +634,8 @@ def build_silver_from_bronze(
             "boss_teams": total_boss_teams,
             "player_teams": total_player_teams,
             "move_records": len(all_move_data),
+            "runtime_team_config": runtime_team_config,
+            "runtime_simulation_config": runtime_simulation_config,
         },
     )
 
