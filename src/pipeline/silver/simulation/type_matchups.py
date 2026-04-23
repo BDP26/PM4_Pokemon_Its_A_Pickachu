@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from src.pipeline.common.io import read_json, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.settings import (
     BRONZE_DIR,
@@ -21,11 +21,6 @@ from src.pipeline.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-_LOOKUP_CACHE_DIRNAME = "lookup_cache"
-_POKEMON_CACHE_FILENAME = "pokemon_profiles.json"
-_MOVE_CACHE_FILENAME = "move_profiles.json"
-
 
 class MoveProfile(TypedDict):
     name: str
@@ -122,7 +117,6 @@ class WarningCollector:
 
 _LOCAL_POKEMON_PROFILES: dict[str, dict[str, Any]] = {}
 _LOCAL_MOVE_PROFILES: dict[str, MoveProfile] = {}
-_LOCAL_CACHE_PATHS: tuple[Path, Path] | None = None
 
 _GAME_TO_VERSION_GROUP: dict[str, str] = {
     "red": "red-blue",
@@ -162,12 +156,7 @@ _STRUGGLE_MOVE: MoveProfile = {
 }
 
 
-def _cache_paths(silver_dir: Path) -> tuple[Path, Path]:
-    cache_dir = silver_dir / SILVER_SIMULATION_DIRNAME / _LOOKUP_CACHE_DIRNAME
-    return cache_dir / _POKEMON_CACHE_FILENAME, cache_dir / _MOVE_CACHE_FILENAME
-
-
-def _install_lookup_cache(
+def _install_reference_profiles(
     pokemon_profiles: dict[str, dict[str, Any]],
     move_profiles: dict[str, MoveProfile],
 ) -> None:
@@ -176,55 +165,93 @@ def _install_lookup_cache(
     _LOCAL_MOVE_PROFILES = dict(move_profiles)
 
 
-def _load_lookup_cache_from_disk(silver_dir: Path) -> None:
-    global _LOCAL_CACHE_PATHS
-    pokemon_path, move_path = _cache_paths(silver_dir)
-    _LOCAL_CACHE_PATHS = (pokemon_path, move_path)
-
+def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
+    references_dir = silver_dir / "references"
+    simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     pokemon_profiles: dict[str, dict[str, Any]] = {}
     move_profiles: dict[str, MoveProfile] = {}
 
-    if pokemon_path.exists():
-        loaded_pokemon = cast(dict[str, Any], read_json(pokemon_path))
-        if isinstance(loaded_pokemon, dict):
-            pokemon_profiles = {
-                str(key): cast(dict[str, Any], value)
-                for key, value in loaded_pokemon.items()
-                if isinstance(value, dict)
+    pokemon_stats_path = references_dir / "pokemon_stats.parquet"
+    if pokemon_stats_path.exists():
+        pokemon_stats_df = read_parquet(pokemon_stats_path)
+        for row in pokemon_stats_df.to_dict(orient="records"):
+            species = normalize_species_name(str(row.get("pokemon_species") or row.get("name") or ""))
+            if not species:
+                continue
+            pokemon_profiles[species] = {
+                "name": species,
+                "types": [
+                    str(value).title()
+                    for value in [row.get("type_1"), row.get("type_2")]
+                    if isinstance(value, str) and value.strip()
+                ] or ["Normal"],
+                "stats": {
+                    "hp": int(row.get("hp") or 50),
+                    "attack": int(row.get("attack") or 50),
+                    "defense": int(row.get("defense") or 50),
+                    "sp_attack": int(row.get("sp_attack") or 50),
+                    "sp_defense": int(row.get("sp_defense") or 50),
+                    "speed": int(row.get("speed") or 50),
+                },
+                "moves": [],
             }
 
-    if move_path.exists():
-        loaded_moves = cast(dict[str, Any], read_json(move_path))
-        if isinstance(loaded_moves, dict):
-            for key, value in loaded_moves.items():
-                if not isinstance(value, dict):
+    move_data_path = simulation_dir / "move_data.parquet"
+    if move_data_path.exists():
+        move_data_df = read_parquet(move_data_path)
+        for row in move_data_df.to_dict(orient="records"):
+            move_details = row.get("move_details")
+            if not isinstance(move_details, dict):
+                continue
+            for key, value in move_details.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
                     continue
-                move_profiles[str(key)] = {
-                    "name": str(value.get("name", key)),
+                move_name = _normalize_move_name(key)
+                if not move_name:
+                    continue
+                accuracy = value.get("accuracy")
+                if isinstance(accuracy, float) and math.isnan(accuracy):
+                    accuracy = None
+                move_profiles[move_name] = {
+                    "name": str(value.get("move_name") or move_name),
                     "type": str(value.get("type", "Normal")),
                     "power": int(value.get("power", 0) or 0),
                     "damage_class": str(value.get("damage_class", "physical")),
-                    "accuracy": value.get("accuracy"),
+                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
                     "pp": value.get("pp"),
                     "level_learned_at": int(value.get("level_learned_at", 0) or 0),
-                    "version_group": str(value.get("version_group", "")),
+                    "version_group": str(value.get("version_group", "reference")),
                     "degraded_data": bool(value.get("degraded_data", False)),
                 }
+    else:
+        move_reference_path = references_dir / "move_reference.parquet"
+        if move_reference_path.exists():
+            move_ref_df = read_parquet(move_reference_path)
+            for row in move_ref_df.to_dict(orient="records"):
+                move_name = _normalize_move_name(str(row.get("move_name") or ""))
+                if not move_name:
+                    continue
+                accuracy = row.get("accuracy")
+                if isinstance(accuracy, float) and math.isnan(accuracy):
+                    accuracy = None
+                move_profiles[move_name] = {
+                    "name": move_name,
+                    "type": str(row.get("type") or "Normal"),
+                    "power": int(row.get("power", 0) or 0),
+                    "damage_class": str(row.get("damage_class") or "physical"),
+                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
+                    "pp": row.get("pp"),
+                    "level_learned_at": 0,
+                    "version_group": "reference",
+                    "degraded_data": False,
+                }
 
-    _install_lookup_cache(pokemon_profiles, move_profiles)
+    _install_reference_profiles(pokemon_profiles, move_profiles)
     logger.info(
-        "[type_matchups] loaded lookup cache pokemon=%s moves=%s",
+        "[type_matchups] loaded parquet reference profiles pokemon=%s moves=%s",
         len(_LOCAL_POKEMON_PROFILES),
         len(_LOCAL_MOVE_PROFILES),
     )
-
-
-def _persist_lookup_cache_to_disk() -> None:
-    if _LOCAL_CACHE_PATHS is None:
-        return
-    pokemon_path, move_path = _LOCAL_CACHE_PATHS
-    write_json(pokemon_path, _LOCAL_POKEMON_PROFILES)
-    write_json(move_path, _LOCAL_MOVE_PROFILES)
 
 
 def _default_stats() -> dict[str, int]:
@@ -1144,7 +1171,7 @@ def _run_spark_simulations(
 
 
 def _load_move_and_pokemon_profiles_from_disk(silver_dir: Path) -> None:
-    _load_lookup_cache_from_disk(silver_dir)
+    _load_reference_profiles_from_parquet(silver_dir)
 
 
 def build_team_battle_simulations(
@@ -1160,7 +1187,6 @@ def build_team_battle_simulations(
     simulation_dir.mkdir(parents=True, exist_ok=True)
 
     _load_move_and_pokemon_profiles_from_disk(silver_dir)
-    _persist_lookup_cache_to_disk()
 
     config = runtime_config or BattleSimulationConfig()
     if config.fail_on_degraded_data:
