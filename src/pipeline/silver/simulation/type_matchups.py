@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from src.pipeline.common.io import read_json, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.settings import (
     BRONZE_DIR,
@@ -21,11 +21,6 @@ from src.pipeline.settings import (
 )
 
 logger = logging.getLogger(__name__)
-
-_LOOKUP_CACHE_DIRNAME = "lookup_cache"
-_POKEMON_CACHE_FILENAME = "pokemon_profiles.json"
-_MOVE_CACHE_FILENAME = "move_profiles.json"
-
 
 class MoveProfile(TypedDict):
     name: str
@@ -122,7 +117,6 @@ class WarningCollector:
 
 _LOCAL_POKEMON_PROFILES: dict[str, dict[str, Any]] = {}
 _LOCAL_MOVE_PROFILES: dict[str, MoveProfile] = {}
-_LOCAL_CACHE_PATHS: tuple[Path, Path] | None = None
 
 _GAME_TO_VERSION_GROUP: dict[str, str] = {
     "red": "red-blue",
@@ -162,12 +156,7 @@ _STRUGGLE_MOVE: MoveProfile = {
 }
 
 
-def _cache_paths(silver_dir: Path) -> tuple[Path, Path]:
-    cache_dir = silver_dir / SILVER_SIMULATION_DIRNAME / _LOOKUP_CACHE_DIRNAME
-    return cache_dir / _POKEMON_CACHE_FILENAME, cache_dir / _MOVE_CACHE_FILENAME
-
-
-def _install_lookup_cache(
+def _install_reference_profiles(
     pokemon_profiles: dict[str, dict[str, Any]],
     move_profiles: dict[str, MoveProfile],
 ) -> None:
@@ -176,55 +165,93 @@ def _install_lookup_cache(
     _LOCAL_MOVE_PROFILES = dict(move_profiles)
 
 
-def _load_lookup_cache_from_disk(silver_dir: Path) -> None:
-    global _LOCAL_CACHE_PATHS
-    pokemon_path, move_path = _cache_paths(silver_dir)
-    _LOCAL_CACHE_PATHS = (pokemon_path, move_path)
-
+def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
+    references_dir = silver_dir / "references"
+    simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     pokemon_profiles: dict[str, dict[str, Any]] = {}
     move_profiles: dict[str, MoveProfile] = {}
 
-    if pokemon_path.exists():
-        loaded_pokemon = cast(dict[str, Any], read_json(pokemon_path))
-        if isinstance(loaded_pokemon, dict):
-            pokemon_profiles = {
-                str(key): cast(dict[str, Any], value)
-                for key, value in loaded_pokemon.items()
-                if isinstance(value, dict)
+    pokemon_stats_path = references_dir / "pokemon_stats.parquet"
+    if pokemon_stats_path.exists():
+        pokemon_stats_df = read_parquet(pokemon_stats_path)
+        for row in pokemon_stats_df.to_dict(orient="records"):
+            species = normalize_species_name(str(row.get("pokemon_species") or row.get("name") or ""))
+            if not species:
+                continue
+            pokemon_profiles[species] = {
+                "name": species,
+                "types": [
+                    str(value).title()
+                    for value in [row.get("type_1"), row.get("type_2")]
+                    if isinstance(value, str) and value.strip()
+                ] or ["Normal"],
+                "stats": {
+                    "hp": int(row.get("hp") or 50),
+                    "attack": int(row.get("attack") or 50),
+                    "defense": int(row.get("defense") or 50),
+                    "sp_attack": int(row.get("sp_attack") or 50),
+                    "sp_defense": int(row.get("sp_defense") or 50),
+                    "speed": int(row.get("speed") or 50),
+                },
+                "moves": [],
             }
 
-    if move_path.exists():
-        loaded_moves = cast(dict[str, Any], read_json(move_path))
-        if isinstance(loaded_moves, dict):
-            for key, value in loaded_moves.items():
-                if not isinstance(value, dict):
+    move_data_path = simulation_dir / "move_data.parquet"
+    if move_data_path.exists():
+        move_data_df = read_parquet(move_data_path)
+        for row in move_data_df.to_dict(orient="records"):
+            move_details = row.get("move_details")
+            if not isinstance(move_details, dict):
+                continue
+            for key, value in move_details.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
                     continue
-                move_profiles[str(key)] = {
-                    "name": str(value.get("name", key)),
+                move_name = _normalize_move_name(key)
+                if not move_name:
+                    continue
+                accuracy = value.get("accuracy")
+                if isinstance(accuracy, float) and math.isnan(accuracy):
+                    accuracy = None
+                move_profiles[move_name] = {
+                    "name": str(value.get("move_name") or move_name),
                     "type": str(value.get("type", "Normal")),
                     "power": int(value.get("power", 0) or 0),
                     "damage_class": str(value.get("damage_class", "physical")),
-                    "accuracy": value.get("accuracy"),
+                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
                     "pp": value.get("pp"),
                     "level_learned_at": int(value.get("level_learned_at", 0) or 0),
-                    "version_group": str(value.get("version_group", "")),
+                    "version_group": str(value.get("version_group", "reference")),
                     "degraded_data": bool(value.get("degraded_data", False)),
                 }
+    else:
+        move_reference_path = references_dir / "move_reference.parquet"
+        if move_reference_path.exists():
+            move_ref_df = read_parquet(move_reference_path)
+            for row in move_ref_df.to_dict(orient="records"):
+                move_name = _normalize_move_name(str(row.get("move_name") or ""))
+                if not move_name:
+                    continue
+                accuracy = row.get("accuracy")
+                if isinstance(accuracy, float) and math.isnan(accuracy):
+                    accuracy = None
+                move_profiles[move_name] = {
+                    "name": move_name,
+                    "type": str(row.get("type") or "Normal"),
+                    "power": int(row.get("power", 0) or 0),
+                    "damage_class": str(row.get("damage_class") or "physical"),
+                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
+                    "pp": row.get("pp"),
+                    "level_learned_at": 0,
+                    "version_group": "reference",
+                    "degraded_data": False,
+                }
 
-    _install_lookup_cache(pokemon_profiles, move_profiles)
+    _install_reference_profiles(pokemon_profiles, move_profiles)
     logger.info(
-        "[type_matchups] loaded lookup cache pokemon=%s moves=%s",
+        "[type_matchups] loaded parquet reference profiles pokemon=%s moves=%s",
         len(_LOCAL_POKEMON_PROFILES),
         len(_LOCAL_MOVE_PROFILES),
     )
-
-
-def _persist_lookup_cache_to_disk() -> None:
-    if _LOCAL_CACHE_PATHS is None:
-        return
-    pokemon_path, move_path = _LOCAL_CACHE_PATHS
-    write_json(pokemon_path, _LOCAL_POKEMON_PROFILES)
-    write_json(move_path, _LOCAL_MOVE_PROFILES)
 
 
 def _default_stats() -> dict[str, int]:
@@ -698,6 +725,30 @@ def _normalized_game_version(value: str | None) -> str | None:
     return normalized or None
 
 
+def _normalized_boss_label(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.strip().lower().replace("_", " ").replace("-", " ").split())
+    return cleaned or None
+
+
+def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
+    attacker_target = _normalized_boss_label(attacker_team.get("gym"))
+    if attacker_target is None:
+        return False
+    defender_targets = {
+        label
+        for label in (
+            _normalized_boss_label(defender_team.get("gym")),
+            _normalized_boss_label(defender_team.get("boss_name")),
+        )
+        if label is not None
+    }
+    if not defender_targets:
+        return False
+    return attacker_target in defender_targets
+
+
 def _is_version_compatible(
     attacker_game_version: str | None,
     defender_game_version: str | None,
@@ -973,7 +1024,7 @@ def _run_local_simulations(
     attackers = [team for team in teams_with_id if _is_player_candidate_team(team)]
     defenders = [team for team in teams_with_id if _is_boss_team(team)]
 
-    total_pairs = len(attackers) * len(defenders)
+    total_pairs = sum(1 for attacker_team in attackers for defender_team in defenders if _is_intended_boss_matchup(attacker_team, defender_team))
     logger.info(
         "[type_matchups] local engine start teams=%s attackers=%s defenders=%s pairs=%s",
         len(teams_with_id),
@@ -991,6 +1042,8 @@ def _run_local_simulations(
 
     for attacker_team in attackers:
         for defender_team in defenders:
+            if not _is_intended_boss_matchup(attacker_team, defender_team):
+                continue
             attacker_game_version = cast(str | None, attacker_team.get("game_version"))
             defender_game_version = cast(str | None, defender_team.get("game_version"))
             if not _is_version_compatible(attacker_game_version, defender_game_version, config):
@@ -1060,15 +1113,13 @@ def _run_spark_simulations(
         teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
         attacker_count = sum(1 for team in teams_with_id if _is_player_candidate_team(team))
         defender_count = sum(1 for team in teams_with_id if _is_boss_team(team))
-        total_pairs = attacker_count * defender_count
         logger.info(
-            "[type_matchups] spark engine start teams=%s attackers=%s defenders=%s pairs=%s",
+            "[type_matchups] spark engine preparing teams=%s attackers=%s defenders=%s",
             len(teams_with_id),
             attacker_count,
             defender_count,
-            total_pairs,
         )
-        if total_pairs == 0:
+        if attacker_count == 0 or defender_count == 0:
             return []
 
         team_lookup: dict[str, dict[str, Any]] = {str(team.get("team_id")): team for team in teams_with_id}
@@ -1079,6 +1130,8 @@ def _run_spark_simulations(
                 "is_player_candidate": bool(_is_player_candidate_team(team)),
                 "is_boss": bool(_is_boss_team(team)),
                 "game_version": _normalized_game_version(cast(str | None, team.get("game_version"))),
+                "gym_target": _normalized_boss_label(team.get("gym")),
+                "boss_target": _normalized_boss_label(team.get("gym")) or _normalized_boss_label(team.get("boss_name")),
             }
             for team in teams_with_id
         ]
@@ -1088,20 +1141,29 @@ def _run_spark_simulations(
                 T.StructField("is_player_candidate", T.BooleanType(), False),
                 T.StructField("is_boss", T.BooleanType(), False),
                 T.StructField("game_version", T.StringType(), True),
+                T.StructField("gym_target", T.StringType(), True),
+                T.StructField("boss_target", T.StringType(), True),
             ]
         )
 
         teams_df = spark.createDataFrame(team_rows, schema=schema)
-        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version")
-        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version")
+        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version", "gym_target")
+        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version", "boss_target")
         pairs_df = attackers_df.alias("a").crossJoin(defenders_df.alias("d")).select(
             F.col("a.team_id").alias("attacker_id"),
             F.col("d.team_id").alias("defender_id"),
             F.col("a.game_version").alias("attacker_game_version"),
             F.col("d.game_version").alias("defender_game_version"),
+            F.col("a.gym_target").alias("attacker_target"),
+            F.col("d.boss_target").alias("defender_target"),
         )
+        pairs_df = pairs_df.where(F.col("attacker_target") == F.col("defender_target"))
         if config.require_exact_version_match:
             pairs_df = pairs_df.where(F.col("attacker_game_version") == F.col("defender_game_version"))
+        total_pairs = int(pairs_df.count())
+        logger.info("[type_matchups] spark engine start eligible_pairs=%s", total_pairs)
+        if total_pairs == 0:
+            return []
 
         team_lookup_bc = spark.sparkContext.broadcast(team_lookup)
         chart_bc = spark.sparkContext.broadcast(type_chart)
@@ -1144,7 +1206,7 @@ def _run_spark_simulations(
 
 
 def _load_move_and_pokemon_profiles_from_disk(silver_dir: Path) -> None:
-    _load_lookup_cache_from_disk(silver_dir)
+    _load_reference_profiles_from_parquet(silver_dir)
 
 
 def build_team_battle_simulations(
@@ -1160,7 +1222,6 @@ def build_team_battle_simulations(
     simulation_dir.mkdir(parents=True, exist_ok=True)
 
     _load_move_and_pokemon_profiles_from_disk(silver_dir)
-    _persist_lookup_cache_to_disk()
 
     config = runtime_config or BattleSimulationConfig()
     if config.fail_on_degraded_data:

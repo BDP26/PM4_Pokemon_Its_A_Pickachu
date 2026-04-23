@@ -77,7 +77,7 @@ def write_validated_teams(path: Path, records: list[dict[str, Any]], *, partitio
 def write_validated_move_data(path: Path, records: dict[str, dict[str, Any]] | list[dict[str, Any]]) -> list[dict[str, Any]]:
     payload = list(records.values()) if isinstance(records, dict) else list(records)
     validated = validate_move_payloads(payload)
-    write_json(path, {item["pokemon_instance_id"]: item for item in validated})
+    write_parquet(path, pd.DataFrame(validated))
     return validated
 
 def write_simulation_run_metadata(

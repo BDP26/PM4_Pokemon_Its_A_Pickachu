@@ -318,7 +318,7 @@ def build_silver_from_bronze(
         mappings_dir / "location_to_area_map.json",
         mappings_dir / "location_to_pokemon_map.json",
         mappings_dir / "boss_mapping_by_version.json",
-        references_dir / "pokemon_reference.json",
+        references_dir / "pokemon_reference.parquet",
         references_dir / "encounter_methods_reference.json",
         references_dir / "games.parquet",
         references_dir / "bosses.parquet",
@@ -573,7 +573,7 @@ def build_silver_from_bronze(
         del combat_pool_rows
         gc.collect()
 
-    write_validated_move_data(simulation_dir / "move_data.json", all_move_data)
+    write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data)
     move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
 
     relational_report = validate_normalized_silver_tables(
