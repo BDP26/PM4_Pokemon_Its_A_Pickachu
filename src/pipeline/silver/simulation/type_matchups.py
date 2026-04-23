@@ -725,6 +725,31 @@ def _normalized_game_version(value: str | None) -> str | None:
     return normalized or None
 
 
+def _normalized_boss_label(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.strip().lower().replace("_", " ").replace("-", " ").split())
+    return cleaned or None
+
+
+def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
+    attacker_target = _normalized_boss_label(attacker_team.get("gym"))
+    if attacker_target is None:
+        # Backward-compatible fallback for legacy player rows without gym context.
+        return True
+    defender_targets = {
+        label
+        for label in (
+            _normalized_boss_label(defender_team.get("gym")),
+            _normalized_boss_label(defender_team.get("boss_name")),
+        )
+        if label is not None
+    }
+    if not defender_targets:
+        return False
+    return attacker_target in defender_targets
+
+
 def _is_version_compatible(
     attacker_game_version: str | None,
     defender_game_version: str | None,
@@ -1000,7 +1025,7 @@ def _run_local_simulations(
     attackers = [team for team in teams_with_id if _is_player_candidate_team(team)]
     defenders = [team for team in teams_with_id if _is_boss_team(team)]
 
-    total_pairs = len(attackers) * len(defenders)
+    total_pairs = sum(1 for attacker_team in attackers for defender_team in defenders if _is_intended_boss_matchup(attacker_team, defender_team))
     logger.info(
         "[type_matchups] local engine start teams=%s attackers=%s defenders=%s pairs=%s",
         len(teams_with_id),
@@ -1018,6 +1043,8 @@ def _run_local_simulations(
 
     for attacker_team in attackers:
         for defender_team in defenders:
+            if not _is_intended_boss_matchup(attacker_team, defender_team):
+                continue
             attacker_game_version = cast(str | None, attacker_team.get("game_version"))
             defender_game_version = cast(str | None, defender_team.get("game_version"))
             if not _is_version_compatible(attacker_game_version, defender_game_version, config):
@@ -1087,15 +1114,13 @@ def _run_spark_simulations(
         teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
         attacker_count = sum(1 for team in teams_with_id if _is_player_candidate_team(team))
         defender_count = sum(1 for team in teams_with_id if _is_boss_team(team))
-        total_pairs = attacker_count * defender_count
         logger.info(
-            "[type_matchups] spark engine start teams=%s attackers=%s defenders=%s pairs=%s",
+            "[type_matchups] spark engine preparing teams=%s attackers=%s defenders=%s",
             len(teams_with_id),
             attacker_count,
             defender_count,
-            total_pairs,
         )
-        if total_pairs == 0:
+        if attacker_count == 0 or defender_count == 0:
             return []
 
         team_lookup: dict[str, dict[str, Any]] = {str(team.get("team_id")): team for team in teams_with_id}
@@ -1106,6 +1131,8 @@ def _run_spark_simulations(
                 "is_player_candidate": bool(_is_player_candidate_team(team)),
                 "is_boss": bool(_is_boss_team(team)),
                 "game_version": _normalized_game_version(cast(str | None, team.get("game_version"))),
+                "gym_target": _normalized_boss_label(team.get("gym")),
+                "boss_target": _normalized_boss_label(team.get("gym")) or _normalized_boss_label(team.get("boss_name")),
             }
             for team in teams_with_id
         ]
@@ -1115,20 +1142,29 @@ def _run_spark_simulations(
                 T.StructField("is_player_candidate", T.BooleanType(), False),
                 T.StructField("is_boss", T.BooleanType(), False),
                 T.StructField("game_version", T.StringType(), True),
+                T.StructField("gym_target", T.StringType(), True),
+                T.StructField("boss_target", T.StringType(), True),
             ]
         )
 
         teams_df = spark.createDataFrame(team_rows, schema=schema)
-        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version")
-        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version")
+        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version", "gym_target")
+        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version", "boss_target")
         pairs_df = attackers_df.alias("a").crossJoin(defenders_df.alias("d")).select(
             F.col("a.team_id").alias("attacker_id"),
             F.col("d.team_id").alias("defender_id"),
             F.col("a.game_version").alias("attacker_game_version"),
             F.col("d.game_version").alias("defender_game_version"),
+            F.col("a.gym_target").alias("attacker_target"),
+            F.col("d.boss_target").alias("defender_target"),
         )
+        pairs_df = pairs_df.where(F.col("attacker_target").isNull() | (F.col("attacker_target") == F.col("defender_target")))
         if config.require_exact_version_match:
             pairs_df = pairs_df.where(F.col("attacker_game_version") == F.col("defender_game_version"))
+        total_pairs = int(pairs_df.count())
+        logger.info("[type_matchups] spark engine start eligible_pairs=%s", total_pairs)
+        if total_pairs == 0:
+            return []
 
         team_lookup_bc = spark.sparkContext.broadcast(team_lookup)
         chart_bc = spark.sparkContext.broadcast(type_chart)
