@@ -50,9 +50,7 @@ from src.pipeline.silver.writers.outputs import (
 from src.pipeline.silver.transforms.normalized_tables import (
     build_bosses_table,
     build_games_table,
-    build_learnable_moves_table,
     build_locations_table,
-    build_move_reference_table,
     build_team_member_moves_table,
     build_team_members_table,
 )
@@ -130,7 +128,6 @@ def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
         "teams": simulation_dir / f"teams_{game_key}.parquet",
         "team_members": simulation_dir / f"team_members_{game_key}.parquet",
         "team_member_moves": simulation_dir / f"team_member_moves_{game_key}.parquet",
-        "learnable_moves": simulation_dir / f"learnable_moves_{game_key}.parquet",
         "combat_pool": simulation_dir / f"pokemon_combat_pool_{game_key}.parquet",
     }
 
@@ -436,7 +433,9 @@ def build_silver_from_bronze(
 
     move_reference_path = references_dir / "move_reference.parquet"
     learnable_moves_path = references_dir / "learnable_moves.parquet"
-    if not move_reference_path.exists() or not learnable_moves_path.exists():
+    pokemon_learnable_moves_path = references_dir / "pokemon_learnable_moves.parquet"
+    has_learnable_reference = learnable_moves_path.exists() or pokemon_learnable_moves_path.exists()
+    if not move_reference_path.exists() or not has_learnable_reference:
         logger.info("[silver] bootstrapping move reference parquet before team extraction")
         bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
         bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
@@ -479,7 +478,6 @@ def build_silver_from_bronze(
         "teams_*.parquet",
         "team_members_*.parquet",
         "team_member_moves_*.parquet",
-        "learnable_moves_*.parquet",
         "pokemon_combat_pool_*.parquet",
     ]:
         for old_file in simulation_dir.glob(pattern):
@@ -493,6 +491,15 @@ def build_silver_from_bronze(
     all_team_member_moves_rows: list[dict[str, Any]] = []
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    learnable_reference_path = (
+        pokemon_learnable_moves_path
+        if pokemon_learnable_moves_path.exists()
+        else learnable_moves_path
+    )
+    learnable_reference_df = (
+        read_parquet(learnable_reference_path) if learnable_reference_path.exists() else pd.DataFrame()
+    )
+
     for team in boss_teams:
         game_version = str(team.get("game_version") or "").strip().lower()
         if game_version:
@@ -508,12 +515,6 @@ def build_silver_from_bronze(
         combat_pool_rows = _build_combat_pool_rows_for_game(progression_source_teams)
         paths = _game_output_paths(simulation_dir, game_key)
         write_parquet(paths["combat_pool"], combat_pool_rows)
-
-        if learnable_moves_path.exists():
-            learnable_df = read_parquet(learnable_moves_path)
-            if not learnable_df.empty and "game_version" in learnable_df.columns:
-                learnable_df = learnable_df[learnable_df["game_version"] == game_key]
-            write_parquet(paths["learnable_moves"], learnable_df)
 
         player_teams, player_move_data = build_player_teams_from_progression_context(
             progression_source_teams,
@@ -562,13 +563,8 @@ def build_silver_from_bronze(
         del combat_pool_rows
         gc.collect()
 
-    move_reference = build_move_reference_table(all_move_data)
-    learnable_moves = build_learnable_moves_table(all_move_data)
-
     write_validated_move_data(simulation_dir / "move_data.json", all_move_data)
-    write_parquet(references_dir / "move_reference.parquet", move_reference)
-    write_parquet(references_dir / "learnable_moves.parquet", learnable_moves, partition_cols=["game_version"])
-    write_parquet(references_dir / "pokemon_learnable_moves.parquet", learnable_moves, partition_cols=["game_version", "pokemon_species"])
+    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
 
     relational_report = validate_normalized_silver_tables(
         {
@@ -579,8 +575,8 @@ def build_silver_from_bronze(
             "teams": pd.DataFrame(all_team_metadata_rows),
             "team_members": pd.DataFrame(all_team_members_rows),
             "team_member_moves": pd.DataFrame(all_team_member_moves_rows),
-            "move_reference": pd.DataFrame(move_reference),
-            "learnable_moves": pd.DataFrame(learnable_moves),
+            "move_reference": move_reference_df,
+            "learnable_moves": learnable_reference_df,
         }
     )
     write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())

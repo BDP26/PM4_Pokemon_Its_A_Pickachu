@@ -260,7 +260,6 @@ def bootstrap_move_reference_cache(
     references_dir.mkdir(parents=True, exist_ok=True)
 
     if learnable_rows:
-        write_parquet(references_dir / "learnable_moves.parquet", learnable_rows, partition_cols=["game_version"])
         write_parquet(
             references_dir / "pokemon_learnable_moves.parquet",
             learnable_rows,
@@ -429,7 +428,6 @@ def persist_move_reference_cache(
     references_dir.mkdir(parents=True, exist_ok=True)
 
     if learnable_rows:
-        write_parquet(references_dir / "learnable_moves.parquet", learnable_rows, partition_cols=["game_version"])
         write_parquet(
             references_dir / "pokemon_learnable_moves.parquet",
             learnable_rows,
