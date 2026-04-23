@@ -37,6 +37,21 @@ def build_input_signature(inputs: dict[str, Any]) -> str:
     return hashlib.sha256(_stable_json(inputs).encode("utf-8")).hexdigest()
 
 
+def fingerprint_python_files(paths: list[Path]) -> str:
+    hasher = hashlib.sha256()
+    for base in paths:
+        if base.is_file() and base.suffix == ".py":
+            hasher.update(base.as_posix().encode("utf-8"))
+            hasher.update(base.read_bytes())
+            continue
+        if not base.exists() or not base.is_dir():
+            continue
+        for file_path in sorted(p for p in base.rglob("*.py") if p.is_file()):
+            hasher.update(file_path.relative_to(base).as_posix().encode("utf-8"))
+            hasher.update(file_path.read_bytes())
+    return hasher.hexdigest()
+
+
 def load_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return {}

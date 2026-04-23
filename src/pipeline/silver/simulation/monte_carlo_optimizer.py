@@ -1,8 +1,8 @@
-"""Run Monte Carlo resampling over simulated matchup win probabilities."""
+"""Summarize simulated matchup win probabilities with analytic uncertainty bounds."""
 
 from __future__ import annotations
 
-import random
+import math
 from pathlib import Path
 
 from src.pipeline.common.io import read_parquet, write_parquet
@@ -42,40 +42,42 @@ def run_monte_carlo_team_optimizer(
         raise ValueError(f"team_battle_simulations.parquet missing required columns: {sorted(missing)}")
 
     result_df = simulations_df.copy()
-    rng = random.Random(int(rng_seed))
-
-    mc_win_rates: list[float] = []
     wins_list: list[int] = []
     losses_list: list[int] = []
     ci_low: list[float] = []
     ci_high: list[float] = []
+    empirical_rates: list[float] = []
+
+    def _wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+        if trials <= 0:
+            return 0.0, 0.0
+        p_hat = successes / trials
+        denom = 1 + (z * z / trials)
+        center = (p_hat + (z * z) / (2 * trials)) / denom
+        margin = (z / denom) * math.sqrt((p_hat * (1 - p_hat) / trials) + ((z * z) / (4 * trials * trials)))
+        return max(0.0, center - margin), min(1.0, center + margin)
 
     for _, row in result_df.iterrows():
         p = float(row.get("predicted_player_win_chance", 0.0) or 0.0)
         p = max(0.0, min(1.0, p))
         battle_trials = max(1, int(row.get("n_trials", 1) or 1))
-        draws: list[float] = []
-        for _ in range(max(1, int(n_trials))):
-            wins = sum(1 for _ in range(battle_trials) if rng.random() <= p)
-            draws.append(wins / battle_trials)
-        draws.sort()
-        mean_rate = sum(draws) / len(draws)
-        wins_mc = int(round(mean_rate * battle_trials))
-        wins_list.append(wins_mc)
-        losses_list.append(battle_trials - wins_mc)
-        mc_win_rates.append(round(mean_rate, 6))
-        lower_idx = int(0.025 * (len(draws) - 1))
-        upper_idx = int(0.975 * (len(draws) - 1))
-        ci_low.append(round(draws[lower_idx], 6))
-        ci_high.append(round(draws[upper_idx], 6))
+        wins = int(round(p * battle_trials))
+        losses = battle_trials - wins
+        lower, upper = _wilson_interval(wins, battle_trials)
+        wins_list.append(wins)
+        losses_list.append(losses)
+        empirical_rates.append(round(wins / battle_trials, 6))
+        ci_low.append(round(lower, 6))
+        ci_high.append(round(upper, 6))
 
-    result_df["mc_win_rate"] = mc_win_rates
+    result_df["empirical_win_rate"] = empirical_rates
     result_df["wins"] = wins_list
     result_df["losses"] = losses_list
-    result_df["mc_ci95_low"] = ci_low
-    result_df["mc_ci95_high"] = ci_high
+    result_df["win_rate_ci95_low"] = ci_low
+    result_df["win_rate_ci95_high"] = ci_high
     result_df["rng_seed"] = int(rng_seed)
     result_df["mc_resamples"] = int(n_trials)
+    result_df["interval_method"] = "wilson_95"
 
     output_columns = [
         "team_id_attacker",
@@ -88,10 +90,11 @@ def run_monte_carlo_team_optimizer(
         "rng_seed",
         "wins",
         "losses",
-        "mc_win_rate",
-        "mc_ci95_low",
-        "mc_ci95_high",
+        "empirical_win_rate",
+        "win_rate_ci95_low",
+        "win_rate_ci95_high",
         "mc_resamples",
+        "interval_method",
     ]
     records = result_df[output_columns].to_dict(orient="records")
     write_parquet(output_path, records)

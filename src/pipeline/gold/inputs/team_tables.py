@@ -29,22 +29,31 @@ def _validate_columns(frame: pd.DataFrame, required: set[str], name: str) -> Non
 
 def _load_sharded_frames(
     simulation_dir: Path,
-    teams_path: Path | None,
-    team_members_path: Path | None,
-    team_member_moves_path: Path | None,
+    teams_path: Path | list[Path] | None,
+    team_members_path: Path | list[Path] | None,
+    team_member_moves_path: Path | list[Path] | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def _load_frame(path_or_paths: Path | list[Path] | None, glob_pattern: str) -> pd.DataFrame:
+        if isinstance(path_or_paths, list):
+            if not path_or_paths:
+                raise ValueError(f"Strict contract supplied an empty file list for {glob_pattern}")
+            return read_many_parquet(path_or_paths)
+        if isinstance(path_or_paths, Path):
+            return read_parquet(path_or_paths)
+        return read_many_parquet(sorted(simulation_dir.glob(glob_pattern)))
+
     if teams_path is not None:
-        teams_df = read_parquet(teams_path)
+        teams_df = _load_frame(teams_path, "teams_*.parquet")
     else:
         teams_df = read_many_parquet(sorted(simulation_dir.glob("teams_*.parquet")))
 
     if team_members_path is not None:
-        members_df = read_parquet(team_members_path)
+        members_df = _load_frame(team_members_path, "team_members_*.parquet")
     else:
         members_df = read_many_parquet(sorted(simulation_dir.glob("team_members_*.parquet")))
 
     if team_member_moves_path is not None:
-        member_moves_df = read_parquet(team_member_moves_path)
+        member_moves_df = _load_frame(team_member_moves_path, "team_member_moves_*.parquet")
     else:
         member_moves_df = read_many_parquet(sorted(simulation_dir.glob("team_member_moves_*.parquet")))
 
@@ -54,9 +63,9 @@ def _load_sharded_frames(
 def load_reconstructed_teams_from_silver(
     silver_dir: Path = SILVER_DIR,
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,
-    teams_path: Path | None = None,
-    team_members_path: Path | None = None,
-    team_member_moves_path: Path | None = None,
+    teams_path: Path | list[Path] | None = None,
+    team_members_path: Path | list[Path] | None = None,
+    team_member_moves_path: Path | list[Path] | None = None,
 ) -> list[dict[str, Any]]:
     simulation_dir = silver_dir / simulation_dirname
 
