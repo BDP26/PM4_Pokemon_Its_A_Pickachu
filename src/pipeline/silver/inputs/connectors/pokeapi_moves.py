@@ -220,11 +220,23 @@ def bootstrap_move_reference_cache(
             if normalized:
                 required_moves.add(normalized)
 
+    logger.info(
+        "[silver/moves] bootstrap fetching species_count=%s required_move_hints=%s",
+        len(target_pairs),
+        len(required_moves),
+    )
+
     learnable_rows: list[dict[str, Any]] = []
     all_referenced_moves: set[str] = set(required_moves)
 
     for game_version, species_slug in sorted(target_pairs):
         move_levels = _api_learnable_move_levels_for_species(species_slug, game_version)
+        logger.info(
+            "[silver/moves] bootstrap species game_version=%s species=%s move_count=%s",
+            game_version,
+            species_slug,
+            len(move_levels),
+        )
         for move_name, learned_level in sorted(move_levels.items()):
             normalized_move = _normalize_move_name(move_name)
             if not normalized_move:
@@ -256,6 +268,14 @@ def bootstrap_move_reference_cache(
         )
     if move_rows:
         write_parquet(references_dir / "move_reference.parquet", move_rows)
+
+    logger.info(
+        "[silver/moves] bootstrap parquet write summary learnable_rows=%s move_rows=%s learnable_games=%s learnable_species=%s",
+        len(learnable_rows),
+        len(move_rows),
+        len({str(row.get('game_version') or '').strip().lower() for row in learnable_rows if row.get('game_version')}),
+        len({str(row.get('pokemon_species') or '').strip().lower() for row in learnable_rows if row.get('pokemon_species')}),
+    )
 
     _clear_loaded_caches()
 
@@ -359,11 +379,23 @@ def persist_move_reference_cache(
             if normalized:
                 required_moves.add(normalized)
 
+    logger.info(
+        "[silver/moves] persist loading species_count=%s required_move_hints=%s",
+        len(target_pairs),
+        len(required_moves),
+    )
+
     learnable_rows: list[dict[str, Any]] = []
     all_referenced_moves: set[str] = set(required_moves)
 
     for game_version, species_slug in sorted(target_pairs):
         move_levels = _LEARNABLE_BY_GAME_SPECIES.get((game_version, species_slug), {})
+        logger.info(
+            "[silver/moves] persist species game_version=%s species=%s move_count=%s",
+            game_version,
+            species_slug,
+            len(move_levels),
+        )
         for move_name, learned_level in sorted(move_levels.items()):
             normalized_move = _normalize_move_name(move_name)
             if not normalized_move:
@@ -405,6 +437,14 @@ def persist_move_reference_cache(
         )
     if move_rows:
         write_parquet(references_dir / "move_reference.parquet", move_rows)
+
+    logger.info(
+        "[silver/moves] persist parquet write summary learnable_rows=%s move_rows=%s learnable_games=%s learnable_species=%s",
+        len(learnable_rows),
+        len(move_rows),
+        len({str(row.get('game_version') or '').strip().lower() for row in learnable_rows if row.get('game_version')}),
+        len({str(row.get('pokemon_species') or '').strip().lower() for row in learnable_rows if row.get('pokemon_species')}),
+    )
 
     _clear_loaded_caches()
 
