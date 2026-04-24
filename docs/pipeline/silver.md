@@ -36,10 +36,11 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
    - Encounter methods reference
    - Boss mapping by version
    - Unmapped location diagnostics (detailed, summary, compact)
-8. Extract normalized team and move inputs from Kaggle + PokeAPI:
-   - Team header (`teams`)
-   - Team members (`team_members`)
-   - Team member move slots (`team_member_moves`)
+8. Extract compact team and move-option inputs from Kaggle + references:
+   - Team templates (`source_teams`)
+   - Team members (`source_team_members`)
+   - Ranked move options (`member_move_options`)
+   - Reusable move-option contexts (`pokemon_moveset_options`)
    - Separate move metadata (`move_data` / `move_reference` / `learnable_moves`)
 9. Generate Silver manifest.
 
@@ -52,11 +53,8 @@ Der Manifest enthaelt dafuer:
 - `contracts.gold_strict.required_dataset_keys`
 - `datasets.boss_records.files[]`
 - `datasets.simulation_inputs_teams.file`
-- `datasets.team_members.file`
-- `datasets.team_member_moves.file`
-- `datasets.pokemon_reference.file`
-- `datasets.snapshot_available_pokemon.file`
-- `datasets.encounters.file`
+- `datasets.source_team_members.file`
+- `datasets.member_move_options.file`
 
 Fehlende oder inkonsistente Eintraege fuehren in Gold zu einem sofortigen Laufabbruch (fail-fast).
 
@@ -89,13 +87,14 @@ Normalized reference/fact tables in `data/silver/references/`:
 
 Team tables in `data/silver/simulation/`:
 
-- `simulation/teams.parquet` (combined boss and player teams, lean structure)
-- `simulation/teams.jsonl` (line-delimited view)
-- `simulation/team_members.parquet` (one row per team slot)
-- `simulation/team_member_moves.parquet` (one row per move slot)
+- `simulation/source_teams.parquet` (logical source teams only)
+- `simulation/teams.jsonl` (optional materialized preview)
+- `simulation/source_team_members.parquet` (one row per logical team slot)
+- `simulation/member_move_options.parquet` (one row per legal move option, ranked)
+- `simulation/pokemon_moveset_options.parquet` (reusable per-species/level/game move options)
 - `simulation/move_data.parquet` (detailed move info: power, damage_class per move)
 
-**Team Structure (lean)**:
+**Source Team Structure (compact)**:
 ```json
 {
   "team_id": "KAGGLE_red_brock_0",
@@ -138,6 +137,7 @@ Validate Gold simulation artifacts after a full run:
 - Location mapping quality is measurable via unmapped diagnostics.
 - Kaggle enrichment improves joinability but does not overwrite canonical boss identity keys.
 - Silver keeps a balance between normalized references and per-game snapshots.
-- Silver erzeugt keine vollständigen Moveset-Kombinationen mehr (Verantwortung von Gold).
+- Silver intentionally does not materialize full team/move-set Cartesian variants.
+- Gold/simulation performs bounded deterministic expansion/sampling from compact Silver options.
 - Silver validiert FK/PK-Beziehungen über normalisierte Tabellen und bricht bei Fehlern ab.
 

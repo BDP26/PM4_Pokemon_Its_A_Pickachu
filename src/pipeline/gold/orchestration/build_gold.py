@@ -31,8 +31,8 @@ class GoldContractError(ValueError):
 
 _REQUIRED_MANIFEST_DATASET_FILES = (
     "simulation_inputs_teams",
-    "team_members",
-    "team_member_moves",
+    "source_team_members",
+    "member_move_options",
 )
 _OPTIONAL_MANIFEST_DATASET_FILES = (
     "pokemon_reference",
@@ -41,8 +41,8 @@ _OPTIONAL_MANIFEST_DATASET_FILES = (
 )
 _STRICT_SHARDED_DATASET_KEYS = {
     "simulation_inputs_teams",
-    "team_members",
-    "team_member_moves",
+    "source_team_members",
+    "member_move_options",
 }
 
 
@@ -588,8 +588,8 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
         "gold_dir": gold_dir,
         "required_input_files": {
             "teams": required_files["simulation_inputs_teams"],
-            "team_members": required_files["team_members"],
-            "team_member_moves": required_files["team_member_moves"],
+            "team_members": required_files["source_team_members"],
+            "member_move_options": required_files["member_move_options"],
         },
     }
     run_gold_simulation_from_silver(**simulation_kwargs)

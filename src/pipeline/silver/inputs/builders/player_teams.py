@@ -1,124 +1,47 @@
-"""Player-team generation from progression context and starter choices.
+"""Compact offline player-team generation for Silver.
 
-Final refactor:
-- per-game compatible
-- parquet-first move universe
-- controlled combinatorics
-- no legacy logic
+Silver persists logical team/member/move-option references only.
+Concrete move-set expansion is deferred to Gold/simulation.
 """
+
+from __future__ import annotations
 
 import logging
 import math
 import time
-from itertools import combinations, islice, product
-from typing import Any, Iterable
-
-from tqdm import tqdm
+from itertools import combinations, islice
+from typing import Any
 
 from src.pipeline.silver.config.game_config import (
-    get_starter_family_root,
     get_starter_choices,
     resolve_starter_species_for_level,
 )
 from src.pipeline.silver.config.team_config import (
-    ALLOW_LARGE_TEAM_VARIANTS,
     DEFAULT_CATCH_POOL_SIZE,
-    DEFAULT_MEMBER_COMBO_LIMIT,
     DEFAULT_MEMBER_LEVEL,
-    DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+    DEFAULT_MEMBER_MOVE_OPTION_LIMIT,
     DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
     DEFAULT_SOURCE_TEAM_POOL_SIZE,
     DEFAULT_TEAM_MEMBER_LIMIT,
-    DEFAULT_TEAM_VARIANT_LIMIT,
     MOVESET_WIDTH,
-    PLAYER_TEAM_PROGRESS_LOG_INTERVAL,
-    TEAM_VARIANT_CONFIRMATION_THRESHOLD,
 )
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
-from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id, normalize_key_part
+from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id, normalize_key_part, stable_digest
 
 
 logger = logging.getLogger(__name__)
-
-MAX_CANDIDATE_MOVES_PER_MEMBER = 8
 MAX_SOURCE_TEAM_SIZE = 5
 
 
-def _effective_team_variant_limit(variant_space_size: int) -> int | None:
-    """Resolve effective team-variant cap.
-
-    Returns:
-        int: hard cap on generated variants
-        None: no explicit cap (generate full variant space)
-    """
-    team_limit = DEFAULT_TEAM_VARIANT_LIMIT if DEFAULT_TEAM_VARIANT_LIMIT > 0 else None
-    moveset_limit = (
-        DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM
-        if DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM > 0
-        else None
-    )
-
-    if ALLOW_LARGE_TEAM_VARIANTS:
-        if team_limit is None:
-            return None
-        return max(1, team_limit)
-
-    # Conservative mode: keep both caps active.
-    active_limits = [limit for limit in (team_limit, moveset_limit) if limit is not None]
-    if not active_limits:
-        return max(1, variant_space_size)
-    return max(1, min(active_limits))
-
-
 def _family_root_for_species(species: str) -> str:
-    normalized = species.lower().strip()
-    return get_starter_family_root(normalized)
+    normalized = normalize_key_part(species)
+    if not normalized:
+        return ""
+    return normalized
 
 
-def _dedupe_details_by_family(details: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
-    seen_roots: set[str] = set()
-    result: list[dict[str, Any]] = []
-
-    for item in details:
-        name = item.get("name")
-        if not isinstance(name, str):
-            continue
-        family_root = _family_root_for_species(name)
-        if family_root in seen_roots:
-            continue
-        seen_roots.add(family_root)
-        result.append(item)
-        if len(result) >= limit:
-            break
-
-    return result
-
-
-def _stable_species_signature(species_names: Iterable[str]) -> str:
+def _stable_species_signature(species_names: list[str]) -> str:
     return "|".join(sorted(normalize_key_part(name) for name in species_names if normalize_key_part(name)))
-
-
-def _trim_candidate_moves(raw_moves: list[str], max_moves: int = MAX_CANDIDATE_MOVES_PER_MEMBER) -> list[str]:
-    moves = sorted({str(move).strip().lower() for move in raw_moves if str(move).strip()})
-    return moves[:max_moves]
-
-
-def _member_moveset_variants(raw_moves: list[str]) -> list[list[str]]:
-    moves = _trim_candidate_moves(raw_moves)
-    if not moves:
-        logger.debug("[silver/teams] member has no moves; emitting empty moveset variant")
-        return [[]]
-
-    if len(moves) <= MOVESET_WIDTH:
-        return [moves]
-
-    variants: list[list[str]] = []
-    for combo in combinations(moves, MOVESET_WIDTH):
-        variants.append(list(combo))
-        if len(variants) >= DEFAULT_MEMBER_COMBO_LIMIT:
-            break
-
-    return variants if variants else [moves[:MOVESET_WIDTH]]
 
 
 def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, int, int]]:
@@ -140,31 +63,10 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
                 species = normalize_key_part(encounter.get("species"))
                 if not species:
                     continue
-                level_max = _safe_int(encounter.get("level_max"))
-                chance_max = _safe_int(encounter.get("encounter_chance_max"))
-                capture_rate = _safe_int(encounter.get("capture_rate"))
-                slot = by_species.setdefault(
-                    species,
-                    {"level_max": 0, "chance_max": 0, "capture_rate": 0},
-                )
-                slot["level_max"] = max(slot["level_max"], level_max)
-                slot["chance_max"] = max(slot["chance_max"], chance_max)
-                slot["capture_rate"] = max(slot["capture_rate"], capture_rate)
-
-    if not by_species:
-        location_to_species = record.get("reachable_location_pokemon", {})
-        if isinstance(location_to_species, dict):
-            for species_list in location_to_species.values():
-                if not isinstance(species_list, list):
-                    continue
-                for species_raw in species_list:
-                    species = normalize_key_part(species_raw)
-                    if not species:
-                        continue
-                    by_species.setdefault(
-                        species,
-                        {"level_max": 0, "chance_max": 0, "capture_rate": 0},
-                    )
+                slot = by_species.setdefault(species, {"level_max": 0, "chance_max": 0, "capture_rate": 0})
+                slot["level_max"] = max(slot["level_max"], _safe_int(encounter.get("level_max")))
+                slot["chance_max"] = max(slot["chance_max"], _safe_int(encounter.get("encounter_chance_max")))
+                slot["capture_rate"] = max(slot["capture_rate"], _safe_int(encounter.get("capture_rate")))
 
     candidates = [
         (species, payload["chance_max"], payload["level_max"], payload["capture_rate"])
@@ -174,13 +76,24 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
     return candidates
 
 
+def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> list[tuple[str, int, int, int]]:
+    seen_roots: set[str] = set()
+    result: list[tuple[str, int, int, int]] = []
+    for species, chance_max, level_max, capture_rate in candidates:
+        root = _family_root_for_species(species)
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        result.append((species, chance_max, level_max, capture_rate))
+    return result
+
+
 def _rank_candidate_pool(
     candidates: list[tuple[str, int, int, int]],
     *,
     boss_level: int,
     pool_size: int,
 ) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
-    """Score + constrain candidate pool instead of truncating by raw source order."""
     if not candidates:
         return [], {"input": 0, "output": 0, "pruned": 0, "family_pruned": 0}
 
@@ -193,7 +106,7 @@ def _rank_candidate_pool(
         level_realism = max(0.0, 1.0 - min(level_gap, 25) / 25.0)
         chance_signal = min(max(float(chance_max), 0.0), 100.0) / 100.0
         capture_signal = min(max(float(capture_rate), 0.0), 255.0) / 255.0
-        score = (0.45 * chance_signal) + (0.25 * capture_signal) + (0.30 * level_realism)
+        score = (0.20 * chance_signal) + (0.15 * capture_signal) + (0.65 * level_realism)
         scored.append((score, (species, chance_max, level_max, capture_rate)))
 
     scored.sort(key=lambda item: (-item[0], -item[1][1], -item[1][2], -item[1][3], item[1][0]))
@@ -209,15 +122,8 @@ def _rank_candidate_pool(
     return constrained, diagnostics
 
 
-def build_boss_progression_pools(
-    progression_records: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Build cumulative boss pools with incremental deltas.
-
-    Pool growth is keyed by game and derived from newly-reachable locations only,
-    so downstream team generation avoids recomputing full encounter universes
-    for every boss.
-    """
+def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build cumulative boss pools with incremental deltas."""
     pools: list[dict[str, Any]] = []
     seen_locations_by_game: dict[str, set[str]] = {}
     cumulative_candidates_by_game: dict[str, dict[str, tuple[str, int, int, int]]] = {}
@@ -269,8 +175,10 @@ def build_boss_progression_pools(
             cumulative_candidates.values(),
             key=lambda item: (-item[1], -item[2], -item[3], item[0]),
         )
+
         pools.append(
             {
+                "progression_pool_id": f"pool:{game_version}:{stable_digest(game_version, boss_name, record.get('part'))}",
                 "game_version": game_version,
                 "boss_name": boss_name,
                 "part": normalize_key_part(record.get("part")),
@@ -278,38 +186,18 @@ def build_boss_progression_pools(
                 "pool_species_count": len(pool_candidates),
                 "delta_location_count": len(delta_locations),
                 "delta_species_count": delta_species_count,
+                "pool_delta_added": [species for species, _, _, _ in pool_candidates][-delta_species_count:] if delta_species_count else [],
             }
         )
 
-        logger.info(
-            "[silver/teams] boss progression pool game=%s boss=%s species_pool=%s delta_locations=%s delta_species=%s",
-            game_version,
-            boss_name,
-            len(pool_candidates),
-            len(delta_locations),
-            delta_species_count,
-        )
-
     return pools
-
-
-def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> list[tuple[str, int, int, int]]:
-    seen_roots: set[str] = set()
-    result: list[tuple[str, int, int, int]] = []
-    for species, chance_max, level_max, capture_rate in candidates:
-        root = _family_root_for_species(species)
-        if root in seen_roots:
-            continue
-        seen_roots.add(root)
-        result.append((species, chance_max, level_max, capture_rate))
-    return result
 
 
 def _base_team_diversity_score(species_combo: tuple[tuple[str, int, int, int], ...]) -> tuple[int, int, int, str]:
     chance_sum = sum(item[1] for item in species_combo)
     level_sum = sum(item[2] for item in species_combo)
     capture_sum = sum(item[3] for item in species_combo)
-    signature = _stable_species_signature(item[0] for item in species_combo)
+    signature = _stable_species_signature([item[0] for item in species_combo])
     return (chance_sum, level_sum, capture_sum, signature)
 
 
@@ -324,187 +212,26 @@ def _generate_diverse_species_combos(
     unique_family_candidates = _dedupe_species_by_family(candidates)
     if len(unique_family_candidates) < team_fill_size:
         unique_family_candidates = candidates
-
     if len(unique_family_candidates) < team_fill_size:
         return []
 
     raw_combos = combinations(unique_family_candidates, team_fill_size)
     scored: list[tuple[tuple[int, int, int, str], list[str]]] = []
-
     for combo in islice(raw_combos, max(combo_limit * 20, combo_limit)):
-        species_list = [item[0] for item in combo]
-        score = _base_team_diversity_score(combo)
-        scored.append((score, species_list))
+        scored.append((_base_team_diversity_score(combo), [item[0] for item in combo]))
 
     scored.sort(key=lambda item: (-item[0][0], -item[0][1], -item[0][2], item[0][3]))
-
-    seen_signatures: set[str] = set()
-    result: list[list[str]] = []
+    seen: set[str] = set()
+    out: list[list[str]] = []
     for _, species_list in scored:
         signature = _stable_species_signature(species_list)
-        if signature in seen_signatures:
+        if signature in seen:
             continue
-        seen_signatures.add(signature)
-        result.append(species_list)
-        if len(result) >= combo_limit:
+        seen.add(signature)
+        out.append(species_list)
+        if len(out) >= combo_limit:
             break
-
-    return result
-
-
-def _build_starter_variant(
-    base_team: dict[str, Any],
-    starter_base: str,
-    reference_context: MoveReferenceContext,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    version = str(base_team.get("game_version", "unknown"))
-    avg_level = int(base_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
-    starter_species = resolve_starter_species_for_level(starter_base.lower().strip(), avg_level)
-
-    starter_member = reference_context.build_member_detail(
-        name=starter_species,
-        level=avg_level,
-        moves=[],
-        game_version=version,
-        origin="starter",
-    )
-
-    team_details: list[dict[str, Any]] = []
-    if starter_member is not None:
-        team_details.append(starter_member)
-
-    base_details = base_team.get("pokemon", [])
-    base_moves = base_team.get("moves", [])
-    base_levels = base_team.get("levels", [])
-
-    if isinstance(base_details, list) and isinstance(base_moves, list):
-        for idx, item in enumerate(base_details):
-            if isinstance(item, dict):
-                name = item.get("name")
-                level = int(item.get("level") or avg_level)
-            else:
-                name = item
-                level = int(base_levels[idx] or avg_level) if isinstance(base_levels, list) and idx < len(base_levels) else avg_level
-
-            if not isinstance(name, str):
-                continue
-
-            moves = base_moves[idx] if idx < len(base_moves) else []
-            member_detail = reference_context.build_member_detail(
-                name=name,
-                level=level,
-                moves=list(moves) if isinstance(moves, list) else [],
-                game_version=version,
-                origin="progression",
-            )
-            if member_detail is not None:
-                team_details.append(member_detail)
-
-    team_details = _dedupe_details_by_family(team_details, limit=DEFAULT_TEAM_MEMBER_LIMIT)
-    if not team_details:
-        return [], {}
-
-    per_member_variants = [_member_moveset_variants(list(member.get("moves", []))) for member in team_details]
-
-    variant_space_size = 1
-    for member_variants in per_member_variants:
-        variant_space_size *= len(member_variants)
-
-    effective_team_variant_limit = _effective_team_variant_limit(variant_space_size)
-    effective_limit_label = str(effective_team_variant_limit) if effective_team_variant_limit is not None else "unbounded"
-    if variant_space_size > TEAM_VARIANT_CONFIRMATION_THRESHOLD and not ALLOW_LARGE_TEAM_VARIANTS:
-        logger.warning(
-            "[silver/teams] large starter variant space detected source_team_id=%s game_version=%s starter_base=%s estimated_space=%s threshold=%s applied_limit=%s",
-            base_team.get("team_id"),
-            version,
-            starter_base,
-            variant_space_size,
-            TEAM_VARIANT_CONFIRMATION_THRESHOLD,
-            effective_limit_label,
-        )
-
-    team_variants: list[dict[str, Any]] = []
-    move_storage: dict[str, Any] = {}
-    source_team_id = str(base_team.get("team_id") or "")
-    truncated_for_team_limit = False
-
-    for combo in product(*per_member_variants):
-        if effective_team_variant_limit is not None and len(team_variants) >= effective_team_variant_limit:
-            truncated_for_team_limit = True
-            break
-
-        variant_signature_parts = []
-        for member, moveset in zip(team_details, combo, strict=False):
-            normalized_moves = sorted(set(str(move).strip().lower() for move in moveset if str(move).strip()))
-            variant_signature_parts.append(
-                f"{str(member.get('name') or '').strip().lower()}={'|'.join(normalized_moves)}"
-            )
-        variant_signature = ";".join(variant_signature_parts)
-
-        team_id = make_team_id(
-            "player",
-            version,
-            starter_base,
-            source_team_id=source_team_id,
-            variant=f"{starter_species}:{variant_signature}",
-        )
-
-        team_members: list[dict[str, Any]] = []
-        for slot_index, (member, selected_moves) in enumerate(zip(team_details, combo, strict=False), start=1):
-            member_name = str(member.get("name") or "").strip().lower()
-            member_level = int(member.get("level") or avg_level)
-            instance_id = make_pokemon_instance_id(team_id, slot_index, member_name)
-            team_members.append(
-                {
-                    "name": member_name,
-                    "level": member_level,
-                    "moves": list(selected_moves),
-                    "origin": member.get("origin"),
-                    "pokemon_instance_id": instance_id,
-                }
-            )
-            member_moves = reference_context.build_member_moves(
-                name=member_name,
-                level=member_level,
-                moves=list(selected_moves),
-                game_version=version,
-            )
-            if member_moves is not None:
-                member_moves["pokemon_instance_id"] = instance_id
-                member_moves["team_id"] = team_id
-                member_moves["slot_index"] = slot_index
-                move_storage[instance_id] = member_moves
-
-        levels = [int(member.get("level") or avg_level) for member in team_members]
-        team_avg_level = int(sum(levels) / len(levels)) if levels else avg_level
-        team_variants.append(
-            {
-                "team_id": team_id,
-                "boss_name": None,
-                "gym": base_team.get("gym"),
-                "game_version": version,
-                "pokemon": [member["name"] for member in team_members],
-                "levels": levels,
-                "moves": [member.get("moves", []) for member in team_members],
-                "pokemon_instance_ids": [str(member.get("pokemon_instance_id") or "") for member in team_members],
-                "avg_level": team_avg_level,
-                "starter_base": starter_base,
-                "starter_evolved_species": starter_species,
-                "source_team_id": base_team.get("team_id"),
-                "team_role": "player",
-                "is_player_candidate": True,
-            }
-        )
-
-    logger.debug(
-        "[silver/teams] built starter variants source_team_id=%s game_version=%s starter_base=%s team_variants=%s move_records=%s",
-        base_team.get("team_id"),
-        version,
-        starter_base,
-        len(team_variants),
-        len(move_storage),
-    )
-    return team_variants, move_storage
+    return out
 
 
 def _boss_level_lookup(boss_teams: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
@@ -514,11 +241,7 @@ def _boss_level_lookup(boss_teams: list[dict[str, Any]]) -> dict[tuple[str, str]
         boss_name = normalize_key_part(team.get("boss_name"))
         if not game_version or not boss_name:
             continue
-        try:
-            level = int(team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
-        except (TypeError, ValueError):
-            level = DEFAULT_MEMBER_LEVEL
-        lookup[(game_version, boss_name)] = level
+        lookup[(game_version, boss_name)] = int(team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
     return lookup
 
 
@@ -533,45 +256,27 @@ def build_progression_source_teams(
 
     team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
     candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
-    total_pruned_combos = 0
-    total_pruned_candidates = 0
-    total_family_pruned_candidates = 0
 
     for pool in progression_pools:
         game_version = pool["game_version"]
         boss_name = pool["boss_name"]
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
-        candidates = list(pool["pool_candidates"])
-        if not candidates:
-            continue
-
-        candidate_pool, pool_diagnostics = _rank_candidate_pool(
-            candidates,
+        candidate_pool, _ = _rank_candidate_pool(
+            list(pool["pool_candidates"]),
             boss_level=boss_level,
             pool_size=candidate_pool_size,
         )
-        total_pruned_candidates += pool_diagnostics["pruned"]
-        total_family_pruned_candidates += pool_diagnostics["family_pruned"]
         species_combos = _generate_diverse_species_combos(
             candidates=candidate_pool,
             team_fill_size=team_fill_size,
             combo_limit=DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
         )
-
         if not species_combos:
-            fallback_species = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
-            if not fallback_species:
-                continue
-            species_combos = [fallback_species]
+            fallback = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
+            if fallback:
+                species_combos = [fallback]
 
-        theoretical_combo_count = (
-            math.comb(len(candidate_pool), team_fill_size)
-            if len(candidate_pool) >= team_fill_size
-            else 0
-        )
-        total_pruned_combos += max(0, theoretical_combo_count - len(species_combos))
         part = pool.get("part")
-
         for combo_index, selected_species in enumerate(species_combos, start=1):
             source_team_id = make_team_id(
                 "progression",
@@ -583,86 +288,248 @@ def build_progression_source_teams(
                 {
                     "team_id": source_team_id,
                     "game_version": game_version,
+                    "boss_name": boss_name,
                     "gym": str(boss_name).strip() or None,
                     "avg_level": boss_level,
                     "pokemon": selected_species,
                     "levels": [boss_level for _ in selected_species],
-                    "moves": [[] for _ in selected_species],
+                    "progression_pool_id": pool["progression_pool_id"],
+                    "part": part,
                 }
             )
 
     logger.info(
-        "[silver/teams] built progression source teams bosses=%s sources=%s source_team_size=%s candidate_pool_size=%s source_team_combo_limit=%s pruned_combos=%s pruned_candidates=%s family_pruned_candidates=%s",
+        "[silver/teams] built compact progression source teams pools=%s source_teams=%s",
         len(progression_pools),
         len(sources),
-        team_fill_size,
-        candidate_pool_size,
-        DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
-        total_pruned_combos,
-        total_pruned_candidates,
-        total_family_pruned_candidates,
     )
     return sources
+
+
+def build_player_team_compact_tables(
+    progression_source_teams: list[dict[str, Any]],
+    reference_context: MoveReferenceContext,
+) -> dict[str, list[dict[str, Any]]]:
+    started_at = time.perf_counter()
+    source_teams: list[dict[str, Any]] = []
+    source_team_members: list[dict[str, Any]] = []
+    member_move_options: list[dict[str, Any]] = []
+    pokemon_moveset_options: list[dict[str, Any]] = []
+    sampling_plan: list[dict[str, Any]] = []
+
+    moveset_context_seen: set[tuple[str, str, int, str]] = set()
+    moveset_choice_seen: set[tuple[str, str, int, str, str]] = set()
+    estimated_avoided_variants = 0
+
+    for progression_team in progression_source_teams:
+        game_version = normalize_key_part(progression_team.get("game_version"))
+        boss_name = normalize_key_part(progression_team.get("boss_name") or progression_team.get("gym"))
+        avg_level = int(progression_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
+        starters = get_starter_choices(game_version)
+        if not game_version or not starters:
+            continue
+
+        for starter_base in starters:
+            starter_species = resolve_starter_species_for_level(starter_base, avg_level)
+            source_team_id = make_team_id(
+                "player-source",
+                game_version,
+                boss_name,
+                source_team_id=str(progression_team.get("team_id") or ""),
+                variant=f"starter:{starter_base}",
+            )
+            logical_species = [starter_species] + list(progression_team.get("pokemon") or [])
+            levels = [avg_level] + [int(level) for level in list(progression_team.get("levels") or [])]
+            logical_species = logical_species[:DEFAULT_TEAM_MEMBER_LIMIT]
+            levels = levels[: len(logical_species)]
+
+            source_teams.append(
+                {
+                    "source_team_id": source_team_id,
+                    "game_version": game_version,
+                    "team_role": "player_source",
+                    "boss_name": boss_name,
+                    "starter_base": normalize_key_part(starter_base),
+                    "starter_evolved_species": normalize_key_part(starter_species),
+                    "progression_source_team_id": progression_team.get("team_id"),
+                    "progression_pool_id": progression_team.get("progression_pool_id"),
+                    "avg_level": avg_level,
+                    "member_count": len(logical_species),
+                }
+            )
+
+            team_combo_space = 1
+            for slot, species in enumerate(logical_species, start=1):
+                species_norm = normalize_key_part(species)
+                level = int(levels[slot - 1] if slot - 1 < len(levels) else avg_level)
+                member_id = make_pokemon_instance_id(source_team_id, slot, species_norm)
+                source_team_members.append(
+                    {
+                        "team_member_id": member_id,
+                        "source_team_id": source_team_id,
+                        "game_version": game_version,
+                        "boss_name": boss_name,
+                        "slot": slot,
+                        "pokemon_species": species_norm,
+                        "level": level,
+                        "progression_pool_id": progression_team.get("progression_pool_id"),
+                        "is_starter": slot == 1,
+                    }
+                )
+
+                learnable = reference_context.damaging_moves(species_norm, level, game_version)
+                ranked_moves = sorted(learnable)[:DEFAULT_MEMBER_MOVE_OPTION_LIMIT]
+                if len(ranked_moves) >= MOVESET_WIDTH:
+                    team_combo_space *= math.comb(len(ranked_moves), MOVESET_WIDTH)
+                else:
+                    team_combo_space *= max(1, len(ranked_moves))
+
+                context_key = (game_version, species_norm, level, "damaging-level-up-v1")
+                if context_key not in moveset_context_seen:
+                    moveset_context_seen.add(context_key)
+                    pokemon_moveset_options.append(
+                        {
+                            "moveset_context_id": f"ctx:{stable_digest(*context_key, length=20)}",
+                            "game_version": game_version,
+                            "pokemon_species": species_norm,
+                            "level": level,
+                            "move_policy": "damaging-level-up-v1",
+                            "candidate_move_count": len(ranked_moves),
+                        }
+                    )
+
+                for rank, move_name in enumerate(ranked_moves, start=1):
+                    score = float(max(0, DEFAULT_MEMBER_MOVE_OPTION_LIMIT - rank + 1))
+                    member_move_options.append(
+                        {
+                            "team_member_id": member_id,
+                            "source_team_id": source_team_id,
+                            "game_version": game_version,
+                            "slot": slot,
+                            "pokemon_species": species_norm,
+                            "level": level,
+                            "move_name": move_name,
+                            "option_rank": rank,
+                            "option_score": score,
+                            "moveset_context_id": f"ctx:{stable_digest(*context_key, length=20)}",
+                        }
+                    )
+                    global_key = (game_version, species_norm, level, "damaging-level-up-v1", move_name)
+                    if global_key in moveset_choice_seen:
+                        continue
+                    moveset_choice_seen.add(global_key)
+                    pokemon_moveset_options.append(
+                        {
+                            "moveset_context_id": f"ctx:{stable_digest(*context_key, length=20)}",
+                            "game_version": game_version,
+                            "pokemon_species": species_norm,
+                            "level": level,
+                            "move_policy": "damaging-level-up-v1",
+                            "move_name": move_name,
+                            "option_rank": rank,
+                            "option_score": score,
+                        }
+                    )
+
+            estimated_avoided_variants += max(0, team_combo_space - 1)
+            sampling_plan.append(
+                {
+                    "source_team_id": source_team_id,
+                    "sampling_seed": stable_digest(source_team_id, "simulation"),
+                    "move_policy": "top_rank_then_seeded_shuffle",
+                    "max_moves_per_member": MOVESET_WIDTH,
+                    "estimated_combo_space": team_combo_space,
+                }
+            )
+
+    logger.info(
+        "[silver/teams] compact tables source_teams=%s source_team_members=%s member_move_options=%s pokemon_moveset_options=%s progression_sources=%s avoided_expansion_estimate=%s elapsed_s=%.2f",
+        len(source_teams),
+        len(source_team_members),
+        len(member_move_options),
+        len(pokemon_moveset_options),
+        len(progression_source_teams),
+        estimated_avoided_variants,
+        time.perf_counter() - started_at,
+    )
+
+    return {
+        "source_teams": source_teams,
+        "source_team_members": source_team_members,
+        "member_move_options": member_move_options,
+        "pokemon_moveset_options": pokemon_moveset_options,
+        "simulation_sampling_plan": sampling_plan,
+    }
 
 
 def build_player_teams_from_progression_context(
     progression_source_teams: list[dict[str, Any]],
     reference_context: MoveReferenceContext | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Compatibility shim: build one deterministic concrete team per compact source team."""
     if reference_context is None:
         raise ValueError("reference_context is required for offline team generation")
-    started_at = time.perf_counter()
-    variants: list[dict[str, Any]] = []
-    all_moves: dict[str, Any] = {}
 
-    skipped_missing_game_version = 0
-    skipped_missing_starters = 0
-    processed_source_teams = 0
-    total_source_teams = len(progression_source_teams)
-    progress_interval = max(1, PLAYER_TEAM_PROGRESS_LOG_INTERVAL)
+    compact = build_player_team_compact_tables(progression_source_teams, reference_context)
+    member_rows = compact["source_team_members"]
+    options_rows = compact["member_move_options"]
 
-    progress_bar = tqdm(
-        progression_source_teams,
-        desc="[silver/teams] generating player teams",
-        unit="source_team",
-    )
-    for team in progress_bar:
-        processed_source_teams += 1
-        game_version = team.get("game_version")
-        if not isinstance(game_version, str):
-            skipped_missing_game_version += 1
-            continue
+    options_by_member: dict[str, list[str]] = {}
+    for row in options_rows:
+        member_id = str(row.get("team_member_id") or "")
+        options_by_member.setdefault(member_id, []).append(str(row.get("move_name") or ""))
 
-        starters = get_starter_choices(game_version)
-        if not starters:
-            skipped_missing_starters += 1
-            continue
+    members_by_team: dict[str, list[dict[str, Any]]] = {}
+    for row in member_rows:
+        members_by_team.setdefault(str(row.get("source_team_id") or ""), []).append(row)
 
-        for starter in starters:
-            team_dicts, move_dict = _build_starter_variant(team, starter, reference_context)
-            variants.extend(team_dicts)
-            all_moves.update(move_dict)
+    teams: list[dict[str, Any]] = []
+    move_data: dict[str, Any] = {}
+    for source in compact["source_teams"]:
+        team_id = str(source.get("source_team_id") or "")
+        members = sorted(members_by_team.get(team_id, []), key=lambda r: int(r.get("slot") or 0))
+        pokemon: list[str] = []
+        levels: list[int] = []
+        moves: list[list[str]] = []
+        ids: list[str] = []
+        for m in members:
+            member_id = str(m.get("team_member_id") or "")
+            species = str(m.get("pokemon_species") or "")
+            level = int(m.get("level") or DEFAULT_MEMBER_LEVEL)
+            candidate_moves = sorted(set(move for move in options_by_member.get(member_id, []) if move))[:MOVESET_WIDTH]
+            pokemon.append(species)
+            levels.append(level)
+            moves.append(candidate_moves)
+            ids.append(member_id)
+            move_data[member_id] = {
+                "pokemon_instance_id": member_id,
+                "team_id": team_id,
+                "species": species,
+                "level": level,
+                "game_version": source.get("game_version"),
+                "provided_moves": [],
+                "learnable_moves": options_by_member.get(member_id, []),
+                "move_details": {},
+                "slot_index": int(m.get("slot") or 0),
+            }
 
-        if processed_source_teams % progress_interval == 0 or processed_source_teams == total_source_teams:
-            progress_bar.set_postfix(
-                {
-                    "player_teams": len(variants),
-                    "move_records": len(all_moves),
-                    "skip_gv": skipped_missing_game_version,
-                    "skip_starters": skipped_missing_starters,
-                },
-                refresh=False,
-            )
+        teams.append(
+            {
+                "team_id": team_id,
+                "boss_name": None,
+                "gym": source.get("boss_name"),
+                "game_version": source.get("game_version"),
+                "pokemon": pokemon,
+                "levels": levels,
+                "moves": moves,
+                "pokemon_instance_ids": ids,
+                "avg_level": source.get("avg_level"),
+                "starter_base": source.get("starter_base"),
+                "starter_evolved_species": source.get("starter_evolved_species"),
+                "source_team_id": source.get("progression_source_team_id"),
+                "team_role": "player",
+                "is_player_candidate": True,
+            }
+        )
 
-    logger.info(
-        "[silver/teams] built player teams from progression source_teams=%s processed=%s player_teams=%s move_records=%s skipped_missing_game_version=%s skipped_missing_starters=%s progress_interval=%s elapsed_s=%.2f",
-        len(progression_source_teams),
-        processed_source_teams,
-        len(variants),
-        len(all_moves),
-        skipped_missing_game_version,
-        skipped_missing_starters,
-        progress_interval,
-        time.perf_counter() - started_at,
-    )
-    return variants, all_moves
+    return teams, move_data

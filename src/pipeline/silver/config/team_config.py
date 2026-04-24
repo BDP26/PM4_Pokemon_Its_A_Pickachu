@@ -49,12 +49,14 @@ FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
 
 GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
-# Moveset combination limits and safety checks.
+# Legacy variant controls (deprecated; expansion now occurs in Gold/simulation).
 DEFAULT_MEMBER_COMBO_LIMIT = _env_int("PM4_MEMBER_COMBO_LIMIT", 10)
-# 0 means "no explicit cap"; effective truncation can still occur due to finite combination space.
 DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
 TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000)
 ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
+
+# Compact Silver move option controls.
+DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 8)
 
 # Species / team diversity controls
 DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 5)
@@ -97,6 +99,7 @@ def resolve_runtime_team_config() -> dict[str, object]:
         "source_team_pool_size": DEFAULT_SOURCE_TEAM_POOL_SIZE,
         "source_team_combo_limit": DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
         "moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+        "member_move_option_limit": DEFAULT_MEMBER_MOVE_OPTION_LIMIT,
         "team_member_limit": DEFAULT_TEAM_MEMBER_LIMIT,
         "member_level": DEFAULT_MEMBER_LEVEL,
         "parser_min_boss_coverage": PARSER_MIN_BOSS_COVERAGE,

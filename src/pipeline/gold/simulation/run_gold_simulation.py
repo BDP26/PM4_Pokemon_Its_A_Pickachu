@@ -71,22 +71,16 @@ def run_gold_simulation_from_silver(
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
 
-    teams_path = required_input_files.get("teams") if required_input_files else (silver_simulation_dir / "teams.parquet")
-    team_members_path = (
-        required_input_files.get("team_members") if required_input_files else (silver_simulation_dir / "team_members.parquet")
-    )
-    team_member_moves_path = (
-        required_input_files.get("team_member_moves")
-        if required_input_files
-        else (silver_simulation_dir / "team_member_moves.parquet")
-    )
+    teams_path = required_input_files.get("teams") if required_input_files else None
+    team_members_path = required_input_files.get("team_members") if required_input_files else None
+    member_move_options_path = required_input_files.get("member_move_options") if required_input_files else None
 
     loader_kwargs: dict[str, Any] = {
         "silver_dir": silver_dir,
         "simulation_dirname": SILVER_SIMULATION_DIRNAME,
         "teams_path": teams_path,
         "team_members_path": team_members_path,
-        "team_member_moves_path": team_member_moves_path,
+        "member_move_options_path": member_move_options_path,
     }
 
     reconstructed_teams = load_reconstructed_teams_from_silver(**loader_kwargs)
