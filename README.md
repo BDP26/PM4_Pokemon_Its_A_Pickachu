@@ -93,11 +93,8 @@ Erforderliche Dataset-Keys fuer Gold:
 
 - `boss_records` (`files[]`)
 - `simulation_inputs_teams` (`file`)
-- `team_members` (`file`)
-- `team_member_moves` (`file`)
-- `pokemon_reference` (`file`)
-- `snapshot_available_pokemon` (`file`)
-- `encounters` (`file`)
+- `source_team_members` (`file`)
+- `member_move_options` (`file`)
 
 Bei fehlenden/ungueltigen Eintraegen bricht Gold sofort mit `GoldContractError` ab (z. B. `[gold.contract] missing_dataset_file ...`).
 
@@ -132,7 +129,9 @@ Hinweise:
 - `data/silver/references/encounters.jsonl`
 - `data/silver/references/pokemon_reference.json`
 - `data/silver/references/encounter_methods_reference.json`
-- `data/silver/simulation/teams.parquet`
+- `data/silver/simulation/source_teams_*.parquet`
+- `data/silver/simulation/source_team_members_*.parquet`
+- `data/silver/simulation/member_move_options_*.parquet`
 - `data/silver/simulation/teams.jsonl`
 - `data/silver/manifest.json`
 

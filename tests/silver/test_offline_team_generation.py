@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -22,10 +23,11 @@ def test_team_generation_modules_do_not_import_connector_runtime() -> None:
     player_module = importlib.import_module("src.pipeline.silver.inputs.builders.player_teams")
     boss_module = importlib.import_module("src.pipeline.silver.inputs.sources.boss_teams")
 
-    assert "_build_member_detail" not in vars(player_module)
-    assert "_build_member_moves" not in vars(player_module)
-    assert "_build_member_detail" not in vars(boss_module)
-    assert "_build_member_moves" not in vars(boss_module)
+    forbidden_import_fragments = ("requests", "pokebase", "pokeapi", "connector")
+    for module in (player_module, boss_module):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for fragment in forbidden_import_fragments:
+            assert f"import {fragment}" not in source
 
 
 def test_candidate_pool_ranking_prefers_level_realism() -> None:
