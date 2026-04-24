@@ -16,7 +16,7 @@ from src.pipeline.common.http import build_session
 from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
-from src.pipeline.silver.config.game_config import get_games_config
+from src.pipeline.silver.config.game_config import get_games_config, get_starter_choices, get_starter_family_members
 from src.pipeline.silver.config.team_config import resolve_runtime_team_config
 from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     enrich_records_with_location_pokemon,
@@ -37,6 +37,7 @@ from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
 )
 from src.pipeline.silver.inputs.kaggle_boss_mapping import load_kaggle_rows_by_game
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
+from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
 from src.pipeline.silver.inputs.reference_context import load_reference_context, normalize_move_name, normalize_species_slug
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
 from src.pipeline.silver.orchestration.stages import run_parse_stage
@@ -437,6 +438,98 @@ def _build_bootstrap_move_entries(
     return deduped_entries
 
 
+def _collect_starter_chain_species_by_game(
+    games_config: list[dict[str, Any]],
+) -> dict[str, set[str]]:
+    starter_species_by_game: dict[str, set[str]] = {}
+    for game in games_config:
+        game_key = str(game.get("game_key") or "").strip().lower()
+        if not game_key:
+            continue
+        species_set = starter_species_by_game.setdefault(game_key, set())
+        for starter in get_starter_choices(game_key):
+            starter_slug = normalize_species_slug(starter)
+            if starter_slug:
+                species_set.add(starter_slug)
+            try:
+                rules = get_species_evolution_rules(starter_slug)
+            except Exception:  # noqa: BLE001
+                rules = {}
+            if rules:
+                for species_name in rules.keys():
+                    species_slug = normalize_species_slug(species_name)
+                    if species_slug:
+                        species_set.add(species_slug)
+            else:
+                for species_name in get_starter_family_members(starter_slug):
+                    species_slug = normalize_species_slug(species_name)
+                    if species_slug:
+                        species_set.add(species_slug)
+    return starter_species_by_game
+
+
+def _starter_chain_bootstrap_entries(
+    starter_chain_species_by_game: dict[str, set[str]],
+) -> list[tuple[str, int, str, list[str]]]:
+    entries: list[tuple[str, int, str, list[str]]] = []
+    for game_version in sorted(starter_chain_species_by_game):
+        for species in sorted(starter_chain_species_by_game[game_version]):
+            entries.append((species, 100, game_version, []))
+    return entries
+
+
+def _dedupe_bootstrap_entries(
+    entries: list[tuple[str, int, str, list[str]]],
+) -> list[tuple[str, int, str, list[str]]]:
+    deduped: list[tuple[str, int, str, list[str]]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for species, level, game_version, moves in entries:
+        key = (normalize_species_slug(species), max(1, int(level)), str(game_version).strip().lower())
+        if not key[0] or not key[2] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append((key[0], key[1], key[2], [normalize_move_name(move) for move in moves if normalize_move_name(move)]))
+    return deduped
+
+
+def _validate_starter_chain_move_coverage(
+    learnable_moves_df: pd.DataFrame,
+    starter_chain_species_by_game: dict[str, set[str]],
+    diagnostics_dir: Path,
+) -> None:
+    observed_pairs = {
+        (
+            str(row.get("game_version") or "").strip().lower(),
+            normalize_species_slug(row.get("pokemon_species") or ""),
+        )
+        for row in learnable_moves_df.to_dict(orient="records")
+        if str(row.get("game_version") or "").strip() and normalize_species_slug(row.get("pokemon_species") or "")
+    }
+
+    missing_rows: list[dict[str, Any]] = []
+    for game_version in sorted(starter_chain_species_by_game):
+        for species in sorted(starter_chain_species_by_game[game_version]):
+            if (game_version, species) not in observed_pairs:
+                missing_rows.append(
+                    {
+                        "species_name": species,
+                        "game_version": game_version,
+                        "reason": "starter_chain_missing_moves",
+                    }
+                )
+
+    diagnostics_path = diagnostics_dir / "starter_chain_move_gaps.csv"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
+
+    if missing_rows:
+        preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_rows[:20])
+        raise ValueError(
+            "Starter-chain move reference validation failed: "
+            f"missing_pairs={len(missing_rows)} first_20=[{preview}] diagnostics={diagnostics_path}"
+        )
+
+
 def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str, Any]]]) -> list[tuple[str, int, str, list[str]]]:
     entries: list[tuple[str, int, str, list[str]]] = []
     for game_key, rows in kaggle_rows_by_game.items():
@@ -725,12 +818,19 @@ def build_silver_from_bronze(
 
     move_reference_path = references_dir / "move_reference.parquet"
     learnable_moves_path = references_dir / "learnable_moves.parquet"
+    starter_chain_species_by_game = _collect_starter_chain_species_by_game(games_config)
+    starter_chain_entries = _starter_chain_bootstrap_entries(starter_chain_species_by_game)
+    base_bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
+    bootstrap_entries = _dedupe_bootstrap_entries(base_bootstrap_entries + starter_chain_entries)
     if not move_reference_path.exists() or not learnable_moves_path.exists():
-        bootstrap_stats = bootstrap_move_reference_cache(_build_bootstrap_move_entries(records_with_game_keys), silver_dir=silver_dir)
+        bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         logger.info("[silver] bootstrap move refs entries=%s", bootstrap_stats.get("entry_count", 0))
     kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(kaggle_rows_by_game)
-    if kaggle_bootstrap_entries:
-        persist_move_reference_cache(kaggle_bootstrap_entries, silver_dir=silver_dir)
+    merged_entries = _dedupe_bootstrap_entries(bootstrap_entries + kaggle_bootstrap_entries)
+    if merged_entries:
+        persist_move_reference_cache(merged_entries, silver_dir=silver_dir)
+    learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
+    _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
 
     reference_context = load_reference_context(silver_dir=silver_dir)
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(bronze_dir, allowed_versions=allowed_versions, reference_context=reference_context)
