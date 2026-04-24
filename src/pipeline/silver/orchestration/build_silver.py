@@ -496,7 +496,7 @@ def _validate_starter_chain_move_coverage(
     learnable_moves_df: pd.DataFrame,
     starter_chain_species_by_game: dict[str, set[str]],
     diagnostics_dir: Path,
-) -> None:
+) -> list[dict[str, Any]]:
     observed_pairs = {
         (
             str(row.get("game_version") or "").strip().lower(),
@@ -522,12 +522,7 @@ def _validate_starter_chain_move_coverage(
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
 
-    if missing_rows:
-        preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_rows[:20])
-        raise ValueError(
-            "Starter-chain move reference validation failed: "
-            f"missing_pairs={len(missing_rows)} first_20=[{preview}] diagnostics={diagnostics_path}"
-        )
+    return missing_rows
 
 
 def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str, Any]]]) -> list[tuple[str, int, str, list[str]]]:
@@ -830,7 +825,30 @@ def build_silver_from_bronze(
     if merged_entries:
         persist_move_reference_cache(merged_entries, silver_dir=silver_dir)
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
-    _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
+    missing_starter_pairs = _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
+    if missing_starter_pairs:
+        logger.info(
+            "[silver/moves] starter coverage gaps detected; refreshing move cache via API missing_pairs=%s",
+            len(missing_starter_pairs),
+        )
+        bootstrap_stats = bootstrap_move_reference_cache(merged_entries, silver_dir=silver_dir)
+        logger.info(
+            "[silver/moves] starter coverage refresh complete entries=%s target_pairs=%s learnable_rows=%s",
+            bootstrap_stats.get("entry_count", 0),
+            bootstrap_stats.get("target_pairs", 0),
+            bootstrap_stats.get("learnable_rows", 0),
+        )
+        persist_move_reference_cache(merged_entries, silver_dir=silver_dir)
+        learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
+        missing_starter_pairs = _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
+
+    if missing_starter_pairs:
+        preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_starter_pairs[:20])
+        diagnostics_path = diagnostics_dir / "starter_chain_move_gaps.csv"
+        raise ValueError(
+            "Starter-chain move reference validation failed: "
+            f"missing_pairs={len(missing_starter_pairs)} first_20=[{preview}] diagnostics={diagnostics_path}"
+        )
 
     reference_context = load_reference_context(silver_dir=silver_dir)
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(bronze_dir, allowed_versions=allowed_versions, reference_context=reference_context)
