@@ -496,17 +496,6 @@ def _build_starter_variant(
             }
         )
 
-    if truncated_for_team_limit:
-        logger.warning(
-            "[silver/teams] starter variant generation truncated source_team_id=%s game_version=%s starter_base=%s generated=%s limit=%s estimated_space=%s",
-            base_team.get("team_id"),
-            version,
-            starter_base,
-            len(team_variants),
-            effective_limit_label,
-            variant_space_size,
-        )
-
     logger.debug(
         "[silver/teams] built starter variants source_team_id=%s game_version=%s starter_base=%s team_variants=%s move_records=%s",
         base_team.get("team_id"),
