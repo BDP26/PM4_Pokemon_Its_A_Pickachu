@@ -139,15 +139,25 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
                     )
                 resolved_files.append(candidate)
             return sorted(set(resolved_files))
-        if dataset_entry.get("file"):
-            _raise_contract_error(
-                "strict_sharded_contract_violation",
-                f"datasets.{dataset_key} must use files[]; directory/file-only entries are not allowed.",
-                dataset=dataset_key,
+        rel_path = dataset_entry.get("file")
+        if isinstance(rel_path, str) and rel_path.strip():
+            path = silver_dir / cast(str, rel_path)
+            if not path.exists():
+                _raise_contract_error(
+                    "missing_dataset_file",
+                    "Regenerate Silver outputs so all strict contract files exist.",
+                    dataset=dataset_key,
+                    path=path,
+                )
+            logger.warning(
+                "[gold.contract] legacy_single_file_contract dataset=%s path=%s action=\"Prefer files[] sharded inputs in silver/manifest.json when rebuilding Silver outputs.\"",
+                dataset_key,
+                path,
             )
+            return path
         _raise_contract_error(
             "missing_dataset_files",
-            f"Set datasets.{dataset_key}.files in silver/manifest.json.",
+            f"Set datasets.{dataset_key}.files (preferred) or datasets.{dataset_key}.file in silver/manifest.json.",
             dataset=dataset_key,
         )
 
