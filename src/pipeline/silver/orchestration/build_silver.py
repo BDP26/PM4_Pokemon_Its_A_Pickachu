@@ -612,23 +612,117 @@ def build_silver_from_bronze(
         del combat_pool_rows
         gc.collect()
 
-    write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data)
-    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
-
-    relational_report = validate_normalized_silver_tables(
-        {
-            "games": pd.DataFrame(games_table),
-            "bosses": pd.DataFrame(bosses_table),
-            "locations": pd.DataFrame(locations_table),
-            "encounters": encounters_frame,
-            "teams": _series_frame(team_metadata_values),
-            "team_members": _series_frame(team_member_values),
-            "team_member_moves": _series_frame(team_member_move_values),
-            "move_reference": move_reference_df,
-            "learnable_moves": learnable_reference_df,
-        }
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=write_validated_move_data start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
     )
-    write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
+    try:
+        write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data)
+    except Exception:
+        logger.exception(
+            "[silver] stage=write_validated_move_data error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=write_validated_move_data done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(all_move_data),
+        total_player_teams,
+        total_team_members,
+    )
+
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=read_move_reference_parquet start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
+    )
+    try:
+        move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    except Exception:
+        logger.exception(
+            "[silver] stage=read_move_reference_parquet error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=read_move_reference_parquet done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(move_reference_df),
+        total_player_teams,
+        total_team_members,
+    )
+
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=validate_normalized_silver_tables start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
+    )
+    try:
+        relational_report = validate_normalized_silver_tables(
+            {
+                "games": pd.DataFrame(games_table),
+                "bosses": pd.DataFrame(bosses_table),
+                "locations": pd.DataFrame(locations_table),
+                "encounters": encounters_frame,
+                "teams": _series_frame(team_metadata_values),
+                "team_members": _series_frame(team_member_values),
+                "team_member_moves": _series_frame(team_member_move_values),
+                "move_reference": move_reference_df,
+                "learnable_moves": learnable_reference_df,
+            }
+        )
+    except Exception:
+        logger.exception(
+            "[silver] stage=validate_normalized_silver_tables error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=validate_normalized_silver_tables done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(relational_report.issues),
+        total_player_teams,
+        total_team_members,
+    )
+
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=write_relational_validation_diagnostics start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
+    )
+    try:
+        write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
+    except Exception:
+        logger.exception(
+            "[silver] stage=write_relational_validation_diagnostics error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=write_relational_validation_diagnostics done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(relational_report.issues),
+        total_player_teams,
+        total_team_members,
+    )
     if not relational_report.is_valid:
         raise ValueError("Silver relational validation failed; see diagnostics/relational_validation.json")
 
@@ -641,21 +735,67 @@ def build_silver_from_bronze(
         time.perf_counter() - teams_started_at,
     )
 
-    create_silver_manifest(silver_dir)
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=create_silver_manifest start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
+    )
+    try:
+        create_silver_manifest(silver_dir)
+    except Exception:
+        logger.exception(
+            "[silver] stage=create_silver_manifest error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=create_silver_manifest done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(records_with_game_keys),
+        total_player_teams,
+        total_team_members,
+    )
 
-    save_state(
-        state_path,
-        {
-            "input_signature": current_signature,
-            "updated_at": time.time(),
-            "games_processed": len(records_with_game_keys),
-            "boss_teams": total_boss_teams,
-            "player_teams": total_player_teams,
-            "move_records": len(all_move_data),
-            "runtime_team_config": runtime_team_config,
-            "runtime_simulation_config": runtime_simulation_config,
-            "pipeline_code_fingerprint": code_fingerprint,
-        },
+    stage_started_at = time.perf_counter()
+    logger.info(
+        "[silver] stage=save_state start total_player_teams=%s total_team_members=%s move_records=%s",
+        total_player_teams,
+        total_team_members,
+        len(all_move_data),
+    )
+    try:
+        save_state(
+            state_path,
+            {
+                "input_signature": current_signature,
+                "updated_at": time.time(),
+                "games_processed": len(records_with_game_keys),
+                "boss_teams": total_boss_teams,
+                "player_teams": total_player_teams,
+                "move_records": len(all_move_data),
+                "runtime_team_config": runtime_team_config,
+                "runtime_simulation_config": runtime_simulation_config,
+                "pipeline_code_fingerprint": code_fingerprint,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "[silver] stage=save_state error total_player_teams=%s total_team_members=%s move_records=%s",
+            total_player_teams,
+            total_team_members,
+            len(all_move_data),
+        )
+        raise
+    logger.info(
+        "[silver] stage=save_state done elapsed_s=%.2f rows=%s total_player_teams=%s total_team_members=%s",
+        time.perf_counter() - stage_started_at,
+        len(records_with_game_keys),
+        total_player_teams,
+        total_team_members,
     )
 
     logger.info(
