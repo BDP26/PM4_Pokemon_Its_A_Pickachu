@@ -352,6 +352,7 @@ def build_silver_from_bronze(
         mappings_dir / "location_to_pokemon_map.json",
         mappings_dir / "boss_mapping_by_version.json",
         references_dir / "pokemon_reference.parquet",
+        references_dir / "pokemon_data.parquet",
         references_dir / "encounter_methods_reference.json",
         references_dir / "games.parquet",
         references_dir / "bosses.parquet",
@@ -452,7 +453,14 @@ def build_silver_from_bronze(
 
     team_values: dict[str, set[str]] = {"team_id": set(), "game_version": set()}
     member_values: dict[str, set[str]] = {"team_member_id": set(), "team_id": set(), "game_version": set()}
-    move_values: dict[str, set[str]] = {"team_member_id": set(), "team_id": set()}
+    move_values: dict[str, set[str]] = {
+        "team_member_id": set(),
+        "team_id": set(),
+        "move_1": set(),
+        "move_2": set(),
+        "move_3": set(),
+        "move_4": set(),
+    }
 
     total_source_teams = 0
     total_members = 0
@@ -517,6 +525,12 @@ def build_silver_from_bronze(
             for row in member_moveset_combo_rows
             if str(row.get("team_id") or "").strip()
         )
+        for move_col in ("move_1", "move_2", "move_3", "move_4"):
+            move_values[move_col].update(
+                str(row.get(move_col) or "").strip().lower()
+                for row in member_moveset_combo_rows
+                if str(row.get(move_col) or "").strip()
+            )
 
         total_source_teams += len(source_teams_rows)
         total_members += len(source_member_rows)
@@ -538,6 +552,7 @@ def build_silver_from_bronze(
 
     move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
+    pokemon_data_df = read_parquet(references_dir / "pokemon_data.parquet") if (references_dir / "pokemon_data.parquet").exists() else pd.DataFrame()
 
     relational_report = validate_normalized_silver_tables(
         {
@@ -550,6 +565,7 @@ def build_silver_from_bronze(
             "team_member_moves": _validation_profile(move_values, total_moveset_combos),
             "move_reference": move_reference_df,
             "learnable_moves": learnable_reference_df,
+            "pokemon_data": pokemon_data_df,
         }
     )
     write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())

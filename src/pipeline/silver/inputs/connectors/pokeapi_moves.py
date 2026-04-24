@@ -17,9 +17,8 @@ from src.pipeline.silver.config.team_config import (
     FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
     GENERIC_FORM_SUFFIXES,
-    SPECIES_SLUG_ALIASES,
 )
-from src.pipeline.silver.inputs.reference_context import load_move_reference_tables
+from src.pipeline.silver.inputs.reference_context import load_move_reference_tables, normalize_move_name, normalize_species_slug
 from src.pipeline.settings import SILVER_DIR
 
 
@@ -37,21 +36,6 @@ def _normalize_learned_level(raw_level: Any) -> int:
     except (TypeError, ValueError):
         level = 0
     return level if level > 0 else 1
-
-
-def _normalize_species_slug(species: str) -> str:
-    normalized = str(species).strip().lower().replace(".", " ").replace("_", " ")
-    normalized = " ".join(normalized.split())
-    if normalized in SPECIES_SLUG_ALIASES:
-        return SPECIES_SLUG_ALIASES[normalized]
-    return normalized.replace("'", "").replace(" ", "-")
-
-
-def _normalize_move_name(move: Any) -> str:
-    normalized = str(move).strip().lower().replace(".", " ").replace("_", " ")
-    normalized = " ".join(normalized.split())
-    normalized = normalized.replace("'", "")
-    return normalized.replace(" ", "-")
 
 
 def _species_lookup_candidates(species_slug: str) -> list[str]:
@@ -112,7 +96,7 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
 
 
 def _api_move_profile(move_name: str) -> dict[str, Any]:
-    normalized = _normalize_move_name(move_name)
+    normalized = normalize_move_name(move_name)
     try:
         move = pb.move(normalized)
         return {
@@ -135,7 +119,7 @@ def _api_move_profile(move_name: str) -> dict[str, Any]:
 
 
 def _api_learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
-    species_slug = _normalize_species_slug(species)
+    species_slug = normalize_species_slug(species)
     version_group = GAME_TO_VERSION_GROUP.get(game_version, game_version)
 
     resolved_poke = None
@@ -151,7 +135,7 @@ def _api_learnable_move_levels_for_species(species: str, game_version: str) -> d
 
     discovered: dict[str, int] = {}
     for move_slot in getattr(resolved_poke, "moves", []):
-        move_name = _normalize_move_name(getattr(getattr(move_slot, "move", None), "name", "") or "")
+        move_name = normalize_move_name(getattr(getattr(move_slot, "move", None), "name", "") or "")
         if not move_name:
             continue
         for detail in getattr(move_slot, "version_group_details", []):
@@ -180,12 +164,12 @@ def bootstrap_move_reference_cache(
 
     for species, _, game_version, provided_moves in entries:
         game_version_norm = str(game_version).strip().lower()
-        species_slug = _normalize_species_slug(species)
+        species_slug = normalize_species_slug(species)
         if not game_version_norm or not species_slug:
             continue
         target_pairs.add((game_version_norm, species_slug))
         for move_name in provided_moves:
-            normalized = _normalize_move_name(move_name)
+            normalized = normalize_move_name(move_name)
             if normalized:
                 required_moves.add(normalized)
 
@@ -207,7 +191,7 @@ def bootstrap_move_reference_cache(
             len(move_levels),
         )
         for move_name, learned_level in sorted(move_levels.items()):
-            normalized_move = _normalize_move_name(move_name)
+            normalized_move = normalize_move_name(move_name)
             if not normalized_move:
                 continue
             all_referenced_moves.add(normalized_move)
@@ -257,7 +241,7 @@ def bootstrap_move_reference_cache(
 
 def _move_profile(move_name: str, silver_dir: Path = SILVER_DIR) -> dict[str, Any]:
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
-    normalized = _normalize_move_name(move_name)
+    normalized = normalize_move_name(move_name)
     payload = _MOVE_PROFILE_CACHE.get(normalized)
     if payload is None:
         return {
@@ -273,13 +257,13 @@ def _move_profile(move_name: str, silver_dir: Path = SILVER_DIR) -> dict[str, An
 
 def _is_known_move(move_name: str, silver_dir: Path = SILVER_DIR) -> bool:
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
-    return _normalize_move_name(move_name) in _MOVE_PROFILE_CACHE
+    return normalize_move_name(move_name) in _MOVE_PROFILE_CACHE
 
 
 def _learnable_move_levels_for_species(species: str, game_version: str, silver_dir: Path = SILVER_DIR) -> dict[str, int]:
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
 
-    species_slug = _normalize_species_slug(species)
+    species_slug = normalize_species_slug(species)
     game_version_norm = str(game_version).lower().strip()
 
     exact = _LEARNABLE_BY_GAME_SPECIES.get((game_version_norm, species_slug))
@@ -302,7 +286,7 @@ def _learnable_move_levels_for_species(species: str, game_version: str, silver_d
 def _learnable_moves_for_species(species: str, level: int, game_version: str, silver_dir: Path = SILVER_DIR) -> tuple[str, ...]:
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
 
-    species_slug = _normalize_species_slug(species)
+    species_slug = normalize_species_slug(species)
     game_version_norm = str(game_version).lower().strip()
     cache_key = (species_slug, int(level), game_version_norm)
 
@@ -337,13 +321,13 @@ def persist_move_reference_cache(
 
     for species, _, game_version, provided_moves in entries:
         game_version_norm = str(game_version).strip().lower()
-        species_slug = _normalize_species_slug(species)
+        species_slug = normalize_species_slug(species)
         if not game_version_norm or not species_slug:
             continue
         target_pairs.add((game_version_norm, species_slug))
         _learnable_move_levels_for_species(species_slug, game_version_norm, silver_dir=silver_dir)
         for move_name in provided_moves:
-            normalized = _normalize_move_name(move_name)
+            normalized = normalize_move_name(move_name)
             if normalized:
                 required_moves.add(normalized)
 
@@ -365,7 +349,7 @@ def persist_move_reference_cache(
             len(move_levels),
         )
         for move_name, learned_level in sorted(move_levels.items()):
-            normalized_move = _normalize_move_name(move_name)
+            normalized_move = normalize_move_name(move_name)
             if not normalized_move:
                 continue
             all_referenced_moves.add(normalized_move)
@@ -448,7 +432,7 @@ def _build_member_moves(
     game_version: str,
     silver_dir: Path = SILVER_DIR,
 ) -> dict[str, Any] | None:
-    cleaned_moves = [_normalize_move_name(move) for move in moves if str(move).strip()]
+    cleaned_moves = [normalize_move_name(move) for move in moves if str(move).strip()]
     learnable_moves = list(_learnable_moves_for_species(name, level, game_version, silver_dir=silver_dir))
     learnable_move_levels = _learnable_move_levels_for_species(name, game_version, silver_dir=silver_dir)
 
@@ -482,7 +466,7 @@ def _build_member_detail(
     origin: str,
     silver_dir: Path = SILVER_DIR,
 ) -> dict[str, Any] | None:
-    cleaned_moves = [_normalize_move_name(move) for move in moves if str(move).strip()]
+    cleaned_moves = [normalize_move_name(move) for move in moves if str(move).strip()]
 
     if origin == "kaggle":
         return {

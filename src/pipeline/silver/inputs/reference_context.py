@@ -16,19 +16,23 @@ from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP, SPECIE
 from src.pipeline.settings import SILVER_DIR
 
 
+def normalize_key(value: Any) -> str:
+    normalized = str(value).strip().lower().replace(".", " ").replace("_", " ")
+    normalized = " ".join(normalized.split())
+    normalized = normalized.replace("'", "")
+    return normalized.replace(" ", "-")
+
+
 def normalize_species_slug(species: Any) -> str:
     normalized = str(species).strip().lower().replace(".", " ").replace("_", " ")
     normalized = " ".join(normalized.split())
     if normalized in SPECIES_SLUG_ALIASES:
         return SPECIES_SLUG_ALIASES[normalized]
-    return normalized.replace("'", "").replace(" ", "-")
+    return normalize_key(normalized)
 
 
 def normalize_move_name(move: Any) -> str:
-    normalized = str(move).strip().lower().replace(".", " ").replace("_", " ")
-    normalized = " ".join(normalized.split())
-    normalized = normalized.replace("'", "")
-    return normalized.replace(" ", "-")
+    return normalize_key(move)
 
 
 @dataclass(frozen=True)

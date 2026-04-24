@@ -80,6 +80,7 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
     team_member_moves = _profile_from_any(tables.get("team_member_moves"))
     move_reference = _profile_from_any(tables.get("move_reference"))
     learnable_moves = _profile_from_any(tables.get("learnable_moves"))
+    pokemon_data = _profile_from_any(tables.get("pokemon_data"))
 
     if games.row_count == 0:
         _append_issue(issues, level="error", code="EMPTY_GAMES", table="games", detail="games table is empty")
@@ -92,6 +93,7 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
     team_ids = _series_set(teams, "team_id")
     team_member_ids = _series_set(team_members, "team_member_id")
     move_names = _series_set(move_reference, "move_name")
+    pokemon_names = _series_set(pokemon_data, "name") | _series_set(pokemon_data, "pokemon_species")
 
     if bosses.row_count > 0:
         invalid = [v for v in _series_set(bosses, "game_version") if v and v not in game_versions]
@@ -157,6 +159,47 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
             _append_issue(issues, level="error", code="FK_LEARNABLE_GAME", table="learnable_moves", detail="learnable_moves.game_version references unknown games", count=len(invalid_games))
         if invalid_moves:
             _append_issue(issues, level="warning", code="FK_LEARNABLE_MOVE", table="learnable_moves", detail="learnable_moves.move_name missing in move_reference", count=len(invalid_moves))
+
+    if pokemon_data.row_count == 0:
+        _append_issue(issues, level="error", code="EMPTY_POKEMON_DATA", table="pokemon_data", detail="pokemon_data table is empty")
+
+    if pokemon_names:
+        invalid_encounter_species = [v for v in _series_set(encounters, "pokemon") if v and v not in pokemon_names]
+        if invalid_encounter_species:
+            _append_issue(
+                issues,
+                level="error",
+                code="FK_ENCOUNTERS_POKEMON",
+                table="encounters",
+                detail="encounters.pokemon missing in pokemon_data",
+                count=len(invalid_encounter_species),
+            )
+
+        invalid_team_member_species = [v for v in _series_set(team_members, "pokemon_species") if v and v not in pokemon_names]
+        if invalid_team_member_species:
+            _append_issue(
+                issues,
+                level="error",
+                code="FK_TEAM_MEMBERS_POKEMON",
+                table="team_members",
+                detail="team_members.pokemon_species missing in pokemon_data",
+                count=len(invalid_team_member_species),
+            )
+
+    member_moves: set[str] = set()
+    for column in ("move_1", "move_2", "move_3", "move_4"):
+        member_moves |= _series_set(team_member_moves, column)
+    if move_names and member_moves:
+        invalid_member_moves = [v for v in member_moves if v and v not in move_names]
+        if invalid_member_moves:
+            _append_issue(
+                issues,
+                level="error",
+                code="FK_MEMBER_MOVESET_MOVE",
+                table="team_member_moves",
+                detail="member_moveset_combos moves missing in move_reference",
+                count=len(invalid_member_moves),
+            )
 
     is_valid = not any(issue.level == "error" for issue in issues)
     return ValidationReport(is_valid=is_valid, issues=issues)
