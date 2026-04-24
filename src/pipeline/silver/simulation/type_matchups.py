@@ -13,7 +13,7 @@ from typing import Any, TypedDict, cast
 
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
-from src.pipeline.silver.inputs.reference_context import normalize_key
+from src.pipeline.silver.inputs.reference_context import normalize_key, normalize_species_slug
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
@@ -156,6 +156,26 @@ _STRUGGLE_MOVE: MoveProfile = {
     "degraded_data": True,
 }
 
+_POKEMON_REQUIRED_STATS = [
+    "base_hp",
+    "base_attack",
+    "base_defense",
+    "base_special_attack",
+    "base_special_defense",
+    "base_speed",
+]
+
+
+def _safe_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, float) and math.isnan(value):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 
 def _install_reference_profiles(
     pokemon_profiles: dict[str, dict[str, Any]],
@@ -168,16 +188,24 @@ def _install_reference_profiles(
 
 def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
     references_dir = silver_dir / "references"
-    simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     pokemon_profiles: dict[str, dict[str, Any]] = {}
     move_profiles: dict[str, MoveProfile] = {}
+    skipped_species: list[str] = []
 
     pokemon_data_path = references_dir / "pokemon_data.parquet"
     if pokemon_data_path.exists():
         pokemon_data_df = read_parquet(pokemon_data_path)
         for row in pokemon_data_df.to_dict(orient="records"):
-            species = normalize_species_name(str(row.get("name") or row.get("pokemon_species") or ""))
+            species = normalize_species_name(str(row.get("pokemon_species") or row.get("name") or ""))
             if not species:
+                continue
+            has_required = bool(str(row.get("type_1") or "").strip())
+            for stat_column in _POKEMON_REQUIRED_STATS:
+                if _safe_int(row.get(stat_column), -1) <= 0:
+                    has_required = False
+                    break
+            if not has_required:
+                skipped_species.append(species)
                 continue
             pokemon_profiles[species] = {
                 "name": species,
@@ -187,65 +215,44 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
                     if isinstance(value, str) and value.strip()
                 ] or ["Normal"],
                 "stats": {
-                    "hp": int(row.get("base_hp") or 50),
-                    "attack": int(row.get("base_attack") or 50),
-                    "defense": int(row.get("base_defense") or 50),
-                    "sp_attack": int(row.get("base_special_attack") or 50),
-                    "sp_defense": int(row.get("base_special_defense") or 50),
-                    "speed": int(row.get("base_speed") or 50),
+                    "hp": _safe_int(row.get("base_hp"), 50),
+                    "attack": _safe_int(row.get("base_attack"), 50),
+                    "defense": _safe_int(row.get("base_defense"), 50),
+                    "sp_attack": _safe_int(row.get("base_special_attack"), 50),
+                    "sp_defense": _safe_int(row.get("base_special_defense"), 50),
+                    "speed": _safe_int(row.get("base_speed"), 50),
                 },
                 "moves": [],
             }
+    if skipped_species:
+        preview = ",".join(sorted(dict.fromkeys(skipped_species))[:20])
+        logger.warning(
+            "[type_matchups] skipped incomplete pokemon profiles count=%s first_20_species=[%s]",
+            len(skipped_species),
+            preview,
+        )
 
-    move_data_path = simulation_dir / "move_data.parquet"
-    if move_data_path.exists():
-        move_data_df = read_parquet(move_data_path)
-        for row in move_data_df.to_dict(orient="records"):
-            move_details = row.get("move_details")
-            if not isinstance(move_details, dict):
+    move_reference_path = references_dir / "move_reference.parquet"
+    if move_reference_path.exists():
+        move_ref_df = read_parquet(move_reference_path)
+        for row in move_ref_df.to_dict(orient="records"):
+            move_name = _normalize_move_name(str(row.get("move_name") or row.get("name") or ""))
+            if not move_name:
                 continue
-            for key, value in move_details.items():
-                if not isinstance(key, str) or not isinstance(value, dict):
-                    continue
-                move_name = _normalize_move_name(key)
-                if not move_name:
-                    continue
-                accuracy = value.get("accuracy")
-                if isinstance(accuracy, float) and math.isnan(accuracy):
-                    accuracy = None
-                move_profiles[move_name] = {
-                    "name": str(value.get("move_name") or move_name),
-                    "type": str(value.get("type", "Normal")),
-                    "power": int(value.get("power", 0) or 0),
-                    "damage_class": str(value.get("damage_class", "physical")),
-                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
-                    "pp": value.get("pp"),
-                    "level_learned_at": int(value.get("level_learned_at", 0) or 0),
-                    "version_group": str(value.get("version_group", "reference")),
-                    "degraded_data": bool(value.get("degraded_data", False)),
-                }
-    else:
-        move_reference_path = references_dir / "move_reference.parquet"
-        if move_reference_path.exists():
-            move_ref_df = read_parquet(move_reference_path)
-            for row in move_ref_df.to_dict(orient="records"):
-                move_name = _normalize_move_name(str(row.get("move_name") or ""))
-                if not move_name:
-                    continue
-                accuracy = row.get("accuracy")
-                if isinstance(accuracy, float) and math.isnan(accuracy):
-                    accuracy = None
-                move_profiles[move_name] = {
-                    "name": move_name,
-                    "type": str(row.get("type") or "Normal"),
-                    "power": int(row.get("power", 0) or 0),
-                    "damage_class": str(row.get("damage_class") or "physical"),
-                    "accuracy": accuracy if isinstance(accuracy, (int, float)) else None,
-                    "pp": row.get("pp"),
-                    "level_learned_at": 0,
-                    "version_group": "reference",
-                    "degraded_data": False,
-                }
+            accuracy = row.get("accuracy")
+            if isinstance(accuracy, float) and math.isnan(accuracy):
+                accuracy = None
+            move_profiles[move_name] = {
+                "name": move_name,
+                "type": str(row.get("type") or row.get("move_type") or "Normal"),
+                "power": _safe_int(row.get("power"), 0),
+                "damage_class": str(row.get("damage_class") or row.get("category") or "physical"),
+                "accuracy": _safe_int(accuracy, 100) if accuracy is not None else None,
+                "pp": _safe_int(row.get("pp"), 0),
+                "level_learned_at": 0,
+                "version_group": "reference",
+                "degraded_data": False,
+            }
 
     _install_reference_profiles(pokemon_profiles, move_profiles)
     logger.info(
@@ -267,7 +274,7 @@ def _default_stats() -> dict[str, int]:
 
 
 def normalize_species_name(name: str) -> str:
-    return normalize_key(name)
+    return normalize_species_slug(name)
 
 
 def _normalize_move_name(name: str) -> str:

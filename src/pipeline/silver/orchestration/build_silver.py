@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import gc
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, cast
 import pandas as pd
 
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
+from src.pipeline.common.http import build_session
 from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
@@ -52,6 +54,28 @@ from src.pipeline.silver.writers.outputs import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+STAT_NAME_TO_COLUMN = {
+    "hp": "base_hp",
+    "attack": "base_attack",
+    "defense": "base_defense",
+    "special-attack": "base_special_attack",
+    "special-defense": "base_special_defense",
+    "speed": "base_speed",
+}
+
+POKEMON_COMBAT_REQUIRED_COLUMNS = [
+    "pokemon_species",
+    "name",
+    "type_1",
+    "base_hp",
+    "base_attack",
+    "base_defense",
+    "base_special_attack",
+    "base_special_defense",
+    "base_speed",
+]
 
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
@@ -128,44 +152,186 @@ def _collect_kaggle_boss_species_and_moves(boss_teams: list[dict[str, Any]]) -> 
     return species, moves
 
 
-def _ensure_species_in_pokemon_profiles(
-    pokemon_data_df: pd.DataFrame,
-    required_species: set[str],
-) -> pd.DataFrame:
-    if pokemon_data_df.empty:
-        pokemon_data_df = pd.DataFrame(columns=["name", "pokemon_species"])
+def _extract_pokeapi_id_from_source_url(source_url: str) -> int | None:
+    match = re.search(r"/pokemon/(\d+)/?$", str(source_url or "").strip().lower())
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
-    existing_species = {
+
+def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    types_sorted = sorted(
+        (
+            entry for entry in payload.get("types", [])
+            if isinstance(entry, dict)
+        ),
+        key=lambda entry: int(entry.get("slot") or 999),
+    )
+    type_names = [
+        str((entry.get("type") or {}).get("name") or "").strip().lower()
+        for entry in types_sorted
+        if str((entry.get("type") or {}).get("name") or "").strip()
+    ]
+
+    stats_payload = {
+        column: None
+        for column in STAT_NAME_TO_COLUMN.values()
+    }
+    for stat_entry in payload.get("stats", []):
+        if not isinstance(stat_entry, dict):
+            continue
+        stat_name = str((stat_entry.get("stat") or {}).get("name") or "").strip().lower()
+        column_name = STAT_NAME_TO_COLUMN.get(stat_name)
+        if column_name is None:
+            continue
+        try:
+            stats_payload[column_name] = int(stat_entry.get("base_stat"))
+        except (TypeError, ValueError):
+            stats_payload[column_name] = None
+
+    pokeapi_id = payload.get("id")
+    try:
+        pokeapi_id_value = int(pokeapi_id)
+    except (TypeError, ValueError):
+        pokeapi_id_value = None
+
+    species_name = str(((payload.get("species") or {}).get("name")) or payload.get("name") or "").strip().lower()
+    species_slug = normalize_species_slug(species_name)
+    profile_name = str(payload.get("name") or species_slug).strip().lower()
+
+    return {
+        "name": profile_name,
+        "pokemon_species": species_slug or profile_name,
+        "pokeapi_id": pokeapi_id_value,
+        "source_url": f"https://pokeapi.co/api/v2/pokemon/{pokeapi_id_value}/" if pokeapi_id_value is not None else None,
+        "type_1": type_names[0] if type_names else None,
+        "type_2": type_names[1] if len(type_names) > 1 else None,
+        **stats_payload,
+        "height": payload.get("height"),
+        "weight": payload.get("weight"),
+        "base_experience": payload.get("base_experience"),
+        "is_default": payload.get("is_default"),
+    }
+
+
+def _build_enriched_pokemon_profiles(
+    all_pokemon_references: dict[str, Any],
+    required_species: set[str],
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    session = build_session()
+    profiles_by_species: dict[str, dict[str, Any]] = {}
+    diagnostics: list[dict[str, Any]] = []
+
+    for species in sorted(required_species):
+        if not species:
+            continue
+        payload = all_pokemon_references.get(species, {}) if isinstance(all_pokemon_references.get(species), dict) else {}
+        source_url = str(payload.get("url") or payload.get("source_url") or "").strip()
+        reference_name = str(payload.get("name") or species).strip().lower()
+        candidates: list[str] = []
+        if source_url:
+            candidates.append(source_url)
+        pokeapi_id = _extract_pokeapi_id_from_source_url(source_url)
+        if pokeapi_id is not None:
+            candidates.append(f"https://pokeapi.co/api/v2/pokemon/{pokeapi_id}/")
+        candidates.append(f"https://pokeapi.co/api/v2/pokemon/{species}/")
+        if reference_name and reference_name != species:
+            candidates.append(f"https://pokeapi.co/api/v2/pokemon/{reference_name}/")
+
+        fetch_error = "missing candidate lookup url"
+        response_payload: dict[str, Any] | None = None
+        for url in dict.fromkeys(candidates):
+            if not url:
+                continue
+            try:
+                response = session.get(url, timeout=30)
+            except Exception as exc:  # noqa: BLE001
+                fetch_error = f"{type(exc).__name__}: {exc}"
+                continue
+            if response.status_code >= 400:
+                fetch_error = f"http_{response.status_code}"
+                continue
+            try:
+                response_payload = cast(dict[str, Any], response.json())
+                break
+            except Exception as exc:  # noqa: BLE001
+                fetch_error = f"json_decode_error: {exc}"
+
+        if response_payload is None:
+            diagnostics.append(
+                {
+                    "pokemon_species": species,
+                    "name": reference_name or species,
+                    "source_url": source_url or None,
+                    "error": fetch_error,
+                }
+            )
+            continue
+
+        profile = _profile_from_pokemon_payload(response_payload)
+        species_key = normalize_species_slug(profile.get("pokemon_species") or profile.get("name") or species)
+        if not species_key:
+            diagnostics.append(
+                {
+                    "pokemon_species": species,
+                    "name": reference_name or species,
+                    "source_url": source_url or None,
+                    "error": "empty_species_after_normalization",
+                }
+            )
+            continue
+        profiles_by_species[species_key] = profile
+
+    return pd.DataFrame(list(profiles_by_species.values())), diagnostics
+
+
+def _validate_and_persist_pokemon_data_contract(
+    pokemon_data_df: pd.DataFrame,
+    diagnostics_dir: Path,
+    required_species: set[str],
+) -> None:
+    present_species = {
         normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
         for row in pokemon_data_df.to_dict(orient="records")
+        if normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
     }
-    missing_species = sorted(species for species in required_species if species and species not in existing_species)
-    if not missing_species:
-        return pokemon_data_df
+    missing_species = sorted(species for species in required_species if species and species not in present_species)
+    if missing_species:
+        missing_frame = pd.DataFrame([{"pokemon_species": species, "error": "missing_profile"} for species in missing_species])
+        pokemon_data_df = pd.concat([pokemon_data_df, missing_frame], ignore_index=True)
 
-    add_rows: list[dict[str, Any]] = []
-    for species in missing_species:
-        add_rows.append(
-            {
-                "name": species,
-                "pokemon_species": species,
-                "pokeapi_id": None,
-                "source_url": None,
-                "type_1": "normal",
-                "type_2": None,
-                "base_hp": 50,
-                "base_attack": 50,
-                "base_defense": 50,
-                "base_special_attack": 50,
-                "base_special_defense": 50,
-                "base_speed": 50,
-                "height": None,
-                "weight": None,
-                "base_experience": None,
-                "is_default": None,
-            }
-        )
-    return pd.concat([pokemon_data_df, pd.DataFrame(add_rows)], ignore_index=True)
+    incomplete_mask = pd.Series(False, index=pokemon_data_df.index)
+    for column in POKEMON_COMBAT_REQUIRED_COLUMNS:
+        if column not in pokemon_data_df.columns:
+            incomplete_mask = pd.Series(True, index=pokemon_data_df.index)
+            continue
+        incomplete_mask = incomplete_mask | pokemon_data_df[column].isna()
+        if pd.api.types.is_object_dtype(pokemon_data_df[column]) or pd.api.types.is_string_dtype(pokemon_data_df[column]):
+            stripped = pokemon_data_df[column].astype("string").str.strip()
+            incomplete_mask = incomplete_mask | stripped.eq("")
+
+    incomplete_rows = pokemon_data_df[incomplete_mask].copy()
+    diagnostics_path = diagnostics_dir / "incomplete_pokemon_profiles.csv"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    incomplete_rows.to_csv(diagnostics_path, index=False)
+
+    if incomplete_rows.empty:
+        return
+
+    impacted_species = [
+        normalize_species_slug(value)
+        for value in incomplete_rows.get("pokemon_species", pd.Series([], dtype="object")).fillna("")
+        if normalize_species_slug(value)
+    ]
+    preview = ",".join(sorted(dict.fromkeys(impacted_species))[:20])
+    raise ValueError(
+        "Silver pokemon_data contract violation: "
+        f"incomplete_rows={len(incomplete_rows)} first_20_species=[{preview}] "
+        f"diagnostics={diagnostics_path}"
+    )
 
 
 def _move_profiles_from_reference(move_reference_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
@@ -712,8 +878,10 @@ def build_silver_from_bronze(
     )
 
     pokemon_data_path = references_dir / "pokemon_data.parquet"
-    pokemon_data_df = read_parquet(pokemon_data_path) if pokemon_data_path.exists() else pd.DataFrame()
-    pokemon_data_df = _ensure_species_in_pokemon_profiles(pokemon_data_df, total_required_species)
+    pokemon_data_df, pokemon_diagnostics = _build_enriched_pokemon_profiles(all_pokemon_references, total_required_species)
+    if pokemon_diagnostics:
+        write_parquet(diagnostics_dir / "pokemon_profile_fetch_errors.parquet", pokemon_diagnostics)
+    _validate_and_persist_pokemon_data_contract(pokemon_data_df, diagnostics_dir, total_required_species)
     write_parquet(pokemon_data_path, pokemon_data_df)
 
     all_move_data = _ensure_moves_in_combat_profiles(all_move_data, total_required_moves, move_reference_profiles)

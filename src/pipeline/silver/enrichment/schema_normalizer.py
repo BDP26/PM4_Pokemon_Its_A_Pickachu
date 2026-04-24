@@ -134,16 +134,12 @@ def create_pokemon_reference_index(
     all_pokemon_references: dict[str, dict],
     references_dir: Path,
 ) -> None:
-    """Create centralized pokemon reference parquet (deduped across all games).
-
-    Also emits pokemon_data.parquet for simulation-ready pokemon metadata.
-    """
+    """Create centralized pokemon reference parquet (deduped across all games)."""
     references_dir.mkdir(parents=True, exist_ok=True)
     output_file = references_dir / "pokemon_reference.parquet"
 
     # Deduplicate pokemon references
     unique_rows: list[dict[str, Any]] = []
-    pokemon_data_rows: list[dict[str, Any]] = []
     seen_species: set[str] = set()
     for species, info in all_pokemon_references.items():
         species_norm = str(species or "").strip().lower()
@@ -158,30 +154,8 @@ def create_pokemon_reference_index(
                 "url": str(payload.get("url") or "").strip() or None,
             }
         )
-        stats_payload = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
-        pokemon_data_rows.append(
-            {
-                "name": str(payload.get("name") or species_norm).strip().lower(),
-                "pokemon_species": species_norm,
-                "pokeapi_id": payload.get("pokeapi_id"),
-                "source_url": str(payload.get("url") or "").strip() or None,
-                "type_1": payload.get("type_1"),
-                "type_2": payload.get("type_2"),
-                "base_hp": stats_payload.get("hp"),
-                "base_attack": stats_payload.get("attack"),
-                "base_defense": stats_payload.get("defense"),
-                "base_special_attack": stats_payload.get("sp_attack"),
-                "base_special_defense": stats_payload.get("sp_defense"),
-                "base_speed": stats_payload.get("speed"),
-                "height": payload.get("height"),
-                "weight": payload.get("weight"),
-                "base_experience": payload.get("base_experience"),
-                "is_default": payload.get("is_default"),
-            }
-        )
 
     write_parquet(output_file, pd.DataFrame(unique_rows))
-    write_parquet(references_dir / "pokemon_data.parquet", pd.DataFrame(pokemon_data_rows))
 
 
 def create_encounter_methods_reference(
@@ -233,5 +207,4 @@ def analyze_schema_efficiency(records: list[dict]) -> dict[str, Any]:
         "num_encounters": len(encounters),
         "num_unique_pokemon": len(pokemon_ref),
     }
-
 

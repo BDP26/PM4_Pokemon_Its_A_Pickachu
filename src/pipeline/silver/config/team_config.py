@@ -91,9 +91,13 @@ SPECIES_SLUG_ALIASES: dict[str, str] = {
     "mr mime": "mr-mime",
     "mr. mime": "mr-mime",
     "mime jr": "mime-jr",
+    "mime jr.": "mime-jr",
     "farfetch'd": "farfetchd",
+    "sirfetch'd": "sirfetchd",
     "nidoran f": "nidoran-f",
     "nidoran m": "nidoran-m",
+    "nidoran♀": "nidoran-f",
+    "nidoran♂": "nidoran-m",
 }
 
 

@@ -88,7 +88,7 @@ class MoveReferenceContext:
 
         if origin == "kaggle":
             return {
-                "name": str(name).strip().lower(),
+                "name": normalize_species_slug(name),
                 "level": int(level),
                 "moves": cleaned_moves[:4],
                 "origin": origin,
@@ -110,7 +110,7 @@ class MoveReferenceContext:
                 seen_moves.add(move)
 
         return {
-            "name": str(name).strip().lower(),
+            "name": normalize_species_slug(name),
             "level": int(level),
             "moves": valid_moves,
             "origin": origin,
@@ -137,7 +137,7 @@ class MoveReferenceContext:
                 move_details[move_name] = dict(self.move_profiles[move_name])
 
         return {
-            "species": str(name).strip().lower(),
+            "species": normalize_species_slug(name),
             "level": int(level),
             "game_version": str(game_version).strip().lower(),
             "provided_moves": cleaned_moves,
