@@ -472,7 +472,7 @@ def build_player_team_compact_tables(
             )
 
     logger.info(
-        "[silver/teams] built player teams source_teams=%s candidate_teams=%s members=%s moveset_combos=%s member_move_options=%s progression_sources=%s avoided_full_cartesian_estimate=%s elapsed_s=%.2f",
+        "[silver/teams] built player teams source_teams=%s candidate_teams=%s members=%s moveset_combos=%s member_move_options=%s pokemon_moveset_options=%s progression_sources=%s avoided_full_cartesian_estimate=%s elapsed_s=%.2f",
         len(source_teams),
         len(source_teams),
         len(source_team_members),
