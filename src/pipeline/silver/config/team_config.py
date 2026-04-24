@@ -49,8 +49,14 @@ FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
 
 GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
-# Legacy variant controls (deprecated; expansion now occurs in Gold/simulation).
-DEFAULT_MEMBER_COMBO_LIMIT = _env_int("PM4_MEMBER_COMBO_LIMIT", 10)
+# Silver stores compact logical teams/members and per-member moveset combos only.
+# Full-team expansion/sampling is deferred to Gold/simulation.
+DEFAULT_MEMBER_MOVESET_COMBO_LIMIT = _env_int(
+    "PM4_MEMBER_MOVESET_COMBO_LIMIT",
+    _env_int("PM4_MEMBER_COMBO_LIMIT", 10),
+)
+DEFAULT_MEMBER_COMBO_LIMIT = DEFAULT_MEMBER_MOVESET_COMBO_LIMIT
+# Deprecated in Silver (kept for compatibility until callers migrate).
 DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
 TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000)
 ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
@@ -63,8 +69,10 @@ DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 5)
 DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 12)
 DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 40)
 
-# Moveset expansion per team (VERY important balance lever). 0 disables this safety cap.
+# Deprecated in Silver. Use Gold simulation sampling limits instead.
 DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
+DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT = _env_int("PM4_SIMULATION_TEAM_SAMPLE_LIMIT", 64, minimum=1)
+DEFAULT_SIMULATION_ENUMERATION_THRESHOLD = _env_int("PM4_SIMULATION_ENUMERATION_THRESHOLD", 256, minimum=1)
 
 # Team structure
 # Pokémon battle teams are capped at six members in core games.
@@ -92,6 +100,7 @@ SPECIES_SLUG_ALIASES: dict[str, str] = {
 def resolve_runtime_team_config() -> dict[str, object]:
     return {
         "member_combo_limit": DEFAULT_MEMBER_COMBO_LIMIT,
+        "member_moveset_combo_limit": DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
         "team_variant_limit": DEFAULT_TEAM_VARIANT_LIMIT,
         "team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
         "allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
@@ -99,6 +108,8 @@ def resolve_runtime_team_config() -> dict[str, object]:
         "source_team_pool_size": DEFAULT_SOURCE_TEAM_POOL_SIZE,
         "source_team_combo_limit": DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
         "moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+        "simulation_team_sample_limit": DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT,
+        "simulation_enumeration_threshold": DEFAULT_SIMULATION_ENUMERATION_THRESHOLD,
         "member_move_option_limit": DEFAULT_MEMBER_MOVE_OPTION_LIMIT,
         "team_member_limit": DEFAULT_TEAM_MEMBER_LIMIT,
         "member_level": DEFAULT_MEMBER_LEVEL,

@@ -18,6 +18,12 @@ _REQUIRED_MEMBER_MOVE_OPTION_COLUMNS = {
     "move_name",
     "option_rank",
 }
+_REQUIRED_MEMBER_MOVESET_COMBO_COLUMNS = {
+    "moveset_combo_id",
+    "team_id",
+    "pokemon_instance_id",
+    "slot_index",
+}
 
 
 def _validate_columns(frame: pd.DataFrame, required: set[str], name: str) -> None:
@@ -68,18 +74,22 @@ def load_reconstructed_teams_from_silver(
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,
     teams_path: Path | list[Path] | None = None,
     team_members_path: Path | list[Path] | None = None,
+    member_moveset_combos_path: Path | list[Path] | None = None,
     member_move_options_path: Path | list[Path] | None = None,
 ) -> list[dict[str, Any]]:
     simulation_dir = silver_dir / simulation_dirname
 
     teams_df = _load_frame(teams_path, simulation_dir, "source_teams_*.parquet")
     members_df = _load_frame(team_members_path, simulation_dir, "source_team_members_*.parquet")
+    moveset_combos_df = _load_frame(member_moveset_combos_path, simulation_dir, "member_moveset_combos_*.parquet")
     move_options_df = _load_frame(member_move_options_path, simulation_dir, "member_move_options_*.parquet")
 
     if members_df.empty:
         raise FileNotFoundError("Required source_team_members parquet is missing.")
 
     _validate_columns(members_df, _REQUIRED_MEMBER_COLUMNS, "source_team_members parquet")
+    if not moveset_combos_df.empty:
+        _validate_columns(moveset_combos_df, _REQUIRED_MEMBER_MOVESET_COMBO_COLUMNS, "member_moveset_combos parquet")
     if not move_options_df.empty:
         _validate_columns(move_options_df, _REQUIRED_MEMBER_MOVE_OPTION_COLUMNS, "member_move_options parquet")
 
@@ -91,6 +101,20 @@ def load_reconstructed_teams_from_silver(
                 meta_by_id[team_id] = row
 
     moves_by_member: dict[str, list[str]] = {}
+    combos_by_member: dict[str, list[list[str]]] = {}
+    if not moveset_combos_df.empty:
+        sorted_combos = moveset_combos_df.sort_values(["pokemon_instance_id", "combo_rank", "moveset_combo_id"])
+        for row in sorted_combos.to_dict(orient="records"):
+            member_id = str(row.get("pokemon_instance_id") or "").strip()
+            if not member_id:
+                continue
+            if isinstance(row.get("moves"), list):
+                combo = [str(move).strip().lower() for move in row.get("moves", []) if str(move).strip()]
+            else:
+                combo = [str(row.get(f"move_{idx}")).strip().lower() for idx in range(1, 5) if str(row.get(f"move_{idx}") or "").strip()]
+            if combo:
+                combos_by_member.setdefault(member_id, []).append(combo)
+
     if not move_options_df.empty:
         sorted_options = move_options_df.sort_values(["team_member_id", "option_rank", "move_name"])
         for row in sorted_options.to_dict(orient="records"):
@@ -124,7 +148,12 @@ def load_reconstructed_teams_from_silver(
             member_id = str(member.get("team_member_id") or "").strip()
             pokemon.append(species)
             levels.append(level)
-            moves.append(_select_diverse_moves(list(moves_by_member.get(member_id, [])), width=4))
+            combos = combos_by_member.get(member_id, [])
+            if combos:
+                # Deterministic bounded choice: use top-ranked combo only in base reconstruction.
+                moves.append(list(combos[0])[:4])
+            else:
+                moves.append(_select_diverse_moves(list(moves_by_member.get(member_id, [])), width=4))
             instance_ids.append(member_id)
 
         if not pokemon:

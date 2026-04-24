@@ -94,6 +94,7 @@ def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
     return {
         "source_teams": simulation_dir / f"source_teams_{game_key}.parquet",
         "source_team_members": simulation_dir / f"source_team_members_{game_key}.parquet",
+        "member_moveset_combos": simulation_dir / f"member_moveset_combos_{game_key}.parquet",
         "member_move_options": simulation_dir / f"member_move_options_{game_key}.parquet",
         "pokemon_moveset_options": simulation_dir / f"pokemon_moveset_options_{game_key}.parquet",
         "simulation_sampling_plan": simulation_dir / f"simulation_sampling_plan_{game_key}.parquet",
@@ -363,7 +364,7 @@ def build_silver_from_bronze(
     expected_snapshot_files = [snapshots_dir / f"{game['game_key']}_boss_snapshots.jsonl" for game in games_config]
     expected_team_shards = [simulation_dir / f"source_teams_{game['game_key']}.parquet" for game in games_config]
     expected_member_shards = [simulation_dir / f"source_team_members_{game['game_key']}.parquet" for game in games_config]
-    expected_move_option_shards = [simulation_dir / f"member_move_options_{game['game_key']}.parquet" for game in games_config]
+    expected_move_option_shards = [simulation_dir / f"member_moveset_combos_{game['game_key']}.parquet" for game in games_config]
 
     if previous_state.get("input_signature") == current_signature and all(path.exists() for path in (expected_outputs + expected_snapshot_files + expected_team_shards + expected_member_shards + expected_move_option_shards)):
         logger.info("[silver] incremental skip; input signature unchanged")
@@ -440,6 +441,7 @@ def build_silver_from_bronze(
     for pattern in [
         "source_teams_*.parquet",
         "source_team_members_*.parquet",
+        "member_moveset_combos_*.parquet",
         "member_move_options_*.parquet",
         "pokemon_moveset_options_*.parquet",
         "simulation_sampling_plan_*.parquet",
@@ -454,7 +456,7 @@ def build_silver_from_bronze(
 
     total_source_teams = 0
     total_members = 0
-    total_move_options = 0
+    total_moveset_combos = 0
     total_boss_teams = 0
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -475,11 +477,13 @@ def build_silver_from_bronze(
         ]
         source_member_rows = list(boss_compact["source_team_members"]) + list(player_compact["source_team_members"])
         member_move_rows = list(boss_compact["member_move_options"]) + list(player_compact["member_move_options"])
+        member_moveset_combo_rows = list(player_compact["member_moveset_combos"])
         pokemon_moveset_rows = list(boss_compact["pokemon_moveset_options"]) + list(player_compact["pokemon_moveset_options"])
         sampling_rows = list(player_compact["simulation_sampling_plan"])
 
         write_parquet(paths["source_teams"], source_teams_rows)
         write_parquet(paths["source_team_members"], source_member_rows)
+        write_parquet(paths["member_moveset_combos"], member_moveset_combo_rows)
         write_parquet(paths["member_move_options"], member_move_rows)
         write_parquet(paths["pokemon_moveset_options"], pokemon_moveset_rows)
         write_parquet(paths["simulation_sampling_plan"], sampling_rows)
@@ -503,19 +507,28 @@ def build_silver_from_bronze(
         member_values["team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in source_member_rows if str(row.get("source_team_id") or "").strip())
         member_values["game_version"].update(str(row.get("game_version") or "").strip().lower() for row in source_member_rows if str(row.get("game_version") or "").strip())
 
-        move_values["team_member_id"].update(str(row.get("team_member_id") or "").strip().lower() for row in member_move_rows if str(row.get("team_member_id") or "").strip())
-        move_values["team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in member_move_rows if str(row.get("source_team_id") or "").strip())
+        move_values["team_member_id"].update(
+            str(row.get("pokemon_instance_id") or "").strip().lower()
+            for row in member_moveset_combo_rows
+            if str(row.get("pokemon_instance_id") or "").strip()
+        )
+        move_values["team_id"].update(
+            str(row.get("team_id") or "").strip().lower()
+            for row in member_moveset_combo_rows
+            if str(row.get("team_id") or "").strip()
+        )
 
         total_source_teams += len(source_teams_rows)
         total_members += len(source_member_rows)
-        total_move_options += len(member_move_rows)
+        total_moveset_combos += len(member_moveset_combo_rows)
         total_boss_teams += len(boss_teams_game)
 
         logger.info(
-            "[silver] wrote compact team shards game=%s source_teams=%s members=%s move_options=%s",
+            "[silver] wrote compact team shards game=%s source_teams=%s members=%s moveset_combos=%s move_options=%s",
             game_key,
             len(source_teams_rows),
             len(source_member_rows),
+            len(member_moveset_combo_rows),
             len(member_move_rows),
         )
 
@@ -534,7 +547,7 @@ def build_silver_from_bronze(
             "encounters": encounters_frame,
             "teams": _validation_profile(team_values, total_source_teams),
             "team_members": _validation_profile(member_values, total_members),
-            "team_member_moves": _validation_profile(move_values, total_move_options),
+            "team_member_moves": _validation_profile(move_values, total_moveset_combos),
             "move_reference": move_reference_df,
             "learnable_moves": learnable_reference_df,
         }
@@ -554,7 +567,7 @@ def build_silver_from_bronze(
             "boss_teams": total_boss_teams,
             "source_teams": total_source_teams,
             "source_team_members": total_members,
-            "member_move_options": total_move_options,
+            "member_moveset_combos": total_moveset_combos,
             "runtime_team_config": runtime_team_config,
             "runtime_simulation_config": runtime_simulation_config,
             "pipeline_code_fingerprint": code_fingerprint,
@@ -571,17 +584,17 @@ def build_silver_from_bronze(
                 "boss_teams": total_boss_teams,
                 "source_teams": total_source_teams,
                 "source_team_members": total_members,
-                "member_move_options": total_move_options,
+                "member_moveset_combos": total_moveset_combos,
             },
         },
     )
 
     logger.info(
-        "[silver] build finished records=%s source_teams=%s source_team_members=%s member_move_options=%s unmapped=%s elapsed_s=%.2f",
+        "[silver] build finished records=%s source_teams=%s source_team_members=%s member_moveset_combos=%s unmapped=%s elapsed_s=%.2f",
         len(all_records),
         total_source_teams,
         total_members,
-        total_move_options,
+        total_moveset_combos,
         len(mapper.misses),
         time.perf_counter() - started_at,
     )

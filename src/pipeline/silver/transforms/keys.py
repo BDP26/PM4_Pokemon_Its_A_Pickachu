@@ -41,3 +41,9 @@ def make_team_id(
 def make_pokemon_instance_id(team_id: str, slot_index: int, species: str) -> str:
     return f"{normalize_key_part(team_id)}:m{slot_index}:{normalize_key_part(species)}:{stable_digest(team_id, slot_index, species)}"
 
+
+def make_moveset_combo_id(pokemon_instance_id: str, moves: list[str]) -> str:
+    normalized_moves = sorted({normalize_key_part(move) for move in moves if normalize_key_part(move)})
+    payload = [normalize_key_part(pokemon_instance_id), *normalized_moves]
+    digest = hashlib.sha256("|".join(payload).encode("utf-8")).hexdigest()[:16]
+    return f"moveset:{digest}"

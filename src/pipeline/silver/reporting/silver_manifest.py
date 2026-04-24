@@ -30,7 +30,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
                     "boss_records",
                     "simulation_inputs_teams",
                     "source_team_members",
-                    "member_move_options",
+                    "member_moveset_combos",
                 ]
             }
         },
@@ -216,29 +216,29 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
 
     logger.info("[silver_manifest] found %s team members", team_members_count)
 
-    sharded_member_moves = sorted(simulation_dir.glob("member_move_options_*.parquet"))
+    sharded_member_moves = sorted(simulation_dir.glob("member_moveset_combos_*.parquet"))
     team_member_moves_count = 0
     if sharded_member_moves:
         team_member_moves_count = len(sharded_member_moves)
-        manifest["datasets"]["member_move_options"] = {
+        manifest["datasets"]["member_moveset_combos"] = {
             "files": [_relative_to(silver_dir, shard) for shard in sharded_member_moves],
-            "glob": "member_move_options_*.parquet",
+            "glob": "member_moveset_combos_*.parquet",
             "count": team_member_moves_count,
             "format": "Parquet",
-            "description": "Sharded team-member move fact table (one row per move slot)",
+            "description": "Sharded per-member moveset-combo fact table (one row per combo)",
         }
     else:
-        member_moves_file = simulation_dir / "member_move_options.parquet"
+        member_moves_file = simulation_dir / "member_moveset_combos.parquet"
         if member_moves_file.exists():
             try:
                 team_member_moves_count = len(read_parquet(member_moves_file))
             except Exception:
                 team_member_moves_count = 0
-            manifest["datasets"]["member_move_options"] = {
+            manifest["datasets"]["member_moveset_combos"] = {
                 "file": _relative_to(silver_dir, member_moves_file),
                 "count": team_member_moves_count,
                 "format": "Parquet",
-                "description": "Team-member move fact table (one row per move slot)",
+                "description": "Per-member moveset-combo fact table (one row per combo)",
             }
     logger.info("[silver_manifest] found %s team member moves", team_member_moves_count)
 

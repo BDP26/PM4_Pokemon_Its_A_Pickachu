@@ -39,6 +39,30 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
         ],
     )
     write_parquet(
+        simulation_dir / "member_moveset_combos_red.parquet",
+        [
+            {
+                "moveset_combo_id": "c1",
+                "team_id": "player_t1",
+                "pokemon_instance_id": "m1",
+                "slot_index": 1,
+                "combo_rank": 1,
+                "move_1": "thunderbolt",
+                "move_2": "quick-attack",
+                "move_3": "double-team",
+                "move_4": "swift",
+            },
+            {
+                "moveset_combo_id": "c2",
+                "team_id": "boss_t1",
+                "pokemon_instance_id": "m2",
+                "slot_index": 1,
+                "combo_rank": 1,
+                "move_1": "tackle",
+            },
+        ],
+    )
+    write_parquet(
         simulation_dir / "member_move_options_red.parquet",
         [
             {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": "quick-attack", "option_rank": 2},

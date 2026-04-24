@@ -39,7 +39,8 @@ If required Bronze files are missing, the layer raises `FileNotFoundError`.
 8. Extract compact team and move-option inputs from Kaggle + references:
    - Team templates (`source_teams`)
    - Team members (`source_team_members`)
-   - Ranked move options (`member_move_options`)
+   - Per-member move-set combinations (`member_moveset_combos`)
+   - Ranked move options (`member_move_options`, optional compatibility table)
    - Reusable move-option contexts (`pokemon_moveset_options`)
    - Separate move metadata (`move_data` / `move_reference` / `learnable_moves`)
 9. Generate Silver manifest.
@@ -54,7 +55,7 @@ Der Manifest enthaelt dafuer:
 - `datasets.boss_records.files[]`
 - `datasets.simulation_inputs_teams.file`
 - `datasets.source_team_members.file`
-- `datasets.member_move_options.file`
+- `datasets.member_moveset_combos.file` (or sharded `files[]`)
 
 Fehlende oder inkonsistente Eintraege fuehren in Gold zu einem sofortigen Laufabbruch (fail-fast).
 
@@ -90,7 +91,8 @@ Team tables in `data/silver/simulation/`:
 - `simulation/source_teams.parquet` (logical source teams only)
 - `simulation/teams.jsonl` (optional materialized preview)
 - `simulation/source_team_members.parquet` (one row per logical team slot)
-- `simulation/member_move_options.parquet` (one row per legal move option, ranked)
+- `simulation/member_moveset_combos.parquet` (one row per member combo, up to `C(candidate_moves,4)` or cap)
+- `simulation/member_move_options.parquet` (optional compatibility: one row per legal move option, ranked)
 - `simulation/pokemon_moveset_options.parquet` (reusable per-species/level/game move options)
 - `simulation/move_data.parquet` (detailed move info: power, damage_class per move)
 
@@ -138,6 +140,7 @@ Validate Gold simulation artifacts after a full run:
 - Kaggle enrichment improves joinability but does not overwrite canonical boss identity keys.
 - Silver keeps a balance between normalized references and per-game snapshots.
 - Silver intentionally does not materialize full team/move-set Cartesian variants.
+- Old (bad): `team × member1_movesets × ... × member6_movesets`
+- New (compact): `team`, `team_members`, `member_moveset_combos` (Gold builds bounded `simulation_samples`)
 - Gold/simulation performs bounded deterministic expansion/sampling from compact Silver options.
 - Silver validiert FK/PK-Beziehungen über normalisierte Tabellen und bricht bei Fehlern ab.
-
