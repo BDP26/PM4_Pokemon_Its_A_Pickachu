@@ -17,11 +17,53 @@ STARTER_CHOICES_BY_VERSION: dict[str, list[str]] = {
     "y": ["chespin", "fennekin", "froakie"],
 }
 
+_STARTER_FAMILY_LEVELS: dict[str, tuple[tuple[str, int | None], ...]] = {
+    "bulbasaur": (("bulbasaur", None), ("ivysaur", 16), ("venusaur", 32)),
+    "charmander": (("charmander", None), ("charmeleon", 16), ("charizard", 36)),
+    "squirtle": (("squirtle", None), ("wartortle", 16), ("blastoise", 36)),
+    "chikorita": (("chikorita", None), ("bayleef", 16), ("meganium", 32)),
+    "cyndaquil": (("cyndaquil", None), ("quilava", 14), ("typhlosion", 36)),
+    "totodile": (("totodile", None), ("croconaw", 18), ("feraligatr", 30)),
+    "treecko": (("treecko", None), ("grovyle", 16), ("sceptile", 36)),
+    "torchic": (("torchic", None), ("combusken", 16), ("blaziken", 36)),
+    "mudkip": (("mudkip", None), ("marshtomp", 16), ("swampert", 36)),
+    "turtwig": (("turtwig", None), ("grotle", 18), ("torterra", 32)),
+    "chimchar": (("chimchar", None), ("monferno", 14), ("infernape", 36)),
+    "piplup": (("piplup", None), ("prinplup", 16), ("empoleon", 36)),
+    "snivy": (("snivy", None), ("servine", 17), ("serperior", 36)),
+    "tepig": (("tepig", None), ("pignite", 17), ("emboar", 36)),
+    "oshawott": (("oshawott", None), ("dewott", 17), ("samurott", 36)),
+    "chespin": (("chespin", None), ("quilladin", 16), ("chesnaught", 36)),
+    "fennekin": (("fennekin", None), ("braixen", 16), ("delphox", 36)),
+    "froakie": (("froakie", None), ("frogadier", 16), ("greninja", 36)),
+}
+
+
+def _static_starter_family_rules(base_starter: str) -> dict[str, dict[str, Any]]:
+    base = str(base_starter).strip().lower()
+    stages = _STARTER_FAMILY_LEVELS.get(base)
+    if not stages:
+        return {}
+    rules: dict[str, dict[str, Any]] = {}
+    for idx, (species, min_level) in enumerate(stages, start=1):
+        rules[species] = {
+            "species_name": species,
+            "base_species": base,
+            "evolution_stage": idx,
+            "min_valid_level": min_level,
+            "min_level_from_previous": min_level if idx > 1 else None,
+            "special_evolution_conditions": [],
+        }
+    return rules
+
 @lru_cache(maxsize=128)
 def _starter_family_rules(base_starter: str) -> dict[str, dict[str, Any]]:
     base = str(base_starter).strip().lower()
     if not base:
         return {}
+    static_rules = _static_starter_family_rules(base)
+    if static_rules:
+        return static_rules
     try:
         return get_species_evolution_rules(base)
     except Exception:
@@ -208,5 +250,4 @@ def get_starter_family_root(species: str) -> str:
     if not normalized:
         return ""
     return _starter_family_root_lookup().get(normalized, normalized)
-
 

@@ -5,9 +5,10 @@ import pandas as pd
 from src.pipeline.silver.orchestration.build_silver import (
     _collect_kaggle_boss_species_and_moves,
     _ensure_moves_in_combat_profiles,
-    _ensure_species_in_pokemon_profiles,
+    _profile_from_pokemon_payload,
     _move_profiles_from_reference,
 )
+from src.pipeline.silver.inputs.reference_context import normalize_species_slug
 
 
 def test_collects_kaggle_species_and_moves_from_boss_teams() -> None:
@@ -24,12 +25,7 @@ def test_collects_kaggle_species_and_moves_from_boss_teams() -> None:
     assert "kings-shield" in moves
 
 
-def test_enrichment_adds_missing_kaggle_only_species_and_moves() -> None:
-    pokemon_data_df = pd.DataFrame([{"name": "pikachu", "pokemon_species": "pikachu"}])
-    enriched_pokemon_df = _ensure_species_in_pokemon_profiles(pokemon_data_df, {"pikachu", "aegislash"})
-    enriched_species = set(enriched_pokemon_df["pokemon_species"].tolist())
-    assert "aegislash" in enriched_species
-
+def test_enrichment_adds_missing_kaggle_only_moves() -> None:
     move_reference_df = pd.DataFrame(
         [
             {
@@ -72,3 +68,34 @@ def test_enrichment_adds_missing_kaggle_only_species_and_moves() -> None:
     for payload in enriched_move_data.values():
         cached_moves.update(payload.get("move_details", {}).keys())
     assert "kings-shield" in cached_moves
+
+
+def test_profile_flattening_maps_stats_and_types() -> None:
+    payload = {
+        "id": 122,
+        "name": "mr-mime",
+        "species": {"name": "mr-mime"},
+        "types": [{"slot": 2, "type": {"name": "fairy"}}, {"slot": 1, "type": {"name": "psychic"}}],
+        "stats": [
+            {"stat": {"name": "hp"}, "base_stat": 40},
+            {"stat": {"name": "attack"}, "base_stat": 45},
+            {"stat": {"name": "defense"}, "base_stat": 65},
+            {"stat": {"name": "special-attack"}, "base_stat": 100},
+            {"stat": {"name": "special-defense"}, "base_stat": 120},
+            {"stat": {"name": "speed"}, "base_stat": 90},
+        ],
+        "height": 13,
+        "weight": 545,
+        "base_experience": 161,
+        "is_default": True,
+    }
+    profile = _profile_from_pokemon_payload(payload)
+    assert profile["pokemon_species"] == "mr-mime"
+    assert profile["type_1"] == "psychic"
+    assert profile["type_2"] == "fairy"
+    assert profile["base_special_attack"] == 100
+    assert profile["pokeapi_id"] == 122
+
+
+def test_species_alias_normalization_for_mr_mime() -> None:
+    assert normalize_species_slug("mr. mime") == "mr-mime"

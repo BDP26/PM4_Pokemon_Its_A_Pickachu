@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Collection
 
 from src.pipeline.silver.config.team_config import CSV_PROGRESS_LOG_INTERVAL, DEFAULT_MEMBER_LEVEL, KAGGLE_CSV_DELIMITER
-from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
+from src.pipeline.silver.inputs.reference_context import MoveReferenceContext, normalize_species_slug
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id
 
 
@@ -59,7 +59,7 @@ def _normalize_kaggle_row(row: dict[str, Any]) -> dict[str, Any]:
         "game": str(row.get("Game") or "").strip().lower(),
         "gym_leader": str(row.get("Gym leader") or "").strip().lower(),
         "gym": row.get("Gym"),
-        "pokemon": str(row.get("Pokemon") or "").strip().lower(),
+        "pokemon": normalize_species_slug(row.get("Pokemon") or ""),
         "level": level,
         "moves": moves,
     }
@@ -271,4 +271,3 @@ def extract_boss_teams_from_kaggle_source(
         time.perf_counter() - started_at,
     )
     return teams, move_storage
-
