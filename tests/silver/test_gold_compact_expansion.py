@@ -60,8 +60,9 @@ def test_gold_loader_builds_bounded_moveset_variants(tmp_path: Path) -> None:
     teams = load_reconstructed_teams_from_silver(silver_dir=silver_dir)
     by_id = {team["team_id"]: team for team in teams}
 
-    assert by_id["player_t1"]["moves"][0] == ["thunderbolt", "quick-attack", "slam", "double-team"]
+    assert by_id["player_t1"]["moves"][0] == ["thunderbolt", "quick-attack", "double-team", "swift"]
     assert len(by_id["player_t1"]["moves"][0]) == 4
+    assert "swift" in by_id["player_t1"]["moves"][0]
     assert by_id["player_t1"]["is_player_candidate"] is True
     assert by_id["boss_t1"]["is_player_candidate"] is False
 

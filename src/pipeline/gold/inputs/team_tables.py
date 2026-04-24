@@ -36,6 +36,33 @@ def _load_frame(path_or_paths: Path | list[Path] | None, simulation_dir: Path, g
     return read_many_parquet(sorted(simulation_dir.glob(glob_pattern)))
 
 
+
+
+def _select_diverse_moves(ordered_moves: list[str], *, width: int = 4) -> list[str]:
+    """Select a bounded, deterministic, slightly-diverse moveset from ranked options."""
+    unique_moves = []
+    for move in ordered_moves:
+        move_norm = str(move).strip().lower()
+        if move_norm and move_norm not in unique_moves:
+            unique_moves.append(move_norm)
+
+    if len(unique_moves) <= width:
+        return unique_moves
+
+    selected = unique_moves[:2]
+    tail = unique_moves[2:]
+    middle = tail[len(tail) // 2]
+    last = tail[-1]
+    for candidate in (middle, last):
+        if candidate not in selected:
+            selected.append(candidate)
+    if len(selected) < width:
+        for move in unique_moves[2:]:
+            if move not in selected:
+                selected.append(move)
+            if len(selected) >= width:
+                break
+    return selected[:width]
 def load_reconstructed_teams_from_silver(
     silver_dir: Path = SILVER_DIR,
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,
@@ -72,7 +99,7 @@ def load_reconstructed_teams_from_silver(
             if not member_id or not move_name:
                 continue
             slot = moves_by_member.setdefault(member_id, [])
-            if move_name not in slot and len(slot) < 4:
+            if move_name not in slot:
                 slot.append(move_name)
 
     members_by_team: dict[str, list[dict[str, Any]]] = {}
@@ -97,7 +124,7 @@ def load_reconstructed_teams_from_silver(
             member_id = str(member.get("team_member_id") or "").strip()
             pokemon.append(species)
             levels.append(level)
-            moves.append(list(moves_by_member.get(member_id, []))[:4])
+            moves.append(_select_diverse_moves(list(moves_by_member.get(member_id, [])), width=4))
             instance_ids.append(member_id)
 
         if not pokemon:
