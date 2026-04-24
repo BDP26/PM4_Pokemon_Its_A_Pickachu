@@ -132,9 +132,8 @@ def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
     }
 
 
-def _series_frame(values_by_column: dict[str, set[str]]) -> pd.DataFrame:
-    """Build a compact dataframe from per-column unique values."""
-    return pd.DataFrame({column: pd.Series(sorted(values)) for column, values in values_by_column.items()})
+def _validation_profile(values_by_column: dict[str, set[str]], row_count: int) -> dict[str, Any]:
+    return {"row_count": row_count, "columns": {column: sorted(values) for column, values in values_by_column.items()}}
 
 
 def _build_combat_pool_rows_for_game(
@@ -251,6 +250,12 @@ def build_silver_from_bronze(
     hard_cleanup: bool = False,
 ) -> None:
     started_at = time.perf_counter()
+    stage_durations: dict[str, float] = {}
+    peak_counts: dict[str, int] = {
+        "all_move_data_size": 0,
+        "max_team_member_moves_per_game": 0,
+        "max_team_members_per_game": 0,
+    }
     ensure_medallion_dirs()
 
     type_chart_path = bronze_dir / "type_chart.json"
@@ -352,11 +357,13 @@ def build_silver_from_bronze(
 
     logger.info("[silver] processing %s bulbapedia game files", len(game_files))
 
+    parse_started_at = time.perf_counter()
     parse_output = run_parse_stage(
         game_files=game_files,
         mapper=mapper,
         kaggle_rows_by_game=kaggle_rows_by_game,
     )
+    stage_durations["parse_stage_s"] = time.perf_counter() - parse_started_at
     all_records = parse_output.all_records
     all_slugs = parse_output.all_slugs
     boss_mapping_by_version = parse_output.boss_mapping_by_version
@@ -382,6 +389,7 @@ def build_silver_from_bronze(
         len(area_map),
         len(location_pokemon_map),
     )
+    stage_durations["mapping_stage_s"] = time.perf_counter() - mapping_started_at
     write_json(mappings_dir / "location_to_area_map.json", area_map)
     write_json(mappings_dir / "location_to_pokemon_map.json", location_pokemon_map)
 
@@ -394,6 +402,7 @@ def build_silver_from_bronze(
 
     all_pokemon_references = {}
 
+    normalization_started_at = time.perf_counter()
     for game_key, records in records_with_game_keys:
         enrich_records_with_location_pokemon(records, location_pokemon_map)
         pokemon_refs = write_normalized_silver(
@@ -410,6 +419,7 @@ def build_silver_from_bronze(
         len(records_with_game_keys),
         len(all_pokemon_references),
     )
+    stage_durations["normalization_stage_s"] = time.perf_counter() - normalization_started_at
 
     create_pokemon_reference_index(all_pokemon_references, references_dir)
     create_encounter_methods_reference(all_records, references_dir)
@@ -427,6 +437,7 @@ def build_silver_from_bronze(
         encounters_frame = read_jsonl(encounters_file)
         write_parquet(references_dir / "encounters.parquet", encounters_frame, partition_cols=["game"])
 
+    diagnostics_write_started_at = time.perf_counter()
     write_json(diagnostics_dir / "unmapped_locations_detailed.json", mapper.misses)
 
     unmapped_summary = summarize_unmapped_locations(mapper.misses)
@@ -441,12 +452,15 @@ def build_silver_from_bronze(
         for miss in mapper.misses
     ]
     write_json(diagnostics_dir / "unmapped_locations.json", compact_unmapped)
+    del compact_unmapped
+    gc.collect()
 
     logger.info(
         "[silver] diagnostics written unmapped_events=%s top_reasons=%s",
         len(mapper.misses),
         _top_counts([str(miss.get("reason", "unknown")) for miss in mapper.misses], limit=3),
     )
+    stage_durations["diagnostics_writes_s"] = time.perf_counter() - diagnostics_write_started_at
 
     write_json(mappings_dir / "boss_mapping_by_version.json", boss_mapping_by_version)
 
@@ -495,6 +509,8 @@ def build_silver_from_bronze(
     )
 
     all_move_data = dict(boss_move_data)
+    peak_counts["all_move_data_size"] = max(peak_counts["all_move_data_size"], len(all_move_data))
+    logger.info("[silver] all_move_data initialized size=%s", len(all_move_data))
 
     for pattern in [
         "teams_*.parquet",
@@ -508,6 +524,7 @@ def build_silver_from_bronze(
     total_boss_teams = 0
     total_player_teams = 0
     total_team_members = 0
+    total_team_member_moves = 0
     team_metadata_values: dict[str, set[str]] = {
         "team_id": set(),
         "game_version": set(),
@@ -546,6 +563,15 @@ def build_silver_from_bronze(
             reference_context=reference_context,
         )
         all_move_data.update(player_move_data)
+        current_move_count = len(all_move_data)
+        peak_counts["all_move_data_size"] = max(peak_counts["all_move_data_size"], current_move_count)
+        if current_move_count % 10_000 == 0 or len(player_move_data) >= 2_000:
+            logger.info(
+                "[silver] all_move_data growth game=%s size=%s added_this_game=%s",
+                game_key,
+                current_move_count,
+                len(player_move_data),
+            )
 
         teams_data_game = boss_teams_game + player_teams
         if not teams_data_game:
@@ -587,10 +613,13 @@ def build_silver_from_bronze(
         write_parquet(paths["teams"], team_metadata_rows)
         write_parquet(paths["team_members"], team_members)
         write_parquet(paths["team_member_moves"], team_member_moves)
+        peak_counts["max_team_members_per_game"] = max(peak_counts["max_team_members_per_game"], len(team_members))
+        peak_counts["max_team_member_moves_per_game"] = max(peak_counts["max_team_member_moves_per_game"], len(team_member_moves))
 
         total_boss_teams += len(boss_teams_game)
         total_player_teams += len(player_teams)
         total_team_members += len(team_members)
+        total_team_member_moves += len(team_member_moves)
 
         logger.info(
             "[silver] wrote team shards game=%s boss_teams=%s player_teams=%s team_members=%s elapsed_s=%.2f",
@@ -612,6 +641,38 @@ def build_silver_from_bronze(
         del combat_pool_rows
         gc.collect()
 
+    move_write_started_at = time.perf_counter()
+    write_validated_move_data(
+        simulation_dir / "move_data.parquet",
+        all_move_data,
+        chunk_threshold=120_000,
+        chunk_size=40_000,
+    )
+    stage_durations["move_write_s"] = time.perf_counter() - move_write_started_at
+    del all_move_data
+    gc.collect()
+    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+
+    relational_started_at = time.perf_counter()
+    relational_report = validate_normalized_silver_tables(
+        {
+            "games": pd.DataFrame(games_table),
+            "bosses": pd.DataFrame(bosses_table),
+            "locations": pd.DataFrame(locations_table),
+            "encounters": encounters_frame,
+            "teams": _validation_profile(team_metadata_values, total_boss_teams + total_player_teams),
+            "team_members": _validation_profile(team_member_values, total_team_members),
+            "team_member_moves": _validation_profile(team_member_move_values, total_team_member_moves),
+            "move_reference": move_reference_df,
+            "learnable_moves": learnable_reference_df,
+        }
+    )
+    stage_durations["relational_validation_s"] = time.perf_counter() - relational_started_at
+    write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
+    del move_reference_df
+    del learnable_reference_df
+    del encounters_frame
+    gc.collect()
     stage_started_at = time.perf_counter()
     logger.info(
         "[silver] stage=write_validated_move_data start total_player_teams=%s total_team_members=%s move_records=%s",
@@ -731,7 +792,7 @@ def build_silver_from_bronze(
         total_boss_teams,
         total_player_teams,
         total_team_members,
-        len(all_move_data),
+        peak_counts["all_move_data_size"],
         time.perf_counter() - teams_started_at,
     )
 
@@ -760,6 +821,19 @@ def build_silver_from_bronze(
         total_team_members,
     )
 
+    save_state(
+        state_path,
+        {
+            "input_signature": current_signature,
+            "updated_at": time.time(),
+            "games_processed": len(records_with_game_keys),
+            "boss_teams": total_boss_teams,
+            "player_teams": total_player_teams,
+            "move_records": peak_counts["all_move_data_size"],
+            "runtime_team_config": runtime_team_config,
+            "runtime_simulation_config": runtime_simulation_config,
+            "pipeline_code_fingerprint": code_fingerprint,
+        },
     stage_started_at = time.perf_counter()
     logger.info(
         "[silver] stage=save_state start total_player_teams=%s total_team_members=%s move_records=%s",
@@ -796,6 +870,22 @@ def build_silver_from_bronze(
         len(records_with_game_keys),
         total_player_teams,
         total_team_members,
+    )
+
+    write_json(
+        diagnostics_dir / "performance_summary.json",
+        {
+            "generated_at_epoch_s": time.time(),
+            "stage_durations_s": stage_durations,
+            "peak_counts": peak_counts,
+            "totals": {
+                "games_processed": len(records_with_game_keys),
+                "boss_teams": total_boss_teams,
+                "player_teams": total_player_teams,
+                "team_members": total_team_members,
+                "team_member_moves": total_team_member_moves,
+            },
+        },
     )
 
     logger.info(
