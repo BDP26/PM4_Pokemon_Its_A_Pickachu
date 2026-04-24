@@ -28,6 +28,8 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "gold_strict": {
                 "required_dataset_keys": [
                     "boss_records",
+                    "pokemon_data",
+                    "move_data",
                     "simulation_inputs_teams",
                     "source_team_members",
                     "member_moveset_combos",
@@ -109,7 +111,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
         ("locations.parquet", "Location dimension with mapping status"),
         ("encounters.parquet", "Encounter fact table normalized by location and species"),
         ("snapshot_available_pokemon.parquet", "Pokemon availability fact per boss snapshot"),
-        ("pokemon_stats.parquet", "Pokemon base stats and typing reference (if available)"),
+        ("pokemon_data.parquet", "Battle-ready Pokemon reference table"),
         ("move_reference.parquet", "Move reference dimension"),
         ("learnable_moves.parquet", "Unified learnable moves fact by game and species (authoritative move source)"),
     ]:

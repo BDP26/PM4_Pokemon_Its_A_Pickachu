@@ -13,6 +13,7 @@ from typing import Any, TypedDict, cast
 
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
+from src.pipeline.silver.inputs.reference_context import normalize_key
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
@@ -171,11 +172,11 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
     pokemon_profiles: dict[str, dict[str, Any]] = {}
     move_profiles: dict[str, MoveProfile] = {}
 
-    pokemon_stats_path = references_dir / "pokemon_stats.parquet"
-    if pokemon_stats_path.exists():
-        pokemon_stats_df = read_parquet(pokemon_stats_path)
-        for row in pokemon_stats_df.to_dict(orient="records"):
-            species = normalize_species_name(str(row.get("pokemon_species") or row.get("name") or ""))
+    pokemon_data_path = references_dir / "pokemon_data.parquet"
+    if pokemon_data_path.exists():
+        pokemon_data_df = read_parquet(pokemon_data_path)
+        for row in pokemon_data_df.to_dict(orient="records"):
+            species = normalize_species_name(str(row.get("name") or row.get("pokemon_species") or ""))
             if not species:
                 continue
             pokemon_profiles[species] = {
@@ -186,12 +187,12 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
                     if isinstance(value, str) and value.strip()
                 ] or ["Normal"],
                 "stats": {
-                    "hp": int(row.get("hp") or 50),
-                    "attack": int(row.get("attack") or 50),
-                    "defense": int(row.get("defense") or 50),
-                    "sp_attack": int(row.get("sp_attack") or 50),
-                    "sp_defense": int(row.get("sp_defense") or 50),
-                    "speed": int(row.get("speed") or 50),
+                    "hp": int(row.get("base_hp") or 50),
+                    "attack": int(row.get("base_attack") or 50),
+                    "defense": int(row.get("base_defense") or 50),
+                    "sp_attack": int(row.get("base_special_attack") or 50),
+                    "sp_defense": int(row.get("base_special_defense") or 50),
+                    "speed": int(row.get("base_speed") or 50),
                 },
                 "moves": [],
             }
@@ -266,15 +267,11 @@ def _default_stats() -> dict[str, int]:
 
 
 def normalize_species_name(name: str) -> str:
-    normalized = " ".join(name.strip().lower().replace(".", " ").replace("_", " ").split())
-    normalized = normalized.replace("'", "").replace(" ", "-")
-    return normalized
+    return normalize_key(name)
 
 
 def _normalize_move_name(name: str) -> str:
-    normalized = " ".join(name.strip().lower().replace(".", " ").replace("_", " ").split())
-    normalized = normalized.replace("'", "").replace(" ", "-")
-    return normalized
+    return normalize_key(name)
 
 
 def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bool, str | None]:
@@ -353,9 +350,12 @@ def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None
     missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
     missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
     if missing_species or missing_moves:
+        sample_species = ",".join(missing_species[:10])
+        sample_moves = ",".join(missing_moves[:10])
         raise ValueError(
             "Simulation strict mode requires complete cached combat profiles: "
-            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)}"
+            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)} "
+            f"sample_species=[{sample_species}] sample_moves=[{sample_moves}]"
         )
 
 
