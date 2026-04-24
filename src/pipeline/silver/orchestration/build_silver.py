@@ -106,6 +106,137 @@ def _validation_profile(values_by_column: dict[str, set[str]], row_count: int) -
     return {"row_count": row_count, "columns": {column: sorted(values) for column, values in values_by_column.items()}}
 
 
+def _collect_kaggle_boss_species_and_moves(boss_teams: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
+    species: set[str] = set()
+    moves: set[str] = set()
+    for team in boss_teams:
+        pokemon_entries = team.get("pokemon")
+        if isinstance(pokemon_entries, list):
+            for pokemon in pokemon_entries:
+                species_slug = normalize_species_slug(pokemon)
+                if species_slug:
+                    species.add(species_slug)
+        move_entries = team.get("moves")
+        if isinstance(move_entries, list):
+            for member_moves in move_entries:
+                if not isinstance(member_moves, list):
+                    continue
+                for move in member_moves:
+                    move_slug = normalize_move_name(move)
+                    if move_slug:
+                        moves.add(move_slug)
+    return species, moves
+
+
+def _ensure_species_in_pokemon_profiles(
+    pokemon_data_df: pd.DataFrame,
+    required_species: set[str],
+) -> pd.DataFrame:
+    if pokemon_data_df.empty:
+        pokemon_data_df = pd.DataFrame(columns=["name", "pokemon_species"])
+
+    existing_species = {
+        normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
+        for row in pokemon_data_df.to_dict(orient="records")
+    }
+    missing_species = sorted(species for species in required_species if species and species not in existing_species)
+    if not missing_species:
+        return pokemon_data_df
+
+    add_rows: list[dict[str, Any]] = []
+    for species in missing_species:
+        add_rows.append(
+            {
+                "name": species,
+                "pokemon_species": species,
+                "pokeapi_id": None,
+                "source_url": None,
+                "type_1": "normal",
+                "type_2": None,
+                "base_hp": 50,
+                "base_attack": 50,
+                "base_defense": 50,
+                "base_special_attack": 50,
+                "base_special_defense": 50,
+                "base_speed": 50,
+                "height": None,
+                "weight": None,
+                "base_experience": None,
+                "is_default": None,
+            }
+        )
+    return pd.concat([pokemon_data_df, pd.DataFrame(add_rows)], ignore_index=True)
+
+
+def _move_profiles_from_reference(move_reference_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    profiles: dict[str, dict[str, Any]] = {}
+    for row in move_reference_df.to_dict(orient="records"):
+        move_name = normalize_move_name(row.get("move_name"))
+        if not move_name:
+            continue
+        profiles[move_name] = {
+            "move_name": move_name,
+            "type": str(row.get("type") or "Normal"),
+            "power": int(row.get("power") or 0),
+            "damage_class": str(row.get("damage_class") or "status"),
+            "accuracy": row.get("accuracy"),
+            "pp": row.get("pp"),
+            "level_learned_at": 0,
+            "version_group": "reference",
+            "degraded_data": False,
+        }
+    return profiles
+
+
+def _ensure_moves_in_combat_profiles(
+    move_data: dict[str, dict[str, Any]],
+    required_moves: set[str],
+    move_reference_profiles: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    enriched = {key: dict(value) for key, value in move_data.items()}
+    if not required_moves:
+        return enriched
+
+    available_moves: set[str] = set()
+    for payload in enriched.values():
+        details = payload.get("move_details")
+        if not isinstance(details, dict):
+            continue
+        for move in details.keys():
+            move_name = normalize_move_name(move)
+            if move_name:
+                available_moves.add(move_name)
+
+    missing_moves = sorted(move for move in required_moves if move and move not in available_moves)
+    if not missing_moves:
+        return enriched
+
+    if not enriched:
+        enriched["reference:seed"] = {
+            "pokemon_instance_id": "reference:seed",
+            "team_id": "reference",
+            "species": "reference",
+            "level": 1,
+            "game_version": "reference",
+            "provided_moves": [],
+            "learnable_moves": [],
+            "move_details": {},
+            "slot_index": 1,
+        }
+
+    first_key = next(iter(enriched))
+    first_payload = dict(enriched[first_key])
+    move_details = dict(first_payload.get("move_details") or {})
+    for move in missing_moves:
+        profile = move_reference_profiles.get(move)
+        if profile is None:
+            continue
+        move_details[move] = profile
+    first_payload["move_details"] = move_details
+    enriched[first_key] = first_payload
+    return enriched
+
+
 def _build_bootstrap_move_entries(
     records_with_game_keys: list[tuple[str, list[dict[str, Any]]]],
 ) -> list[tuple[str, int, str, list[str]]]:
@@ -438,6 +569,7 @@ def build_silver_from_bronze(
     reference_context = load_reference_context(silver_dir=silver_dir)
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(bronze_dir, allowed_versions=allowed_versions, reference_context=reference_context)
     all_move_data = dict(boss_move_data)
+    kaggle_boss_species, kaggle_boss_moves = _collect_kaggle_boss_species_and_moves(boss_teams)
 
     for pattern in [
         "source_teams_*.parquet",
@@ -466,6 +598,8 @@ def build_silver_from_bronze(
     total_members = 0
     total_moveset_combos = 0
     total_boss_teams = 0
+    required_team_species: set[str] = set()
+    required_team_moves: set[str] = set()
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for team in boss_teams:
@@ -525,12 +659,19 @@ def build_silver_from_bronze(
             for row in member_moveset_combo_rows
             if str(row.get("team_id") or "").strip()
         )
+        required_team_species.update(
+            normalize_species_slug(row.get("pokemon_species") or "")
+            for row in source_member_rows
+            if normalize_species_slug(row.get("pokemon_species") or "")
+        )
         for move_col in ("move_1", "move_2", "move_3", "move_4"):
-            move_values[move_col].update(
-                str(row.get(move_col) or "").strip().lower()
+            normalized_moves = {
+                normalize_move_name(row.get(move_col) or "")
                 for row in member_moveset_combo_rows
-                if str(row.get(move_col) or "").strip()
-            )
+                if normalize_move_name(row.get(move_col) or "")
+            }
+            move_values[move_col].update(normalized_moves)
+            required_team_moves.update(normalized_moves)
 
         total_source_teams += len(source_teams_rows)
         total_members += len(source_member_rows)
@@ -548,11 +689,66 @@ def build_silver_from_bronze(
 
         gc.collect()
 
-    write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data, chunk_threshold=120_000, chunk_size=40_000)
+    restricted_encounter_species = {
+        normalize_species_slug(species)
+        for species in all_pokemon_references.keys()
+        if normalize_species_slug(species)
+    }
+    total_required_species = restricted_encounter_species | kaggle_boss_species | required_team_species
+    total_required_moves = required_team_moves | kaggle_boss_moves
 
     move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    move_reference_profiles = _move_profiles_from_reference(move_reference_df)
+
+    logger.info(
+        "[silver/reference_enrichment] restricted_encounter_species=%s kaggle_boss_species=%s total_required_species=%s "
+        "learnable_reference_moves=%s kaggle_boss_moves=%s total_required_moves=%s",
+        len(restricted_encounter_species),
+        len(kaggle_boss_species),
+        len(total_required_species),
+        len(move_reference_profiles),
+        len(kaggle_boss_moves),
+        len(total_required_moves),
+    )
+
+    pokemon_data_path = references_dir / "pokemon_data.parquet"
+    pokemon_data_df = read_parquet(pokemon_data_path) if pokemon_data_path.exists() else pd.DataFrame()
+    pokemon_data_df = _ensure_species_in_pokemon_profiles(pokemon_data_df, total_required_species)
+    write_parquet(pokemon_data_path, pokemon_data_df)
+
+    all_move_data = _ensure_moves_in_combat_profiles(all_move_data, total_required_moves, move_reference_profiles)
+    write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data, chunk_threshold=120_000, chunk_size=40_000)
+
+    available_species = {
+        normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
+        for row in pokemon_data_df.to_dict(orient="records")
+        if normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
+    }
+    available_moves: set[str] = set()
+    for payload in all_move_data.values():
+        move_details = payload.get("move_details")
+        if not isinstance(move_details, dict):
+            continue
+        for move_name in move_details.keys():
+            move_slug = normalize_move_name(move_name)
+            if move_slug:
+                available_moves.add(move_slug)
+
+    missing_profile_species = sorted(species for species in required_team_species if species not in available_species)
+    missing_profile_moves = sorted(move for move in required_team_moves if move not in available_moves)
+    if missing_profile_species or missing_profile_moves:
+        raise ValueError(
+            "Silver reference enrichment incomplete for local combat profiles: "
+            f"missing_species={len(missing_profile_species)} missing_moves={len(missing_profile_moves)} "
+            f"sample_species=[{','.join(missing_profile_species[:10])}] sample_moves=[{','.join(missing_profile_moves[:10])}]"
+        )
+
+    logger.info(
+        "[silver/reference_enrichment] final_pokemon_profiles=%s final_move_profiles=%s",
+        len(available_species),
+        len(available_moves),
+    )
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
-    pokemon_data_df = read_parquet(references_dir / "pokemon_data.parquet") if (references_dir / "pokemon_data.parquet").exists() else pd.DataFrame()
 
     relational_report = validate_normalized_silver_tables(
         {
