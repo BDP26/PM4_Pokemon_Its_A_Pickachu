@@ -7,7 +7,6 @@ Concrete move-set expansion is deferred to Gold/simulation.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from itertools import combinations, islice
 from typing import Any
@@ -19,6 +18,7 @@ from src.pipeline.silver.config.game_config import (
 from src.pipeline.silver.config.team_config import (
     DEFAULT_CATCH_POOL_SIZE,
     DEFAULT_MEMBER_LEVEL,
+    DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
     DEFAULT_MEMBER_MOVE_OPTION_LIMIT,
     DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
     DEFAULT_SOURCE_TEAM_POOL_SIZE,
@@ -26,7 +26,13 @@ from src.pipeline.silver.config.team_config import (
     MOVESET_WIDTH,
 )
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
-from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id, normalize_key_part, stable_digest
+from src.pipeline.silver.transforms.keys import (
+    make_moveset_combo_id,
+    make_pokemon_instance_id,
+    make_team_id,
+    normalize_key_part,
+    stable_digest,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -314,6 +320,7 @@ def build_player_team_compact_tables(
     source_teams: list[dict[str, Any]] = []
     source_team_members: list[dict[str, Any]] = []
     member_move_options: list[dict[str, Any]] = []
+    member_moveset_combos: list[dict[str, Any]] = []
     pokemon_moveset_options: list[dict[str, Any]] = []
     sampling_plan: list[dict[str, Any]] = []
 
@@ -358,7 +365,7 @@ def build_player_team_compact_tables(
                 }
             )
 
-            team_combo_space = 1
+            member_combo_counts: list[int] = []
             for slot, species in enumerate(logical_species, start=1):
                 species_norm = normalize_key_part(species)
                 level = int(levels[slot - 1] if slot - 1 < len(levels) else avg_level)
@@ -379,10 +386,11 @@ def build_player_team_compact_tables(
 
                 learnable = reference_context.damaging_moves(species_norm, level, game_version)
                 ranked_moves = sorted(learnable)[:DEFAULT_MEMBER_MOVE_OPTION_LIMIT]
-                if len(ranked_moves) >= MOVESET_WIDTH:
-                    team_combo_space *= math.comb(len(ranked_moves), MOVESET_WIDTH)
-                else:
-                    team_combo_space *= max(1, len(ranked_moves))
+                member_combos = _build_member_moveset_combos(
+                    ranked_moves,
+                    combo_limit=DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
+                )
+                member_combo_counts.append(len(member_combos))
 
                 context_key = (game_version, species_norm, level, "damaging-level-up-v1")
                 if context_key not in moveset_context_seen:
@@ -431,6 +439,27 @@ def build_player_team_compact_tables(
                         }
                     )
 
+                for combo_rank, combo_moves in enumerate(member_combos, start=1):
+                    normalized_moves = sorted({normalize_key_part(move) for move in combo_moves if normalize_key_part(move)})
+                    combo_row: dict[str, Any] = {
+                        "moveset_combo_id": make_moveset_combo_id(member_id, normalized_moves),
+                        "team_id": source_team_id,
+                        "pokemon_instance_id": member_id,
+                        "slot_index": slot,
+                        "game_version": game_version,
+                        "pokemon_name": species_norm,
+                        "level": level,
+                        "moves": normalized_moves,
+                        "move_count": len(normalized_moves),
+                        "combo_rank": combo_rank,
+                        "combo_score": float(max(1, len(member_combos) - combo_rank + 1)),
+                        "source": "damaging-level-up-v1",
+                    }
+                    for idx in range(MOVESET_WIDTH):
+                        combo_row[f"move_{idx + 1}"] = normalized_moves[idx] if idx < len(normalized_moves) else None
+                    member_moveset_combos.append(combo_row)
+
+            team_combo_space = estimate_team_moveset_space(member_combo_counts)
             estimated_avoided_variants += max(0, team_combo_space - 1)
             sampling_plan.append(
                 {
@@ -443,9 +472,11 @@ def build_player_team_compact_tables(
             )
 
     logger.info(
-        "[silver/teams] compact tables source_teams=%s source_team_members=%s member_move_options=%s pokemon_moveset_options=%s progression_sources=%s avoided_expansion_estimate=%s elapsed_s=%.2f",
+        "[silver/teams] built player teams source_teams=%s candidate_teams=%s members=%s moveset_combos=%s member_move_options=%s progression_sources=%s avoided_full_cartesian_estimate=%s elapsed_s=%.2f",
+        len(source_teams),
         len(source_teams),
         len(source_team_members),
+        len(member_moveset_combos),
         len(member_move_options),
         len(pokemon_moveset_options),
         len(progression_source_teams),
@@ -456,80 +487,55 @@ def build_player_team_compact_tables(
     return {
         "source_teams": source_teams,
         "source_team_members": source_team_members,
+        "member_moveset_combos": member_moveset_combos,
         "member_move_options": member_move_options,
         "pokemon_moveset_options": pokemon_moveset_options,
         "simulation_sampling_plan": sampling_plan,
     }
 
 
+def estimate_team_moveset_space(member_combo_counts: list[int]) -> int:
+    space = 1
+    for count in member_combo_counts:
+        normalized = max(1, int(count or 0))
+        space *= normalized
+    return space
+
+
+def _build_member_moveset_combos(moves: list[str], *, combo_limit: int) -> list[list[str]]:
+    unique_moves = sorted({normalize_key_part(move) for move in moves if normalize_key_part(move)})
+    if not unique_moves:
+        return [[]]
+    if len(unique_moves) <= MOVESET_WIDTH:
+        return [unique_moves]
+    combos = [list(combo) for combo in combinations(unique_moves, MOVESET_WIDTH)]
+    return combos[: max(1, int(combo_limit or 1))]
+
+
 def build_player_teams_from_progression_context(
     progression_source_teams: list[dict[str, Any]],
     reference_context: MoveReferenceContext | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Compatibility shim: build one deterministic concrete team per compact source team."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build compact candidate teams and per-member moveset combos (no full-team Cartesian expansion)."""
     if reference_context is None:
         raise ValueError("reference_context is required for offline team generation")
 
     compact = build_player_team_compact_tables(progression_source_teams, reference_context)
-    member_rows = compact["source_team_members"]
-    options_rows = compact["member_move_options"]
-
-    options_by_member: dict[str, list[str]] = {}
-    for row in options_rows:
-        member_id = str(row.get("team_member_id") or "")
-        options_by_member.setdefault(member_id, []).append(str(row.get("move_name") or ""))
-
-    members_by_team: dict[str, list[dict[str, Any]]] = {}
-    for row in member_rows:
-        members_by_team.setdefault(str(row.get("source_team_id") or ""), []).append(row)
-
-    teams: list[dict[str, Any]] = []
-    move_data: dict[str, Any] = {}
-    for source in compact["source_teams"]:
-        team_id = str(source.get("source_team_id") or "")
-        members = sorted(members_by_team.get(team_id, []), key=lambda r: int(r.get("slot") or 0))
-        pokemon: list[str] = []
-        levels: list[int] = []
-        moves: list[list[str]] = []
-        ids: list[str] = []
-        for m in members:
-            member_id = str(m.get("team_member_id") or "")
-            species = str(m.get("pokemon_species") or "")
-            level = int(m.get("level") or DEFAULT_MEMBER_LEVEL)
-            candidate_moves = sorted(set(move for move in options_by_member.get(member_id, []) if move))[:MOVESET_WIDTH]
-            pokemon.append(species)
-            levels.append(level)
-            moves.append(candidate_moves)
-            ids.append(member_id)
-            move_data[member_id] = {
-                "pokemon_instance_id": member_id,
-                "team_id": team_id,
-                "species": species,
-                "level": level,
-                "game_version": source.get("game_version"),
-                "provided_moves": [],
-                "learnable_moves": options_by_member.get(member_id, []),
-                "move_details": {},
-                "slot_index": int(m.get("slot") or 0),
-            }
-
-        teams.append(
-            {
-                "team_id": team_id,
-                "boss_name": None,
-                "gym": source.get("boss_name"),
-                "game_version": source.get("game_version"),
-                "pokemon": pokemon,
-                "levels": levels,
-                "moves": moves,
-                "pokemon_instance_ids": ids,
-                "avg_level": source.get("avg_level"),
-                "starter_base": source.get("starter_base"),
-                "starter_evolved_species": source.get("starter_evolved_species"),
-                "source_team_id": source.get("progression_source_team_id"),
-                "team_role": "player",
-                "is_player_candidate": True,
-            }
-        )
-
-    return teams, move_data
+    candidate_teams = [
+        {
+            "team_id": row.get("source_team_id"),
+            "source_team_id": row.get("progression_source_team_id"),
+            "game_version": row.get("game_version"),
+            "gym": row.get("boss_name"),
+            "boss_name": row.get("boss_name"),
+            "avg_level": row.get("avg_level"),
+            "starter_base": row.get("starter_base"),
+            "starter_evolved_species": row.get("starter_evolved_species"),
+            "team_role": "player",
+            "is_player_candidate": True,
+        }
+        for row in compact["source_teams"]
+    ]
+    candidate_team_members = compact["source_team_members"]
+    member_moveset_combos = compact["member_moveset_combos"]
+    return candidate_teams, candidate_team_members, member_moveset_combos

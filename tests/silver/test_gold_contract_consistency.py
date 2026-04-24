@@ -23,7 +23,10 @@ def test_manifest_dataset_entries_use_compact_sharded_contract(tmp_path: Path) -
 
     write_parquet(simulation / "source_teams_red.parquet", [{"source_team_id": "t1", "game_version": "red"}])
     write_parquet(simulation / "source_team_members_red.parquet", [{"team_member_id": "m1", "source_team_id": "t1", "game_version": "red", "slot": 1, "pokemon_species": "pikachu", "level": 10}])
-    write_parquet(simulation / "member_move_options_red.parquet", [{"team_member_id": "m1", "source_team_id": "t1", "game_version": "red", "move_name": "tackle", "option_rank": 1}])
+    write_parquet(
+        simulation / "member_moveset_combos_red.parquet",
+        [{"moveset_combo_id": "c1", "team_id": "t1", "pokemon_instance_id": "m1", "slot_index": 1, "move_1": "tackle"}],
+    )
     write_json(snapshots / "red_boss_snapshots.jsonl", [])
 
     create_silver_manifest(tmp_path)
@@ -32,7 +35,7 @@ def test_manifest_dataset_entries_use_compact_sharded_contract(tmp_path: Path) -
 
     assert datasets["simulation_inputs_teams"]["glob"] == "source_teams_*.parquet"
     assert datasets["source_team_members"]["glob"] == "source_team_members_*.parquet"
-    assert datasets["member_move_options"]["glob"] == "member_move_options_*.parquet"
+    assert datasets["member_moveset_combos"]["glob"] == "member_moveset_combos_*.parquet"
 
 
 def test_gold_simulation_defaults_to_sharded_discovery(monkeypatch, tmp_path: Path) -> None:
@@ -52,4 +55,4 @@ def test_gold_simulation_defaults_to_sharded_discovery(monkeypatch, tmp_path: Pa
 
     assert captured["teams_path"] is None
     assert captured["team_members_path"] is None
-    assert captured["member_move_options_path"] is None
+    assert captured["member_moveset_combos_path"] is None

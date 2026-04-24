@@ -73,6 +73,7 @@ def run_gold_simulation_from_silver(
 
     teams_path = required_input_files.get("teams") if required_input_files else None
     team_members_path = required_input_files.get("team_members") if required_input_files else None
+    member_moveset_combos_path = required_input_files.get("member_moveset_combos") if required_input_files else None
     member_move_options_path = required_input_files.get("member_move_options") if required_input_files else None
 
     loader_kwargs: dict[str, Any] = {
@@ -80,6 +81,7 @@ def run_gold_simulation_from_silver(
         "simulation_dirname": SILVER_SIMULATION_DIRNAME,
         "teams_path": teams_path,
         "team_members_path": team_members_path,
+        "member_moveset_combos_path": member_moveset_combos_path,
         "member_move_options_path": member_move_options_path,
     }
 
