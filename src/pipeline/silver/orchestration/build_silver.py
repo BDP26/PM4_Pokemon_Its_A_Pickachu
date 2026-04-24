@@ -132,6 +132,11 @@ def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
     }
 
 
+def _series_frame(values_by_column: dict[str, set[str]]) -> pd.DataFrame:
+    """Build a compact dataframe from per-column unique values."""
+    return pd.DataFrame({column: pd.Series(sorted(values)) for column, values in values_by_column.items()})
+
+
 def _build_combat_pool_rows_for_game(
     source_teams: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -503,9 +508,19 @@ def build_silver_from_bronze(
     total_boss_teams = 0
     total_player_teams = 0
     total_team_members = 0
-    all_team_metadata_rows: list[dict[str, Any]] = []
-    all_team_members_rows: list[dict[str, Any]] = []
-    all_team_member_moves_rows: list[dict[str, Any]] = []
+    team_metadata_values: dict[str, set[str]] = {
+        "team_id": set(),
+        "game_version": set(),
+    }
+    team_member_values: dict[str, set[str]] = {
+        "team_member_id": set(),
+        "team_id": set(),
+        "game_version": set(),
+    }
+    team_member_move_values: dict[str, set[str]] = {
+        "team_member_id": set(),
+        "team_id": set(),
+    }
 
     boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
@@ -541,9 +556,33 @@ def build_silver_from_bronze(
         team_metadata_rows = _build_team_metadata_rows(validated_teams)
         team_members = build_team_members_table(validated_teams)
         team_member_moves = build_team_member_moves_table(validated_teams, all_move_data)
-        all_team_metadata_rows.extend(team_metadata_rows)
-        all_team_members_rows.extend(team_members)
-        all_team_member_moves_rows.extend(team_member_moves)
+
+        for row in team_metadata_rows:
+            team_id = str(row.get("team_id") or "").strip().lower()
+            game_version = str(row.get("game_version") or "").strip().lower()
+            if team_id:
+                team_metadata_values["team_id"].add(team_id)
+            if game_version:
+                team_metadata_values["game_version"].add(game_version)
+
+        for row in team_members:
+            team_member_id = str(row.get("team_member_id") or "").strip().lower()
+            team_id = str(row.get("team_id") or "").strip().lower()
+            game_version = str(row.get("game_version") or "").strip().lower()
+            if team_member_id:
+                team_member_values["team_member_id"].add(team_member_id)
+            if team_id:
+                team_member_values["team_id"].add(team_id)
+            if game_version:
+                team_member_values["game_version"].add(game_version)
+
+        for row in team_member_moves:
+            team_member_id = str(row.get("team_member_id") or "").strip().lower()
+            team_id = str(row.get("team_id") or "").strip().lower()
+            if team_member_id:
+                team_member_move_values["team_member_id"].add(team_member_id)
+            if team_id:
+                team_member_move_values["team_id"].add(team_id)
 
         write_parquet(paths["teams"], team_metadata_rows)
         write_parquet(paths["team_members"], team_members)
@@ -582,9 +621,9 @@ def build_silver_from_bronze(
             "bosses": pd.DataFrame(bosses_table),
             "locations": pd.DataFrame(locations_table),
             "encounters": encounters_frame,
-            "teams": pd.DataFrame(all_team_metadata_rows),
-            "team_members": pd.DataFrame(all_team_members_rows),
-            "team_member_moves": pd.DataFrame(all_team_member_moves_rows),
+            "teams": _series_frame(team_metadata_values),
+            "team_members": _series_frame(team_member_values),
+            "team_member_moves": _series_frame(team_member_move_values),
             "move_reference": move_reference_df,
             "learnable_moves": learnable_reference_df,
         }
