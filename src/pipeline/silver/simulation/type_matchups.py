@@ -7,21 +7,22 @@ import math
 import os
 import random
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
-from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
-from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
     SILVER_SIMULATION_DIRNAME,
     SIMULATION_CONFIG,
 )
+from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
+from src.pipeline.silver.move_power import resolve_effective_power
 
 logger = logging.getLogger(__name__)
+
 
 class MoveProfile(TypedDict):
     name: str
@@ -195,8 +196,27 @@ def _is_nullish(value: Any) -> bool:
 def _normalize_profile_key(value: Any) -> str:
     if _is_nullish(value):
         return ""
-    normalized = str(value).strip().lower().replace(" ", "-").replace("_", "-")
-    return normalized
+    return str(value).strip().lower().replace(" ", "-").replace("_", "-")
+
+
+def _normalized_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    return str(value).strip().lower()
+
+
+def _is_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and math.isnan(value):
+            return False
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 def _require_non_null(row: dict[str, Any], column: str, context: str) -> Any:
@@ -210,6 +230,7 @@ def load_pokemon_profiles_from_silver(silver_dir: Path) -> dict[str, dict[str, A
     pokemon_data_path = silver_dir / "references" / "pokemon_data.parquet"
     if not pokemon_data_path.exists():
         raise FileNotFoundError(f"Pokemon reference parquet missing: {pokemon_data_path}")
+
     pokemon_data_df = read_parquet(pokemon_data_path)
     profiles: dict[str, dict[str, Any]] = {}
     strong_name_keys: set[str] = set()
@@ -222,6 +243,7 @@ def load_pokemon_profiles_from_silver(silver_dir: Path) -> dict[str, dict[str, A
         "normalized_species",
         "resolved_pokemon_name",
     ]
+
     for row in pokemon_data_df.to_dict(orient="records"):
         name = _normalize_profile_key(_require_non_null(row, "name", "pokemon_data.parquet"))
         _require_non_null(row, "type_1", f"pokemon_data.parquet[{name}]")
@@ -239,7 +261,11 @@ def load_pokemon_profiles_from_silver(silver_dir: Path) -> dict[str, dict[str, A
                 if isinstance(value, str) and value.strip()
             ],
             "type_1": str(row.get("type_1") or "").title(),
-            "type_2": str(row.get("type_2")).title() if isinstance(row.get("type_2"), str) and str(row.get("type_2")).strip() else None,
+            "type_2": (
+                str(row.get("type_2")).title()
+                if isinstance(row.get("type_2"), str) and str(row.get("type_2")).strip()
+                else None
+            ),
             "hp": int(row.get("base_hp")),
             "attack": int(row.get("base_attack")),
             "defense": int(row.get("base_defense")),
@@ -264,6 +290,7 @@ def load_pokemon_profiles_from_silver(silver_dir: Path) -> dict[str, dict[str, A
                 "speed": int(row.get("base_speed")),
             },
         }
+
         for column in alias_columns:
             key = _normalize_profile_key(row.get(column))
             if not key:
@@ -283,13 +310,16 @@ def load_move_profiles_from_silver(silver_dir: Path) -> dict[str, MoveProfile]:
     move_reference_path = silver_dir / "references" / "move_reference.parquet"
     if not move_reference_path.exists():
         raise FileNotFoundError(f"Move reference parquet missing: {move_reference_path}")
+
     move_ref_df = read_parquet(move_reference_path)
     profiles: dict[str, MoveProfile] = {}
+
     for row in move_ref_df.to_dict(orient="records"):
         move_name = _normalize_profile_key(_require_non_null(row, "move_name", "move_reference.parquet"))
         move_type = row.get("type")
         if _is_nullish(move_type):
             raise ValueError(f"move_reference.parquet[{move_name}]: required column 'type' is null")
+
         is_status_move = bool(row.get("is_status_move"))
         damage_class_value = row.get("damage_class")
         if _is_nullish(damage_class_value):
@@ -299,14 +329,17 @@ def load_move_profiles_from_silver(silver_dir: Path) -> dict[str, MoveProfile]:
                 raise ValueError(f"move_reference.parquet[{move_name}]: damage_class is null for non-status move")
         else:
             damage_class = str(damage_class_value).strip().lower()
+
         effective_power = row.get("effective_power")
         if _is_nullish(effective_power):
             effective_power = 0.0
+
         raw_power = row.get("raw_power")
         if _is_nullish(raw_power):
             raw_power = row.get("power")
         if _is_nullish(raw_power):
             raw_power = 0.0
+
         accuracy = row.get("accuracy")
         if isinstance(accuracy, float) and math.isnan(accuracy):
             accuracy = None
@@ -328,6 +361,7 @@ def load_move_profiles_from_silver(silver_dir: Path) -> dict[str, MoveProfile]:
             "version_group": "reference",
             "degraded_data": False,
         }
+
     return profiles
 
 
@@ -379,8 +413,10 @@ def _get_pokemon_profile(species_id: str, warnings: WarningCollector) -> tuple[d
     cached = _LOCAL_POKEMON_PROFILES.get(species_id)
     if cached is not None:
         return cached, False
+
     if not _allow_simulation_fallbacks():
         raise ValueError(f"Missing Pokemon profile in pokemon_data.parquet for '{species_id}'")
+
     warnings.warn(f"Missing Pokemon profile for '{species_id}'; using deterministic fallback profile")
     return (
         {
@@ -400,8 +436,10 @@ def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveP
     cached = _LOCAL_MOVE_PROFILES.get(move_name)
     if cached is not None:
         return cached, False
+
     if not _allow_simulation_fallbacks():
         raise ValueError(f"Missing move profile in move_reference.parquet for '{move_name}'")
+
     effective_power, power_handling = resolve_effective_power(move_name, 40, "physical")
     warnings.warn(f"Missing move profile for '{move_name}'; using deterministic fallback profile")
     return (
@@ -426,33 +464,6 @@ def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveP
     )
 
 
-def _validate_profile_coverage(teams_data: list[dict[str, Any]]) -> None:
-    required_species: set[str] = set()
-    required_moves: set[str] = set()
-    for team in teams_data:
-        for member in _team_members(team):
-            species_id = normalize_species_name(str(member.get("species") or ""))
-            if species_id:
-                required_species.add(species_id)
-            for move in cast(list[str], member.get("moves", [])):
-                normalized_move = _normalize_move_name(move)
-                if normalized_move:
-                    required_moves.add(normalized_move)
-
-    missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
-    missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
-    if missing_species:
-        raise ValueError(
-            "Missing Pokemon profiles in pokemon_data.parquet: "
-            f"total={len(missing_species)}, examples={','.join(missing_species[:50])}"
-        )
-    if missing_moves:
-        raise ValueError(
-            "Missing move profiles in move_reference.parquet: "
-            f"total={len(missing_moves)}, examples={','.join(missing_moves[:50])}"
-        )
-
-
 def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
     pokemon_entries = team.get("pokemon", [])
     level_entries = team.get("levels", [])
@@ -467,11 +478,18 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
         species = entry.get("name") if isinstance(entry, dict) else entry
         if not isinstance(species, str) or not species:
             continue
-        raw_level = level_entries[slot_idx] if isinstance(level_entries, list) and slot_idx < len(level_entries) else team.get("avg_level", 20)
+
+        raw_level = (
+            level_entries[slot_idx]
+            if isinstance(level_entries, list) and slot_idx < len(level_entries)
+            else team.get("avg_level", 20)
+        )
         raw_moves = move_entries[slot_idx] if isinstance(move_entries, list) and slot_idx < len(move_entries) else []
+
         filtered_placeholders = 0
         moves: list[str] = []
         seen_moves: set[str] = set()
+
         if isinstance(raw_moves, list):
             for move in raw_moves:
                 normalized_move = _normalize_move_name(move)
@@ -482,6 +500,7 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
                     continue
                 seen_moves.add(normalized_move)
                 moves.append(normalized_move)
+
         if filtered_placeholders > 0:
             logger.info(
                 "[type_matchups] filtered invalid move placeholders team_id=%s slot=%s count=%s",
@@ -489,15 +508,52 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
                 slot_idx + 1,
                 filtered_placeholders,
             )
+
         members.append(
             {
                 "species": species,
                 "level": int(raw_level or team.get("avg_level", 20) or 20),
                 "moves": moves,
-                "pokemon_instance_id": instance_entries[slot_idx] if isinstance(instance_entries, list) and slot_idx < len(instance_entries) else None,
+                "pokemon_instance_id": (
+                    instance_entries[slot_idx]
+                    if isinstance(instance_entries, list) and slot_idx < len(instance_entries)
+                    else None
+                ),
             }
         )
+
     return members
+
+
+def _validate_profile_coverage(teams_data: list[dict[str, Any]]) -> None:
+    required_species: set[str] = set()
+    required_moves: set[str] = set()
+
+    for team in teams_data:
+        for member in _team_members(team):
+            species_id = normalize_species_name(str(member.get("species") or ""))
+            if species_id:
+                required_species.add(species_id)
+
+            for move in cast(list[str], member.get("moves", [])):
+                normalized_move = _normalize_move_name(move)
+                if normalized_move:
+                    required_moves.add(normalized_move)
+
+    missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
+    missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
+
+    if missing_species:
+        raise ValueError(
+            "Missing Pokemon profiles in pokemon_data.parquet: "
+            f"total={len(missing_species)}, examples={','.join(missing_species[:50])}"
+        )
+
+    if missing_moves:
+        raise ValueError(
+            "Missing move profiles in move_reference.parquet: "
+            f"total={len(missing_moves)}, examples={','.join(missing_moves[:50])}"
+        )
 
 
 def _version_group_for_game(game_version: str | None) -> str | None:
@@ -514,8 +570,10 @@ def _calculate_max_hp(base_hp: int, level: int) -> int:
 def _type_multiplier(move_type: str, defender_types: list[str], type_chart: dict[str, dict[str, float]]) -> float:
     multiplier = 1.0
     attacking_type = move_type.title()
+
     for defending_type in defender_types or ["Normal"]:
         multiplier *= float(type_chart.get(attacking_type, {}).get(defending_type.title(), 1.0))
+
     return multiplier
 
 
@@ -537,13 +595,17 @@ def _legal_moves_for_pokemon(
             normalized_move = _normalize_move_name(move_name)
             if not normalized_move or normalized_move in seen_moves:
                 continue
+
             move_profile, move_degraded = _get_move_profile(normalized_move, warnings)
             if move_degraded:
                 degraded = True
+
             if float(move_profile.get("effective_power", 0.0) or 0.0) <= 0:
                 continue
+
             legal_moves.append(move_profile)
             seen_moves.add(normalized_move)
+
         if legal_moves:
             return legal_moves, degraded
 
@@ -577,6 +639,7 @@ def _legal_moves_for_pokemon(
         move_profile, move_degraded = _get_move_profile(move_name, warnings)
         if move_degraded:
             degraded = True
+
         if float(move_profile.get("effective_power", 0.0) or 0.0) <= 0:
             continue
 
@@ -610,6 +673,7 @@ def filter_simulation_teams(teams_data: list[dict[str, Any]]) -> tuple[list[dict
             species = str(member.get("species") or "")
             level = int(member.get("level") or 1)
             warnings = WarningCollector()
+
             legal_moves, _ = _legal_moves_for_pokemon(
                 normalize_species_name(species),
                 level,
@@ -617,8 +681,10 @@ def filter_simulation_teams(teams_data: list[dict[str, Any]]) -> tuple[list[dict
                 warnings,
                 preferred_moves=cast(list[str], member.get("moves", [])),
             )
+
             legal_move_names = [_normalize_move_name(move.get("name")) for move in legal_moves]
             legal_move_names = [name for name in legal_move_names if name]
+
             if not legal_move_names:
                 skipped_members += 1
                 logger.warning(
@@ -628,6 +694,7 @@ def filter_simulation_teams(teams_data: list[dict[str, Any]]) -> tuple[list[dict
                     team_id,
                 )
                 continue
+
             valid_members.append(
                 {
                     **member,
@@ -644,8 +711,10 @@ def filter_simulation_teams(teams_data: list[dict[str, Any]]) -> tuple[list[dict
         filtered_team["pokemon"] = [member["species"] for member in valid_members]
         filtered_team["levels"] = [int(member.get("level") or 1) for member in valid_members]
         filtered_team["moves"] = [cast(list[str], member.get("moves", [])) for member in valid_members]
+
         if "pokemon_instance_ids" in team:
             filtered_team["pokemon_instance_ids"] = [member.get("pokemon_instance_id") for member in valid_members]
+
         filtered_teams.append(filtered_team)
 
     return filtered_teams, skipped_members, dropped_teams
@@ -692,8 +761,18 @@ def _choose_best_move(attacker: CombatProfile, defender: CombatProfile, type_cha
         power = float(move.get("effective_power", 0.0) or 0.0)
         multiplier = _type_multiplier(move["type"], defender["types"], type_chart)
         stab = 1.5 if move["type"].title() in attacker["types"] else 1.0
-        attack_stat = attacker["stats"].get("attack", 50) if move["damage_class"] == "physical" else attacker["stats"].get("sp_attack", 50)
-        defense_stat = defender["stats"].get("defense", 50) if move["damage_class"] == "physical" else defender["stats"].get("sp_defense", 50)
+
+        attack_stat = (
+            attacker["stats"].get("attack", 50)
+            if move["damage_class"] == "physical"
+            else attacker["stats"].get("sp_attack", 50)
+        )
+        defense_stat = (
+            defender["stats"].get("defense", 50)
+            if move["damage_class"] == "physical"
+            else defender["stats"].get("sp_defense", 50)
+        )
+
         score = power * multiplier * stab * max(1.0, attack_stat / max(1, defense_stat))
         if score > best_score:
             best_score = score
@@ -714,8 +793,17 @@ def _calculate_damage(
     if power <= 0:
         return 0
 
-    attack_stat = attacker["stats"].get("attack", 50) if move["damage_class"] == "physical" else attacker["stats"].get("sp_attack", 50)
-    defense_stat = defender["stats"].get("defense", 50) if move["damage_class"] == "physical" else defender["stats"].get("sp_defense", 50)
+    attack_stat = (
+        attacker["stats"].get("attack", 50)
+        if move["damage_class"] == "physical"
+        else attacker["stats"].get("sp_attack", 50)
+    )
+    defense_stat = (
+        defender["stats"].get("defense", 50)
+        if move["damage_class"] == "physical"
+        else defender["stats"].get("sp_defense", 50)
+    )
+
     base = (((2 * attacker["level"] / 5) + 2) * power * max(1, attack_stat) / max(1, defense_stat)) / 50 + 2
 
     stab = 1.5 if move["type"].title() in attacker["types"] else 1.0
@@ -723,18 +811,19 @@ def _calculate_damage(
     crit = 1.5 if rng.random() < config.crit_chance else 1.0
     randomness = rng.uniform(config.damage_randomness_min, config.damage_randomness_max)
 
-    damage = int(max(1, base * stab * type_effectiveness * crit * randomness))
-    return damage
+    return int(max(1, base * stab * type_effectiveness * crit * randomness))
 
 
 def _attempt_move_hit(move: MoveProfile, rng: random.Random) -> bool:
     accuracy = move.get("accuracy")
     if accuracy is None:
         return True
+
     try:
         accuracy_value = int(accuracy)
     except (TypeError, ValueError):
         return True
+
     return rng.random() <= (max(1, min(100, accuracy_value)) / 100.0)
 
 
@@ -777,6 +866,7 @@ def simulate_one_vs_one(
                     "defender_move_used": defender_last_move,
                     "degraded_data": degraded,
                 }
+
             _take_hit(defender, attacker, defender_move)
             if attacker["current_hp"] == 0:
                 return {
@@ -800,6 +890,7 @@ def simulate_one_vs_one(
                     "defender_move_used": defender_last_move,
                     "degraded_data": degraded,
                 }
+
             _take_hit(attacker, defender, attacker_move)
             if defender["current_hp"] == 0:
                 return {
@@ -845,12 +936,31 @@ def _simulation_score(
 
 
 def _is_player_candidate_team(team: dict[str, Any]) -> bool:
-    return bool(team.get("is_player_candidate"))
+    team_role = _normalized_text(team.get("team_role"))
+    origin = _normalized_text(team.get("origin"))
+
+    if team_role == "boss":
+        return False
+    if _is_truthy_flag(team.get("is_boss_team")):
+        return False
+
+    return _is_truthy_flag(team.get("is_player_candidate")) and origin != "kaggle"
 
 
 def _is_boss_team(team: dict[str, Any]) -> bool:
-    boss_name = team.get("boss_name")
-    return isinstance(boss_name, str) and bool(boss_name.strip())
+    team_role = _normalized_text(team.get("team_role"))
+    origin = _normalized_text(team.get("origin"))
+
+    if team_role == "boss":
+        return True
+    if _is_truthy_flag(team.get("is_boss_team")):
+        return True
+
+    # Backward-compatible fallback for real Kaggle boss rows only.
+    if origin == "kaggle" and not _is_truthy_flag(team.get("is_player_candidate")):
+        return True
+
+    return False
 
 
 def _boss_level_cap(team: dict[str, Any]) -> int | None:
@@ -860,23 +970,29 @@ def _boss_level_cap(team: dict[str, Any]) -> int | None:
             levels.append(max(1, int(member.get("level", 1) or 1)))
         except Exception:
             continue
+
     if levels:
         return max(levels)
+
     avg = team.get("avg_level")
     if isinstance(avg, (int, float)):
         return max(1, int(avg))
+
     return None
 
 
-def _apply_level_plausibility_filter(attacker_team: dict[str, Any], defender_team: dict[str, Any], config: BattleSimulationConfig) -> bool:
+def _apply_level_plausibility_filter(
+    attacker_team: dict[str, Any],
+    defender_team: dict[str, Any],
+    config: BattleSimulationConfig,
+) -> bool:
     player_avg = attacker_team.get("avg_level")
     boss_avg = defender_team.get("avg_level")
+
     if not isinstance(player_avg, (int, float)) or not isinstance(boss_avg, (int, float)):
         return True
-    return (
-        player_avg <= boss_avg + config.max_overlevel
-        and player_avg >= boss_avg - config.max_underlevel
-    )
+
+    return player_avg <= boss_avg + config.max_overlevel and player_avg >= boss_avg - config.max_underlevel
 
 
 def _normalized_game_version(value: str | None) -> str | None:
@@ -893,21 +1009,93 @@ def _normalized_boss_label(value: Any) -> str | None:
     return cleaned or None
 
 
-def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
-    attacker_target = _normalized_boss_label(attacker_team.get("gym"))
-    if attacker_target is None:
-        return False
-    defender_targets = {
-        label
-        for label in (
-            _normalized_boss_label(defender_team.get("gym")),
-            _normalized_boss_label(defender_team.get("boss_name")),
+def _target_label_for_attacker(team: dict[str, Any]) -> str | None:
+    return (
+        _normalized_boss_label(team.get("gym"))
+        or _normalized_boss_label(team.get("target_boss"))
+        or _normalized_boss_label(team.get("boss_name"))
+    )
+
+
+def _target_label_for_defender(team: dict[str, Any]) -> str | None:
+    return (
+        _normalized_boss_label(team.get("gym"))
+        or _normalized_boss_label(team.get("boss_name"))
+        or _normalized_boss_label(team.get("target_boss"))
+    )
+
+
+def _validate_team_roles_for_simulation(teams_with_id: list[dict[str, Any]]) -> None:
+    overlap = [
+        team
+        for team in teams_with_id
+        if _is_player_candidate_team(team) and _is_boss_team(team)
+    ]
+
+    if overlap:
+        examples = [str(team.get("team_id")) for team in overlap[:10]]
+        raise ValueError(
+            "Teams cannot be both player candidates and boss teams: "
+            f"count={len(overlap)}, examples={examples}"
         )
-        if label is not None
-    }
-    if not defender_targets:
+
+    player_with_missing_target = [
+        team
+        for team in teams_with_id
+        if _is_player_candidate_team(team) and _target_label_for_attacker(team) is None
+    ]
+
+    if player_with_missing_target:
+        examples = [str(team.get("team_id")) for team in player_with_missing_target[:10]]
+        raise ValueError(
+            "Player candidate teams are missing simulation target labels: "
+            f"count={len(player_with_missing_target)}, examples={examples}"
+        )
+
+    boss_with_missing_target = [
+        team
+        for team in teams_with_id
+        if _is_boss_team(team) and _target_label_for_defender(team) is None
+    ]
+
+    if boss_with_missing_target:
+        examples = [str(team.get("team_id")) for team in boss_with_missing_target[:10]]
+        raise ValueError(
+            "Boss teams are missing simulation target labels: "
+            f"count={len(boss_with_missing_target)}, examples={examples}"
+        )
+
+
+def _log_team_role_diagnostics(teams_with_id: list[dict[str, Any]]) -> None:
+    role_counts: dict[str, int] = {}
+    origin_counts: dict[str, int] = {}
+
+    for team in teams_with_id:
+        role = _normalized_text(team.get("team_role")) or "<missing>"
+        origin = _normalized_text(team.get("origin")) or "<missing>"
+        role_counts[role] = role_counts.get(role, 0) + 1
+        origin_counts[origin] = origin_counts.get(origin, 0) + 1
+
+    overlap_count = sum(
+        1 for team in teams_with_id if _is_player_candidate_team(team) and _is_boss_team(team)
+    )
+
+    logger.info(
+        "[type_matchups] team role diagnostics roles=%s origins=%s overlap=%s",
+        role_counts,
+        origin_counts,
+        overlap_count,
+    )
+
+
+def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
+    attacker_target = _target_label_for_attacker(attacker_team)
+    defender_target = _target_label_for_defender(defender_team)
+
+    if attacker_target is None or defender_target is None:
         return False
-    return attacker_target in defender_targets
+
+    return attacker_target == defender_target
 
 
 def _is_version_compatible(
@@ -917,8 +1105,10 @@ def _is_version_compatible(
 ) -> bool:
     attacker = _normalized_game_version(attacker_game_version)
     defender = _normalized_game_version(defender_game_version)
+
     if not config.require_exact_version_match:
         return True
+
     return attacker is not None and defender is not None and attacker == defender
 
 
@@ -926,9 +1116,11 @@ def load_type_chart(bronze_dir: Path = BRONZE_DIR) -> dict[str, dict[str, float]
     type_chart_path = bronze_dir / "type_chart.json"
     if not type_chart_path.exists():
         raise FileNotFoundError(f"Type chart missing: {type_chart_path}")
+
     type_chart = cast(dict[str, dict[str, float]], read_json(type_chart_path))
     if not isinstance(type_chart, dict) or not type_chart:
         raise ValueError(f"Type chart at {type_chart_path} is empty or invalid")
+
     return type_chart
 
 
@@ -953,6 +1145,7 @@ def simulate_team_battle_once(
         )
         for member in _team_members(attacker_team)
     ]
+
     defender_profiles = [
         get_pokemon_combat_profile(
             species=member["species"],
@@ -1006,6 +1199,14 @@ def simulate_team_battle_once(
     attacker_win = attacker_remaining_pokemon > 0 and defender_remaining_pokemon == 0
     winner_team_id = attacker_team.get("team_id") if attacker_win else defender_team.get("team_id")
 
+    simulation_score = _simulation_score(
+        attacker_win,
+        attacker_remaining_pokemon,
+        defender_remaining_pokemon,
+        attacker_total_remaining_hp,
+        defender_total_remaining_hp,
+    )
+
     return {
         "team_id_attacker": attacker_team.get("team_id"),
         "team_id_defender": defender_team.get("team_id"),
@@ -1016,13 +1217,7 @@ def simulate_team_battle_once(
         "attacker_total_remaining_hp": attacker_total_remaining_hp,
         "defender_total_remaining_hp": defender_total_remaining_hp,
         "battle_turns": battle_turns,
-        "simulation_score": _simulation_score(
-            attacker_win,
-            attacker_remaining_pokemon,
-            defender_remaining_pokemon,
-            attacker_total_remaining_hp,
-            defender_total_remaining_hp,
-        ),
+        "simulation_score": simulation_score,
         "degraded_data": warnings.has_warnings(),
         "warnings": warnings.all(),
         "duel_summaries": duel_summaries,
@@ -1033,15 +1228,45 @@ def simulate_team_battle_once(
         "attacker_game_version": _normalized_game_version(attacker_game_version),
         "defender_game_version": _normalized_game_version(defender_game_version),
         "is_compatible_version": _is_version_compatible(attacker_game_version, defender_game_version, config),
-        "representative_simulation_score": _simulation_score(
-            attacker_win,
-            attacker_remaining_pokemon,
-            defender_remaining_pokemon,
-            attacker_total_remaining_hp,
-            defender_total_remaining_hp,
-        ),
+        "representative_simulation_score": simulation_score,
         "representative_duel_summaries": duel_summaries,
         "representative_warnings": warnings.all(),
+    }
+
+
+def _filtered_result(
+    attacker_team: dict[str, Any],
+    defender_team: dict[str, Any],
+    attacker_game_version: str | None,
+    defender_game_version: str | None,
+    warning: str,
+    n_trials: int,
+    compatible: bool,
+) -> TeamBattleResult:
+    return {
+        "team_id_attacker": attacker_team.get("team_id"),
+        "team_id_defender": defender_team.get("team_id"),
+        "attacker_win": False,
+        "winner_team_id": defender_team.get("team_id"),
+        "attacker_remaining_pokemon": 0,
+        "defender_remaining_pokemon": 0,
+        "attacker_total_remaining_hp": 0,
+        "defender_total_remaining_hp": 0,
+        "battle_turns": 0,
+        "simulation_score": -999.0,
+        "degraded_data": False,
+        "warnings": [warning],
+        "duel_summaries": [],
+        "predicted_player_win_chance": 0.0,
+        "attacker_wins": 0,
+        "attacker_losses": n_trials,
+        "n_trials": n_trials,
+        "attacker_game_version": _normalized_game_version(attacker_game_version),
+        "defender_game_version": _normalized_game_version(defender_game_version),
+        "is_compatible_version": compatible,
+        "representative_simulation_score": -999.0,
+        "representative_duel_summaries": [],
+        "representative_warnings": [warning],
     }
 
 
@@ -1056,58 +1281,26 @@ def simulate_team_battle(
     config: BattleSimulationConfig,
 ) -> TeamBattleResult:
     if not _is_version_compatible(attacker_game_version, defender_game_version, config):
-        return {
-            "team_id_attacker": attacker_team.get("team_id"),
-            "team_id_defender": defender_team.get("team_id"),
-            "attacker_win": False,
-            "winner_team_id": defender_team.get("team_id"),
-            "attacker_remaining_pokemon": 0,
-            "defender_remaining_pokemon": 0,
-            "attacker_total_remaining_hp": 0,
-            "defender_total_remaining_hp": 0,
-            "battle_turns": 0,
-            "simulation_score": -999.0,
-            "degraded_data": False,
-            "warnings": ["incompatible_game_versions"],
-            "duel_summaries": [],
-            "predicted_player_win_chance": 0.0,
-            "attacker_wins": 0,
-            "attacker_losses": n_trials,
-            "n_trials": n_trials,
-            "attacker_game_version": _normalized_game_version(attacker_game_version),
-            "defender_game_version": _normalized_game_version(defender_game_version),
-            "is_compatible_version": False,
-            "representative_simulation_score": -999.0,
-            "representative_duel_summaries": [],
-            "representative_warnings": ["incompatible_game_versions"],
-        }
+        return _filtered_result(
+            attacker_team,
+            defender_team,
+            attacker_game_version,
+            defender_game_version,
+            "incompatible_game_versions",
+            n_trials,
+            compatible=False,
+        )
 
     if not _apply_level_plausibility_filter(attacker_team, defender_team, config):
-        return {
-            "team_id_attacker": attacker_team.get("team_id"),
-            "team_id_defender": defender_team.get("team_id"),
-            "attacker_win": False,
-            "winner_team_id": defender_team.get("team_id"),
-            "attacker_remaining_pokemon": 0,
-            "defender_remaining_pokemon": 0,
-            "attacker_total_remaining_hp": 0,
-            "defender_total_remaining_hp": 0,
-            "battle_turns": 0,
-            "simulation_score": -999.0,
-            "degraded_data": False,
-            "warnings": ["level_plausibility_filter_failed"],
-            "duel_summaries": [],
-            "predicted_player_win_chance": 0.0,
-            "attacker_wins": 0,
-            "attacker_losses": n_trials,
-            "n_trials": n_trials,
-            "attacker_game_version": _normalized_game_version(attacker_game_version),
-            "defender_game_version": _normalized_game_version(defender_game_version),
-            "is_compatible_version": True,
-            "representative_simulation_score": -999.0,
-            "representative_duel_summaries": [],
-            "representative_warnings": ["level_plausibility_filter_failed"],
-        }
+        return _filtered_result(
+            attacker_team,
+            defender_team,
+            attacker_game_version,
+            defender_game_version,
+            "level_plausibility_filter_failed",
+            n_trials,
+            compatible=True,
+        )
 
     trial_results: list[TeamBattleResult] = []
     wins = 0
@@ -1129,6 +1322,7 @@ def simulate_team_battle(
 
     representative_result = max(trial_results, key=lambda r: r["simulation_score"])
     losses = max(0, n_trials - wins)
+
     avg_attacker_remaining_pokemon = round(
         sum(row["attacker_remaining_pokemon"] for row in trial_results) / max(1, n_trials),
         3,
@@ -1182,10 +1376,24 @@ def _run_local_simulations(
     config: BattleSimulationConfig,
 ) -> list[dict[str, Any]]:
     teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
+    _validate_team_roles_for_simulation(teams_with_id)
+    _log_team_role_diagnostics(teams_with_id)
+
     attackers = [team for team in teams_with_id if _is_player_candidate_team(team)]
     defenders = [team for team in teams_with_id if _is_boss_team(team)]
 
-    total_pairs = sum(1 for attacker_team in attackers for defender_team in defenders if _is_intended_boss_matchup(attacker_team, defender_team))
+    total_pairs = sum(
+        1
+        for attacker_team in attackers
+        for defender_team in defenders
+        if _is_intended_boss_matchup(attacker_team, defender_team)
+        and _is_version_compatible(
+            cast(str | None, attacker_team.get("game_version")),
+            cast(str | None, defender_team.get("game_version")),
+            config,
+        )
+    )
+
     logger.info(
         "[type_matchups] local engine start teams=%s attackers=%s defenders=%s pairs=%s",
         len(teams_with_id),
@@ -1193,6 +1401,7 @@ def _run_local_simulations(
         len(defenders),
         total_pairs,
     )
+
     if total_pairs == 0:
         return []
 
@@ -1205,10 +1414,13 @@ def _run_local_simulations(
         for defender_team in defenders:
             if not _is_intended_boss_matchup(attacker_team, defender_team):
                 continue
+
             attacker_game_version = cast(str | None, attacker_team.get("game_version"))
             defender_game_version = cast(str | None, defender_team.get("game_version"))
+
             if not _is_version_compatible(attacker_game_version, defender_game_version, config):
                 continue
+
             result = simulate_team_battle(
                 attacker_team=attacker_team,
                 defender_team=defender_team,
@@ -1216,10 +1428,15 @@ def _run_local_simulations(
                 attacker_game_version=attacker_game_version,
                 defender_game_version=defender_game_version,
                 n_trials=config.n_battle_trials,
-                rng_seed=_stable_pair_seed(attacker_team.get("team_id"), defender_team.get("team_id"), config.rng_seed),
+                rng_seed=_stable_pair_seed(
+                    attacker_team.get("team_id"),
+                    defender_team.get("team_id"),
+                    config.rng_seed,
+                ),
                 config=config,
             )
             simulations.append(result)
+
             pairs_done += 1
             if pairs_done % progress_interval == 0 or pairs_done == total_pairs:
                 elapsed = max(1e-9, time.perf_counter() - started_at)
@@ -1297,32 +1514,43 @@ def _safe_string(value: Any) -> str | None:
 def _normalize_summary_entries(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
+
     normalized: list[dict[str, str]] = []
     for entry in value:
         if not isinstance(entry, dict):
             continue
+
         normalized_entry: dict[str, str] = {}
         for key, entry_value in entry.items():
             normalized_key = str(key).strip()
             if not normalized_key:
                 continue
             normalized_entry[normalized_key] = "" if entry_value is None else str(entry_value)
+
         if normalized_entry:
             normalized.append(normalized_entry)
+
     return normalized
 
 
 def _normalize_result_row(row: dict[str, Any]) -> dict[str, Any] | None:
     attacker_id = _safe_string(row.get("team_id_attacker"))
     defender_id = _safe_string(row.get("team_id_defender"))
+
     if attacker_id is None or defender_id is None:
         return None
-    warnings = [str(item) for item in cast(list[Any], row.get("warnings", [])) if item is not None and str(item).strip()]
+
+    warnings = [
+        str(item)
+        for item in cast(list[Any], row.get("warnings", []))
+        if item is not None and str(item).strip()
+    ]
     rep_warnings = [
         str(item)
         for item in cast(list[Any], row.get("representative_warnings", []))
         if item is not None and str(item).strip()
     ]
+
     return {
         "team_id_attacker": attacker_id,
         "team_id_defender": defender_id,
@@ -1382,18 +1610,49 @@ def _run_spark_simulations(
 
     try:
         teams_with_id = [team for team in teams_data if team.get("team_id") is not None]
+
+        _validate_team_roles_for_simulation(teams_with_id)
+        _log_team_role_diagnostics(teams_with_id)
+
         attacker_count = sum(1 for team in teams_with_id if _is_player_candidate_team(team))
         defender_count = sum(1 for team in teams_with_id if _is_boss_team(team))
+
         logger.info(
             "[type_matchups] spark engine preparing teams=%s attackers=%s defenders=%s",
             len(teams_with_id),
             attacker_count,
             defender_count,
         )
+
+        if defender_count > 1000 and os.environ.get("PM4_ALLOW_LARGE_DEFENDER_SET", "0").strip() != "1":
+            defender_examples = [
+                {
+                    "team_id": team.get("team_id"),
+                    "team_role": team.get("team_role"),
+                    "origin": team.get("origin"),
+                    "is_player_candidate": team.get("is_player_candidate"),
+                    "is_boss_team": team.get("is_boss_team"),
+                    "boss_name": team.get("boss_name"),
+                    "gym": team.get("gym"),
+                }
+                for team in teams_with_id
+                if _is_boss_team(team)
+            ][:10]
+
+            raise ValueError(
+                "[type_matchups] suspiciously large defender set detected: "
+                f"defenders={defender_count}, examples={defender_examples}. "
+                "Boss detection should use team_role='boss' / is_boss_team=True, "
+                "not boss_name target metadata. Set PM4_ALLOW_LARGE_DEFENDER_SET=1 only for debugging."
+            )
+
         if attacker_count == 0 or defender_count == 0:
             return []
 
-        team_lookup: dict[str, dict[str, Any]] = {str(team.get("team_id")): team for team in teams_with_id}
+        team_lookup: dict[str, dict[str, Any]] = {
+            str(team.get("team_id")): team
+            for team in teams_with_id
+        }
 
         team_rows = [
             {
@@ -1401,73 +1660,78 @@ def _run_spark_simulations(
                 "is_player_candidate": bool(_is_player_candidate_team(team)),
                 "is_boss": bool(_is_boss_team(team)),
                 "game_version": _normalized_game_version(cast(str | None, team.get("game_version"))),
-                "gym_target": _normalized_boss_label(team.get("gym")),
-                "boss_target": _normalized_boss_label(team.get("gym")) or _normalized_boss_label(team.get("boss_name")),
+                "attacker_target": _target_label_for_attacker(team),
+                "defender_target": _target_label_for_defender(team),
+                "team_role": _normalized_text(team.get("team_role")) or None,
+                "origin": _normalized_text(team.get("origin")) or None,
             }
             for team in teams_with_id
         ]
+
         schema = T.StructType(
             [
                 T.StructField("team_id", T.StringType(), False),
                 T.StructField("is_player_candidate", T.BooleanType(), False),
                 T.StructField("is_boss", T.BooleanType(), False),
                 T.StructField("game_version", T.StringType(), True),
-                T.StructField("gym_target", T.StringType(), True),
-                T.StructField("boss_target", T.StringType(), True),
+                T.StructField("attacker_target", T.StringType(), True),
+                T.StructField("defender_target", T.StringType(), True),
+                T.StructField("team_role", T.StringType(), True),
+                T.StructField("origin", T.StringType(), True),
             ]
         )
 
         teams_df = spark.createDataFrame(team_rows, schema=schema)
+
         attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select(
             F.col("team_id").alias("attacker_id"),
             F.col("game_version").alias("game_version"),
-            F.col("gym_target").alias("target"),
+            F.col("attacker_target").alias("target"),
         )
+
         defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select(
             F.col("team_id").alias("defender_id"),
             F.col("game_version").alias("game_version"),
-            F.col("boss_target").alias("target"),
+            F.col("defender_target").alias("target"),
         )
+
         pairs_df = attackers_df.join(
             defenders_df,
             on=["game_version", "target"],
             how="inner",
         )
+
         pairs_df = pairs_df.where(
             F.col("game_version").isNotNull()
             & F.col("target").isNotNull()
             & F.col("attacker_id").isNotNull()
             & F.col("defender_id").isNotNull()
         )
+
         pairs_df = pairs_df.persist()
         total_pairs = int(pairs_df.count())
+
         if total_pairs == 0:
             pairs_df.unpersist()
             return []
-        invalid_pairs = int(
-            pairs_df.where(
-                F.col("game_version").isNull()
-                | F.col("target").isNull()
-                | F.col("attacker_id").isNull()
-                | F.col("defender_id").isNull()
-            ).count()
-        )
-        if invalid_pairs:
-            pairs_df.unpersist()
-            raise ValueError(f"[type_matchups] spark pairing produced invalid rows count={invalid_pairs}")
 
         group_counts_df = pairs_df.groupBy("game_version", "target").count()
         group_count = int(group_counts_df.count())
+
         top_groups = [
             (
                 str(row["game_version"] or ""),
                 str(row["target"] or ""),
                 int(row["count"] or 0),
             )
-            for row in group_counts_df.orderBy(F.desc("count"), F.asc("game_version"), F.asc("target")).limit(5).toLocalIterator()
+            for row in group_counts_df.orderBy(F.desc("count"), F.asc("game_version"), F.asc("target"))
+            .limit(5)
+            .toLocalIterator()
         ]
+
         partitions = max(4, min(128, total_pairs // 1000 + 1))
         pairs_df = pairs_df.repartition(partitions, "game_version", "target")
+
         logger.info(
             "[type_matchups] spark groups game_boss_groups=%s eligible_pairs=%s partitions=%s attackers=%s defenders=%s",
             group_count,
@@ -1476,6 +1740,7 @@ def _run_spark_simulations(
             attacker_count,
             defender_count,
         )
+
         if top_groups:
             logger.info("[type_matchups] spark largest groups top5=%s", top_groups)
 
@@ -1491,13 +1756,14 @@ def _run_spark_simulations(
             local_move_profiles = cast(dict[str, MoveProfile], move_profiles_bc.value)
             local_chart = cast(dict[str, dict[str, float]], chart_bc.value)
             local_config = BattleSimulationConfig(**cast(dict[str, Any], config_bc.value))
+
             _install_reference_profiles(local_pokemon_profiles, local_move_profiles)
+
             for row in rows:
                 attacker_team = local_teams[str(row.attacker_id)]
                 defender_team = local_teams[str(row.defender_id)]
                 game_version = cast(str | None, row.game_version)
-                if not _is_version_compatible(game_version, game_version, local_config):
-                    continue
+
                 result = simulate_team_battle(
                     attacker_team=attacker_team,
                     defender_team=defender_team,
@@ -1512,6 +1778,7 @@ def _run_spark_simulations(
                     ),
                     config=local_config,
                 )
+
                 normalized = _normalize_result_row(result)
                 if normalized is not None:
                     yield normalized
@@ -1519,11 +1786,15 @@ def _run_spark_simulations(
         result_rdd = pairs_df.rdd.mapPartitions(_simulate_partition)
         result_rows = [row for row in result_rdd.collect() if row]
         pairs_df.unpersist()
+
         if not result_rows:
             return []
+
         result_df = spark.createDataFrame(result_rows, schema=_result_schema(T))
         result_df = result_df.orderBy("team_id_attacker", "team_id_defender")
+
         return [cast(dict[str, Any], row.asDict(recursive=True)) for row in result_df.toLocalIterator()]
+
     finally:
         spark.stop()
 
@@ -1532,6 +1803,7 @@ def _load_move_and_pokemon_profiles_from_disk(silver_dir: Path) -> None:
     pokemon_profiles = load_pokemon_profiles_from_silver(silver_dir)
     move_profiles = load_move_profiles_from_silver(silver_dir)
     _install_reference_profiles(pokemon_profiles, move_profiles)
+
     logger.info(
         "[type_matchups] loaded parquet reference profiles pokemon=%s moves=%s",
         len(_LOCAL_POKEMON_PROFILES),
@@ -1554,9 +1826,12 @@ def build_team_battle_simulations(
     _load_move_and_pokemon_profiles_from_disk(silver_dir)
 
     config = runtime_config or BattleSimulationConfig()
+
     if not _allow_simulation_fallbacks():
         _validate_profile_coverage(teams_data)
+
     filtered_teams, skipped_members, dropped_teams = filter_simulation_teams(teams_data)
+
     logger.info(
         "[simulation] filtered teams original=%s remaining=%s skipped_members=%s dropped_teams=%s",
         len(teams_data),
@@ -1564,11 +1839,13 @@ def build_team_battle_simulations(
         skipped_members,
         dropped_teams,
     )
+
     if not filtered_teams:
         logger.warning("[type_matchups] no valid teams remain after filtering; writing empty simulation outputs")
         write_parquet(simulation_dir / "team_battle_simulations.parquet", [])
         write_parquet(simulation_dir / "team_battle_simulation_diagnostics.parquet", [])
         return
+
     use_spark = _should_use_spark() if force_spark is None else bool(force_spark)
     logger.info("[type_matchups] engine=%s", "spark" if use_spark else "local")
 
@@ -1580,17 +1857,24 @@ def build_team_battle_simulations(
     incompatible_rows = [row for row in simulations if not bool(row.get("is_compatible_version", False))]
     if incompatible_rows:
         raise ValueError("Incompatible cross-version simulation rows detected; strict compatibility contract violated")
+
     if config.fail_on_degraded_data and any(bool(row.get("degraded_data", False)) for row in simulations):
         raise ValueError("Degraded simulation rows detected in strict mode; aborting output write")
 
     aggregate_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
+
     for row in simulations:
         aggregate_rows.append(
             {
                 key: value
                 for key, value in row.items()
-                if key not in {"representative_simulation_score", "representative_duel_summaries", "representative_warnings"}
+                if key
+                not in {
+                    "representative_simulation_score",
+                    "representative_duel_summaries",
+                    "representative_warnings",
+                }
             }
         )
         diagnostic_rows.append(
@@ -1605,6 +1889,7 @@ def build_team_battle_simulations(
 
     write_parquet(simulation_dir / "team_battle_simulations.parquet", aggregate_rows)
     write_parquet(simulation_dir / "team_battle_simulation_diagnostics.parquet", diagnostic_rows)
+
     logger.info(
         "[type_matchups] wrote team_battle_simulations rows=%s and diagnostics rows=%s elapsed_s=%.2f",
         len(aggregate_rows),
@@ -1618,4 +1903,8 @@ def build_type_matchups(
     silver_dir: Path = SILVER_DIR,
     bronze_dir: Path = BRONZE_DIR,
 ) -> None:
-    build_team_battle_simulations(teams_data=teams_data, silver_dir=silver_dir, bronze_dir=bronze_dir)
+    build_team_battle_simulations(
+        teams_data=teams_data,
+        silver_dir=silver_dir,
+        bronze_dir=bronze_dir,
+    )

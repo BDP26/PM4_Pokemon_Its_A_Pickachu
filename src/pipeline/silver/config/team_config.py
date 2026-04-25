@@ -1,4 +1,7 @@
 """Shared configuration for Silver team/moveset preparation."""
+
+from __future__ import annotations
+
 import os
 
 
@@ -13,30 +16,54 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return value if value >= minimum else minimum
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
 
+
 # Common moveset size used across team member and team-combination builders.
-MOVESET_WIDTH = 4
+MOVESET_WIDTH = _env_int("PM4_MOVESET_WIDTH", 4, minimum=1)
+
 
 # Map game keys to PokeAPI version-group names.
 GAME_TO_VERSION_GROUP: dict[str, str] = {
     "red": "red-blue",
     "blue": "red-blue",
+    "yellow": "yellow",
     "gold": "gold-silver",
     "silver": "gold-silver",
+    "crystal": "crystal",
     "ruby": "ruby-sapphire",
     "sapphire": "ruby-sapphire",
+    "emerald": "emerald",
+    "firered": "firered-leafgreen",
+    "leafgreen": "firered-leafgreen",
     "diamond": "diamond-pearl",
     "pearl": "diamond-pearl",
+    "platinum": "platinum",
+    "heartgold": "heartgold-soulsilver",
+    "soulsilver": "heartgold-soulsilver",
     "black": "black-white",
     "white": "black-white",
+    "black-2": "black-2-white-2",
+    "white-2": "black-2-white-2",
     "x": "x-y",
     "y": "x-y",
 }
+
 
 # Species form fallbacks to improve PokeAPI slug resolution.
 FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
@@ -49,43 +76,67 @@ FORM_LOOKUP_FALLBACKS: dict[str, tuple[str, ...]] = {
 
 GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 
-# Silver stores compact logical teams/members and per-member moveset combos only.
-# Full-team expansion/sampling is deferred to Gold/simulation.
-DEFAULT_MEMBER_MOVESET_COMBO_LIMIT = _env_int(
-    "PM4_MEMBER_MOVESET_COMBO_LIMIT",
-    _env_int("PM4_MEMBER_COMBO_LIMIT", 10),
-)
-DEFAULT_MEMBER_COMBO_LIMIT = DEFAULT_MEMBER_MOVESET_COMBO_LIMIT
-# Deprecated in Silver (kept for compatibility until callers migrate).
-DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
-TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000)
-ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
+
+# =========================
+# ACTIVE TEAM GENERATION CONTROLS
+# =========================
+#
+# Sweet-spot defaults:
+# - around 200–300 player variants per boss group after simulation sampling
+# - moderate move diversity
+# - no boss/team explosion
+#
+# Override with environment variables when needed.
+
+# Species / source-team diversity controls.
+DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 8, minimum=1)
+DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 18, minimum=1)
+DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 80, minimum=1)
 
 # Compact Silver move option controls.
-DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 8)
+DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 10, minimum=1)
+DEFAULT_MEMBER_MOVESET_COMBO_LIMIT = _env_int(
+    "PM4_MEMBER_MOVESET_COMBO_LIMIT",
+    _env_int("PM4_MEMBER_COMBO_LIMIT", 15, minimum=1),
+    minimum=1,
+)
+DEFAULT_MEMBER_COMBO_LIMIT = DEFAULT_MEMBER_MOVESET_COMBO_LIMIT
 
-# Species / team diversity controls
-DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 5)
-DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 12)
-DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 40)
-
-# Deprecated in Silver. Use Gold simulation sampling limits instead.
-DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
-DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT = _env_int("PM4_SIMULATION_TEAM_SAMPLE_LIMIT", 64, minimum=1)
+# Gold/simulation sampling controls.
+DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT = _env_int("PM4_SIMULATION_TEAM_SAMPLE_LIMIT", 160, minimum=1)
 DEFAULT_SIMULATION_ENUMERATION_THRESHOLD = _env_int("PM4_SIMULATION_ENUMERATION_THRESHOLD", 256, minimum=1)
 
-# Team structure
+# Team structure.
 # Pokémon battle teams are capped at six members in core games.
-DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 6)
-DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20)
+DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 6, minimum=1)
+DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20, minimum=1)
+
+
+# =========================
+# DEPRECATED COMPATIBILITY CONTROLS
+# =========================
+#
+# Silver now stores compact logical teams/members. Full-team expansion/sampling
+# belongs in Gold/simulation. These names remain so older callers do not break.
+
+DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
+TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000, minimum=1)
+ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
+DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
+
+
+# =========================
+# PARSER / IO CONTROLS
+# =========================
 
 KAGGLE_CSV_DELIMITER = ";"
 CSV_PROGRESS_LOG_INTERVAL = 250
-PLAYER_TEAM_PROGRESS_LOG_INTERVAL = _env_int("PM4_PLAYER_TEAM_PROGRESS_LOG_INTERVAL", 100)
-PARSER_MIN_BOSS_COVERAGE = max(0.0, min(1.0, float(os.getenv("PM4_PARSER_MIN_BOSS_COVERAGE", "0.85"))))
+PLAYER_TEAM_PROGRESS_LOG_INTERVAL = _env_int("PM4_PLAYER_TEAM_PROGRESS_LOG_INTERVAL", 100, minimum=1)
+PARSER_MIN_BOSS_COVERAGE = _env_float("PM4_PARSER_MIN_BOSS_COVERAGE", 0.85, minimum=0.0, maximum=1.0)
 
 REQUIRED_MOVES_PROGRESS_INTERVAL = 100
 SLOW_LOOKUP_WARNING_SECONDS = 2.0
+
 
 SPECIES_SLUG_ALIASES: dict[str, str] = {
     "mr mime": "mr-mime",
@@ -102,20 +153,40 @@ SPECIES_SLUG_ALIASES: dict[str, str] = {
 
 
 def resolve_runtime_team_config() -> dict[str, object]:
+    """Return effective team-generation settings for logging/debugging.
+
+    Active Silver controls define compact team generation and move options.
+    Deprecated controls are kept only so older callers/config snapshots do not break.
+    Gold simulation sampling should use simulation_team_sample_limit and
+    simulation_enumeration_threshold.
+    """
     return {
-        "member_combo_limit": DEFAULT_MEMBER_COMBO_LIMIT,
-        "member_moveset_combo_limit": DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
-        "team_variant_limit": DEFAULT_TEAM_VARIANT_LIMIT,
-        "team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
-        "allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
+        # Active species / source-team diversity controls.
         "catch_pool_size": DEFAULT_CATCH_POOL_SIZE,
         "source_team_pool_size": DEFAULT_SOURCE_TEAM_POOL_SIZE,
         "source_team_combo_limit": DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
-        "moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
-        "simulation_team_sample_limit": DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT,
-        "simulation_enumeration_threshold": DEFAULT_SIMULATION_ENUMERATION_THRESHOLD,
+
+        # Active per-member move diversity controls.
         "member_move_option_limit": DEFAULT_MEMBER_MOVE_OPTION_LIMIT,
+        "member_moveset_combo_limit": DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
+        "member_combo_limit": DEFAULT_MEMBER_COMBO_LIMIT,
+
+        # Active team structure controls.
         "team_member_limit": DEFAULT_TEAM_MEMBER_LIMIT,
         "member_level": DEFAULT_MEMBER_LEVEL,
+        "moveset_width": MOVESET_WIDTH,
+
+        # Active Gold/simulation sampling controls.
+        "simulation_team_sample_limit": DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT,
+        "simulation_enumeration_threshold": DEFAULT_SIMULATION_ENUMERATION_THRESHOLD,
+
+        # Parser / data quality controls.
         "parser_min_boss_coverage": PARSER_MIN_BOSS_COVERAGE,
+
+        # Deprecated compatibility controls.
+        # Silver now stores compact logical teams; full expansion/sampling belongs in Gold.
+        "deprecated_team_variant_limit": DEFAULT_TEAM_VARIANT_LIMIT,
+        "deprecated_moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
+        "deprecated_team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
+        "deprecated_allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
     }
