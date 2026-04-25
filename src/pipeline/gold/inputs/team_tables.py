@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,29 @@ def _validate_columns(frame: pd.DataFrame, required: set[str], name: str) -> Non
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"{name} missing required columns: {sorted(missing)}")
+
+
+def _coerce_fixed_moves(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_normalize_move_value(move) for move in value if _normalize_move_value(move)]
+    if isinstance(value, tuple):
+        return [_normalize_move_value(move) for move in value if _normalize_move_value(move)]
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        if isinstance(converted, list):
+            return [_normalize_move_value(move) for move in converted if _normalize_move_value(move)]
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [_normalize_move_value(move) for move in parsed if _normalize_move_value(move)]
+        normalized = _normalize_move_value(text)
+        return [normalized] if normalized else []
+    return []
 
 
 def _load_frame(path_or_paths: Path | list[Path] | None, simulation_dir: Path, glob_pattern: str) -> pd.DataFrame:
@@ -109,11 +133,20 @@ def load_reconstructed_teams_from_silver(
             if team_id:
                 meta_by_id[team_id] = row
 
+    def _is_boss_or_kaggle_team(team_id: str) -> bool:
+        meta = meta_by_id.get(team_id, {})
+        team_role = str(meta.get("team_role") or "").strip().lower()
+        origin = str(meta.get("origin") or "").strip().lower()
+        return team_role == "boss" or origin == "kaggle"
+
     moves_by_member: dict[str, list[str]] = {}
     combos_by_member: dict[str, list[list[str]]] = {}
     if not moveset_combos_df.empty:
         sorted_combos = moveset_combos_df.sort_values(["pokemon_instance_id", "combo_rank", "moveset_combo_id"])
         for row in sorted_combos.to_dict(orient="records"):
+            team_id = str(row.get("team_id") or "").strip()
+            if team_id and _is_boss_or_kaggle_team(team_id):
+                continue
             member_id = str(row.get("pokemon_instance_id") or "").strip()
             if not member_id:
                 continue
@@ -135,6 +168,9 @@ def load_reconstructed_teams_from_silver(
     if not move_options_df.empty:
         sorted_options = move_options_df.sort_values(["team_member_id", "option_rank", "move_name"])
         for row in sorted_options.to_dict(orient="records"):
+            team_id = str(row.get("source_team_id") or "").strip()
+            if team_id and _is_boss_or_kaggle_team(team_id):
+                continue
             member_id = str(row.get("team_member_id") or "").strip()
             move_name = _normalize_move_value(row.get("move_name"))
             if not member_id or not move_name:
@@ -170,7 +206,11 @@ def load_reconstructed_teams_from_silver(
                 # Deterministic bounded choice: use top-ranked combo only in base reconstruction.
                 moves.append(list(combos[0])[:4])
             else:
-                moves.append(_select_diverse_moves(list(moves_by_member.get(member_id, [])), width=4))
+                fixed_moves = _coerce_fixed_moves(member.get("fixed_moves"))
+                if fixed_moves:
+                    moves.append(fixed_moves[:4])
+                else:
+                    moves.append(_select_diverse_moves(list(moves_by_member.get(member_id, [])), width=4))
             instance_ids.append(member_id)
 
         if not pokemon:
@@ -182,7 +222,7 @@ def load_reconstructed_teams_from_silver(
             {
                 "team_id": team_id,
                 "game_version": str(meta.get("game_version") or members_sorted[0].get("game_version") or "").strip().lower(),
-                "team_role": meta.get("team_role", "player_source"),
+                "team_role": meta.get("team_role", "player"),
                 "boss_name": meta.get("boss_name"),
                 "gym": meta.get("gym") or meta.get("boss_name"),
                 "is_player_candidate": bool(meta.get("is_player_candidate", True)),

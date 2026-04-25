@@ -14,7 +14,8 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
             {
                 "source_team_id": "player_t1",
                 "game_version": "red",
-                "team_role": "player_source",
+                "team_role": "player",
+                "origin": "generated",
                 "boss_name": "brock",
                 "gym": "brock",
                 "is_player_candidate": True,
@@ -23,7 +24,8 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
             {
                 "source_team_id": "boss_t1",
                 "game_version": "red",
-                "team_role": "boss_source",
+                "team_role": "boss",
+                "origin": "kaggle",
                 "boss_name": "brock",
                 "gym": "brock",
                 "is_player_candidate": False,
@@ -35,7 +37,7 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
         simulation_dir / "source_team_members_red.parquet",
         [
             {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "slot": 1, "pokemon_species": "pikachu", "level": 12},
-            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "slot": 1, "pokemon_species": "geodude", "level": 12},
+            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "slot": 1, "pokemon_species": "geodude", "level": 12, "fixed_moves": ["tackle"]},
         ],
     )
     write_parquet(
@@ -58,7 +60,7 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
                 "pokemon_instance_id": "m2",
                 "slot_index": 1,
                 "combo_rank": 1,
-                "move_1": "tackle",
+                "move_1": "hyper-beam",
             },
         ],
     )
@@ -70,7 +72,7 @@ def _write_compact_inputs(simulation_dir: Path) -> None:
             {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": "slam", "option_rank": 3},
             {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": "double-team", "option_rank": 4},
             {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": "swift", "option_rank": 5},
-            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "move_name": "tackle", "option_rank": 1},
+            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "move_name": "surf", "option_rank": 1},
         ],
     )
 
@@ -89,6 +91,8 @@ def test_gold_loader_builds_bounded_moveset_variants(tmp_path: Path) -> None:
     assert "swift" in by_id["player_t1"]["moves"][0]
     assert by_id["player_t1"]["is_player_candidate"] is True
     assert by_id["boss_t1"]["is_player_candidate"] is False
+    assert by_id["boss_t1"]["moves"][0] == ["tackle"]
+    assert len([team for team in teams if team.get("team_role") == "boss"]) == 1
 
 
 def test_gold_simulation_consumes_compact_inputs(monkeypatch, tmp_path: Path) -> None:

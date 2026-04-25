@@ -1371,9 +1371,11 @@ def _run_spark_simulations(
         SparkSession.builder
         .appName("pokemon-team-battle-sim")
         .master("local[*]")
-        .config("spark.driver.host", "127.0.0.1")
+        .config("spark.ui.enabled", "true")
+        .config("spark.ui.port", "4040")
+        .config("spark.ui.bindAddress", "127.0.0.1")
         .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.ui.enabled", "false")
+        .config("spark.driver.host", "127.0.0.1")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
@@ -1416,23 +1418,66 @@ def _run_spark_simulations(
         )
 
         teams_df = spark.createDataFrame(team_rows, schema=schema)
-        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select("team_id", "game_version", "gym_target")
-        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select("team_id", "game_version", "boss_target")
-        pairs_df = attackers_df.alias("a").crossJoin(defenders_df.alias("d")).select(
-            F.col("a.team_id").alias("attacker_id"),
-            F.col("d.team_id").alias("defender_id"),
-            F.col("a.game_version").alias("attacker_game_version"),
-            F.col("d.game_version").alias("defender_game_version"),
-            F.col("a.gym_target").alias("attacker_target"),
-            F.col("d.boss_target").alias("defender_target"),
+        attackers_df = teams_df.where(F.col("is_player_candidate") == F.lit(True)).select(
+            F.col("team_id").alias("attacker_id"),
+            F.col("game_version").alias("game_version"),
+            F.col("gym_target").alias("target"),
         )
-        pairs_df = pairs_df.where(F.col("attacker_target") == F.col("defender_target"))
-        if config.require_exact_version_match:
-            pairs_df = pairs_df.where(F.col("attacker_game_version") == F.col("defender_game_version"))
+        defenders_df = teams_df.where(F.col("is_boss") == F.lit(True)).select(
+            F.col("team_id").alias("defender_id"),
+            F.col("game_version").alias("game_version"),
+            F.col("boss_target").alias("target"),
+        )
+        pairs_df = attackers_df.join(
+            defenders_df,
+            on=["game_version", "target"],
+            how="inner",
+        )
+        pairs_df = pairs_df.where(
+            F.col("game_version").isNotNull()
+            & F.col("target").isNotNull()
+            & F.col("attacker_id").isNotNull()
+            & F.col("defender_id").isNotNull()
+        )
+        pairs_df = pairs_df.persist()
         total_pairs = int(pairs_df.count())
-        logger.info("[type_matchups] spark engine start eligible_pairs=%s", total_pairs)
         if total_pairs == 0:
+            pairs_df.unpersist()
             return []
+        invalid_pairs = int(
+            pairs_df.where(
+                F.col("game_version").isNull()
+                | F.col("target").isNull()
+                | F.col("attacker_id").isNull()
+                | F.col("defender_id").isNull()
+            ).count()
+        )
+        if invalid_pairs:
+            pairs_df.unpersist()
+            raise ValueError(f"[type_matchups] spark pairing produced invalid rows count={invalid_pairs}")
+
+        group_counts_df = pairs_df.groupBy("game_version", "target").count()
+        group_count = int(group_counts_df.count())
+        top_groups = [
+            (
+                str(row["game_version"] or ""),
+                str(row["target"] or ""),
+                int(row["count"] or 0),
+            )
+            for row in group_counts_df.orderBy(F.desc("count"), F.asc("game_version"), F.asc("target")).limit(5).toLocalIterator()
+        ]
+        partitions = max(4, min(128, total_pairs // 1000 + 1))
+        pairs_df = pairs_df.repartition(partitions, "game_version", "target")
+        logger.info(
+            "[type_matchups] spark groups game_boss_groups=%s eligible_pairs=%s partitions=%s attackers=%s defenders=%s",
+            group_count,
+            total_pairs,
+            partitions,
+            attacker_count,
+            defender_count,
+        )
+        if top_groups:
+            logger.info("[type_matchups] spark largest groups top5=%s", top_groups)
 
         team_lookup_bc = spark.sparkContext.broadcast(team_lookup)
         pokemon_profiles_bc = spark.sparkContext.broadcast(_LOCAL_POKEMON_PROFILES)
@@ -1450,16 +1495,15 @@ def _run_spark_simulations(
             for row in rows:
                 attacker_team = local_teams[str(row.attacker_id)]
                 defender_team = local_teams[str(row.defender_id)]
-                attacker_game_version = cast(str | None, row.attacker_game_version)
-                defender_game_version = cast(str | None, row.defender_game_version)
-                if not _is_version_compatible(attacker_game_version, defender_game_version, local_config):
+                game_version = cast(str | None, row.game_version)
+                if not _is_version_compatible(game_version, game_version, local_config):
                     continue
                 result = simulate_team_battle(
                     attacker_team=attacker_team,
                     defender_team=defender_team,
                     type_chart=local_chart,
-                    attacker_game_version=attacker_game_version,
-                    defender_game_version=defender_game_version,
+                    attacker_game_version=game_version,
+                    defender_game_version=game_version,
                     n_trials=local_config.n_battle_trials,
                     rng_seed=_stable_pair_seed(
                         attacker_team.get("team_id"),
@@ -1472,9 +1516,9 @@ def _run_spark_simulations(
                 if normalized is not None:
                     yield normalized
 
-        partitions = max(4, min(256, total_pairs // 2000 + 1))
-        result_rdd = pairs_df.repartition(partitions).rdd.mapPartitions(_simulate_partition)
+        result_rdd = pairs_df.rdd.mapPartitions(_simulate_partition)
         result_rows = [row for row in result_rdd.collect() if row]
+        pairs_df.unpersist()
         if not result_rows:
             return []
         result_df = spark.createDataFrame(result_rows, schema=_result_schema(T))

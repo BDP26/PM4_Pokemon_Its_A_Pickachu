@@ -195,6 +195,7 @@ def _assemble_team_records(grouped_data: dict[str, dict[str, Any]]) -> list[dict
                 "gym": data.get("gym"),
                 "game_version": game,
                 "team_role": "boss",
+                "origin": "kaggle",
                 "is_player_candidate": False,
                 "pokemon": pokemon,
                 "levels": levels,
