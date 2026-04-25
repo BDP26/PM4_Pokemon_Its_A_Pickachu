@@ -7,6 +7,7 @@ import math
 import os
 import random
 import time
+from collections import Counter
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -14,6 +15,7 @@ from typing import Any, TypedDict, cast
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
 from src.pipeline.silver.inputs.reference_context import normalize_key, normalize_species_slug
+from src.pipeline.silver.move_power import normalize_move_power_name, resolve_effective_power
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
@@ -26,7 +28,13 @@ logger = logging.getLogger(__name__)
 class MoveProfile(TypedDict):
     name: str
     type: str
-    power: int
+    power: int | float | None
+    raw_power: int | float | None
+    effective_power: float
+    power_handling: str
+    is_status_move: bool
+    is_damage_move: bool
+    is_null_power: bool
     damage_class: str
     accuracy: int | None
     pp: int | None
@@ -148,6 +156,12 @@ _STRUGGLE_MOVE: MoveProfile = {
     "name": "struggle",
     "type": "Normal",
     "power": 50,
+    "raw_power": 50,
+    "effective_power": 50.0,
+    "power_handling": "direct_power",
+    "is_status_move": False,
+    "is_damage_move": True,
+    "is_null_power": False,
     "damage_class": "physical",
     "accuracy": 100,
     "pp": 1,
@@ -235,6 +249,8 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
     move_reference_path = references_dir / "move_reference.parquet"
     if move_reference_path.exists():
         move_ref_df = read_parquet(move_reference_path)
+        handling_counts: Counter[str] = Counter()
+        unknown_null_moves: list[str] = []
         for row in move_ref_df.to_dict(orient="records"):
             move_name = _normalize_move_name(str(row.get("move_name") or row.get("name") or ""))
             if not move_name:
@@ -242,10 +258,32 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
             accuracy = row.get("accuracy")
             if isinstance(accuracy, float) and math.isnan(accuracy):
                 accuracy = None
+            raw_power = row.get("power")
+            if isinstance(raw_power, float) and math.isnan(raw_power):
+                raw_power = None
+            effective_power, power_handling = resolve_effective_power(
+                move_name=move_name,
+                power=raw_power,
+                damage_class=row.get("damage_class") or row.get("category"),
+            )
+            resolved_effective_power = row.get("effective_power", effective_power)
+            if isinstance(resolved_effective_power, float) and math.isnan(resolved_effective_power):
+                resolved_effective_power = effective_power
+            resolved_effective_power = float(resolved_effective_power)
+            resolved_power_handling = str(row.get("power_handling") or power_handling)
+            handling_counts[resolved_power_handling] += 1
+            if resolved_power_handling == "unknown_null_power_damage_proxy":
+                unknown_null_moves.append(move_name)
             move_profiles[move_name] = {
                 "name": move_name,
                 "type": str(row.get("type") or row.get("move_type") or "Normal"),
-                "power": _safe_int(row.get("power"), 0),
+                "power": raw_power,
+                "raw_power": row.get("raw_power", raw_power),
+                "effective_power": resolved_effective_power,
+                "power_handling": resolved_power_handling,
+                "is_status_move": bool(row.get("is_status_move", str(row.get("damage_class") or row.get("category") or "").strip().lower() == "status")),
+                "is_damage_move": bool(row.get("is_damage_move", resolved_effective_power > 0)),
+                "is_null_power": bool(row.get("is_null_power", raw_power is None)),
                 "damage_class": str(row.get("damage_class") or row.get("category") or "physical"),
                 "accuracy": _safe_int(accuracy, 100) if accuracy is not None else None,
                 "pp": _safe_int(row.get("pp"), 0),
@@ -253,6 +291,22 @@ def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
                 "version_group": "reference",
                 "degraded_data": False,
             }
+        logger.info(
+            "[type_matchups] move power handling summary: direct_power=%s status_no_damage=%s fixed_damage_level=%s fixed_damage_40=%s fixed_damage_20=%s variable_power_proxy=%s unknown_null_power_damage_proxy=%s",
+            handling_counts.get("direct_power", 0),
+            handling_counts.get("status_no_damage", 0),
+            handling_counts.get("fixed_damage_level", 0),
+            handling_counts.get("fixed_damage_40", 0),
+            handling_counts.get("fixed_damage_20", 0),
+            handling_counts.get("variable_power_proxy", 0),
+            handling_counts.get("unknown_null_power_damage_proxy", 0),
+        )
+        if handling_counts.get("unknown_null_power_damage_proxy", 0) > 0:
+            logger.warning(
+                "[type_matchups] unknown null-power damage proxy moves count=%s sample_moves=[%s]",
+                handling_counts.get("unknown_null_power_damage_proxy", 0),
+                ",".join(sorted(dict.fromkeys(unknown_null_moves))[:20]),
+            )
 
     _install_reference_profiles(pokemon_profiles, move_profiles)
     logger.info(
@@ -278,7 +332,7 @@ def normalize_species_name(name: str) -> str:
 
 
 def _normalize_move_name(name: str) -> str:
-    return normalize_key(name)
+    return normalize_move_power_name(name) or normalize_key(name)
 
 
 def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bool, str | None]:
@@ -295,11 +349,18 @@ def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bo
 
 
 def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str | None]:
+    effective_power, power_handling = resolve_effective_power(move_name, 40, "physical")
     return (
         {
             "name": move_name,
             "type": "Normal",
             "power": 40,
+            "raw_power": 40,
+            "effective_power": effective_power,
+            "power_handling": power_handling,
+            "is_status_move": False,
+            "is_damage_move": True,
+            "is_null_power": False,
             "damage_class": "physical",
             "accuracy": 100,
             "pp": 1,
@@ -356,13 +417,25 @@ def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None
 
     missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
     missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
-    if missing_species or missing_moves:
+    incomplete_moves: list[str] = []
+    for move in sorted(required_moves):
+        profile = _LOCAL_MOVE_PROFILES.get(move)
+        if profile is None:
+            continue
+        normalized_name = _normalize_move_name(str(profile.get("name") or move))
+        move_type = str(profile.get("type") or "").strip()
+        damage_class = str(profile.get("damage_class") or "").strip().lower()
+        if not normalized_name or not move_type or not damage_class:
+            incomplete_moves.append(move)
+
+    if missing_species or missing_moves or incomplete_moves:
         sample_species = ",".join(missing_species[:10])
         sample_moves = ",".join(missing_moves[:10])
+        sample_incomplete_moves = ",".join(incomplete_moves[:10])
         raise ValueError(
             "Simulation strict mode requires complete cached combat profiles: "
-            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)} "
-            f"sample_species=[{sample_species}] sample_moves=[{sample_moves}]"
+            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)} incomplete_moves={len(incomplete_moves)} "
+            f"sample_species=[{sample_species}] sample_moves=[{sample_moves}] sample_incomplete_moves=[{sample_incomplete_moves}]"
         )
 
 
@@ -439,7 +512,7 @@ def _legal_moves_for_pokemon(
             move_profile, move_degraded = _get_move_profile(normalized_move, warnings)
             if move_degraded:
                 degraded = True
-            if int(move_profile.get("power", 0) or 0) <= 0:
+            if float(move_profile.get("effective_power", 0.0) or 0.0) <= 0:
                 continue
             legal_moves.append(move_profile)
             seen_moves.add(normalized_move)
@@ -476,7 +549,7 @@ def _legal_moves_for_pokemon(
         move_profile, move_degraded = _get_move_profile(move_name, warnings)
         if move_degraded:
             degraded = True
-        if int(move_profile.get("power", 0) or 0) <= 0:
+        if float(move_profile.get("effective_power", 0.0) or 0.0) <= 0:
             continue
 
         legal_moves.append(
@@ -535,7 +608,7 @@ def _choose_best_move(attacker: CombatProfile, defender: CombatProfile, type_cha
     best_score = -1.0
 
     for move in attacker["legal_moves"]:
-        power = int(move.get("power", 0) or 0)
+        power = float(move.get("effective_power", 0.0) or 0.0)
         multiplier = _type_multiplier(move["type"], defender["types"], type_chart)
         stab = 1.5 if move["type"].title() in attacker["types"] else 1.0
         attack_stat = attacker["stats"].get("attack", 50) if move["damage_class"] == "physical" else attacker["stats"].get("sp_attack", 50)
@@ -556,7 +629,7 @@ def _calculate_damage(
     rng: random.Random,
     config: BattleSimulationConfig,
 ) -> int:
-    power = int(move.get("power", 0) or 0)
+    power = float(move.get("effective_power", 0.0) or 0.0)
     if power <= 0:
         return 0
 

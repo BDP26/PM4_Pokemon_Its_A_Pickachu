@@ -19,6 +19,7 @@ from src.pipeline.silver.config.team_config import (
     GENERIC_FORM_SUFFIXES,
 )
 from src.pipeline.silver.inputs.reference_context import load_move_reference_tables, normalize_move_name, normalize_species_slug
+from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.settings import SILVER_DIR
 
 
@@ -99,22 +100,41 @@ def _api_move_profile(move_name: str) -> dict[str, Any]:
     normalized = normalize_move_name(move_name)
     try:
         move = pb.move(normalized)
+        raw_power = getattr(move, "power", None)
+        damage_class = str(getattr(getattr(move, "damage_class", None), "name", "status") or "status")
+        effective_power, power_handling = resolve_effective_power(
+            move_name=normalized,
+            power=raw_power,
+            damage_class=damage_class,
+        )
         return {
             "move_name": normalized,
-            "power": int(getattr(move, "power", 0) or 0),
-            "damage_class": str(getattr(getattr(move, "damage_class", None), "name", "status") or "status"),
+            "power": raw_power,
+            "raw_power": raw_power,
+            "damage_class": damage_class,
             "type": str(getattr(getattr(move, "type", None), "name", "") or "") or None,
             "accuracy": getattr(move, "accuracy", None),
             "pp": getattr(move, "pp", None),
+            "effective_power": effective_power,
+            "power_handling": power_handling,
+            "is_status_move": damage_class == "status",
+            "is_damage_move": effective_power > 0,
+            "is_null_power": raw_power is None,
         }
     except Exception:
         return {
             "move_name": normalized,
-            "power": 0,
+            "power": None,
+            "raw_power": None,
             "damage_class": "status",
             "type": None,
             "accuracy": None,
             "pp": None,
+            "effective_power": 0.0,
+            "power_handling": "status_no_damage",
+            "is_status_move": True,
+            "is_damage_move": False,
+            "is_null_power": True,
         }
 
 
@@ -246,11 +266,17 @@ def _move_profile(move_name: str, silver_dir: Path = SILVER_DIR) -> dict[str, An
     if payload is None:
         return {
             "move_name": normalized,
-            "power": 0,
+            "power": None,
+            "raw_power": None,
             "damage_class": "status",
             "type": None,
             "accuracy": None,
             "pp": None,
+            "effective_power": 0.0,
+            "power_handling": "status_no_damage",
+            "is_status_move": True,
+            "is_damage_move": False,
+            "is_null_power": True,
         }
     return payload
 
@@ -369,11 +395,17 @@ def persist_move_reference_cache(
         move_rows.append(
             {
                 "move_name": move_name,
-                "power": int(profile.get("power") or 0),
+                "power": profile.get("power"),
+                "raw_power": profile.get("raw_power", profile.get("power")),
                 "damage_class": str(profile.get("damage_class") or "status"),
                 "type": profile.get("type"),
                 "accuracy": profile.get("accuracy"),
                 "pp": profile.get("pp"),
+                "effective_power": profile.get("effective_power"),
+                "power_handling": profile.get("power_handling"),
+                "is_status_move": profile.get("is_status_move"),
+                "is_damage_move": profile.get("is_damage_move"),
+                "is_null_power": profile.get("is_null_power"),
             }
         )
 
@@ -415,7 +447,7 @@ def _damaging_moves_for_species(species: str, level: int, game_version: str, sil
     filtered: list[str] = []
     for move_name in learnable_moves:
         profile = _move_profile(move_name, silver_dir=silver_dir)
-        power = int(profile.get("power") or 0)
+        power = float(profile.get("effective_power") or 0.0)
         damage_class = str(profile.get("damage_class") or "status")
         if power <= 0:
             continue

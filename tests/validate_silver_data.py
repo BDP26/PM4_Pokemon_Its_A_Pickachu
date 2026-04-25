@@ -127,7 +127,7 @@ def validate(silver_dir: Path) -> list[str]:
 
     move_reference = _read(move_reference_path)
     move_data = _read(simulation_dir / "move_data.parquet")
-    required_move_cols = {"move_name", "type", "damage_class", "power", "accuracy", "priority"}
+    required_move_cols = {"move_name", "type", "damage_class", "power", "effective_power", "power_handling"}
     if required_move_cols.issubset(set(move_reference.columns)) and not required_move_cols.issubset(set(move_data.columns)):
         _ok("move profile loader target is reference schema (not simulation move_data table)")
     else:
