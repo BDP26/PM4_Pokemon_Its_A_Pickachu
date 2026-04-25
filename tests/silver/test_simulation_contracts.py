@@ -9,6 +9,26 @@ from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig,
 from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 
 
+def _write_reference_profiles(silver_dir: Path) -> None:
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+    write_parquet(
+        references_dir / "pokemon_data.parquet",
+        [
+            {"name": "pikachu", "pokemon_species": "pikachu", "type_1": "electric", "type_2": None, "base_hp": 35, "base_attack": 55, "base_defense": 40, "base_special_attack": 50, "base_special_defense": 50, "base_speed": 90},
+            {"name": "geodude", "pokemon_species": "geodude", "type_1": "rock", "type_2": "ground", "base_hp": 40, "base_attack": 80, "base_defense": 100, "base_special_attack": 30, "base_special_defense": 30, "base_speed": 20},
+            {"name": "staryu", "pokemon_species": "staryu", "type_1": "water", "type_2": None, "base_hp": 30, "base_attack": 45, "base_defense": 55, "base_special_attack": 70, "base_special_defense": 55, "base_speed": 85},
+            {"name": "patrat", "pokemon_species": "patrat", "type_1": "normal", "type_2": None, "base_hp": 45, "base_attack": 55, "base_defense": 39, "base_special_attack": 35, "base_special_defense": 39, "base_speed": 42},
+        ],
+    )
+    write_parquet(
+        references_dir / "move_reference.parquet",
+        [
+            {"move_name": "tackle", "type": "normal", "damage_class": "physical", "power": 40, "raw_power": 40, "effective_power": 40, "accuracy": 100, "pp": 35, "power_handling": "direct_power", "is_status_move": False, "is_damage_move": True, "is_null_power": False}
+        ],
+    )
+
+
 def _teams() -> list[dict[str, object]]:
     return [
         {
@@ -58,6 +78,7 @@ def test_cross_version_pairing_is_blocked(tmp_path: Path) -> None:
     bronze_dir = tmp_path / "bronze"
     silver_dir = tmp_path / "silver"
     write_json(bronze_dir / "type_chart.json", {"Normal": {"Normal": 1.0}})
+    _write_reference_profiles(silver_dir)
 
     build_team_battle_simulations(
         teams_data=_teams(),
@@ -75,6 +96,7 @@ def test_only_intended_gym_matchups_are_simulated(tmp_path: Path) -> None:
     bronze_dir = tmp_path / "bronze"
     silver_dir = tmp_path / "silver"
     write_json(bronze_dir / "type_chart.json", {"Normal": {"Normal": 1.0}})
+    _write_reference_profiles(silver_dir)
 
     build_team_battle_simulations(
         teams_data=_teams(),
@@ -91,6 +113,7 @@ def test_player_without_gym_context_is_not_simulated(tmp_path: Path) -> None:
     bronze_dir = tmp_path / "bronze"
     silver_dir = tmp_path / "silver"
     write_json(bronze_dir / "type_chart.json", {"Normal": {"Normal": 1.0}})
+    _write_reference_profiles(silver_dir)
     teams = _teams()
     teams[0] = dict(teams[0])
     teams[0].pop("gym", None)
