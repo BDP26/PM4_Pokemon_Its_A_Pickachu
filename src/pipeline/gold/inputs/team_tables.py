@@ -24,7 +24,16 @@ _REQUIRED_MEMBER_MOVESET_COMBO_COLUMNS = {
     "pokemon_instance_id",
     "slot_index",
 }
-
+_INVALID_MOVE_VALUES = {"", "nan", "none", "null", "<na>", "na"}
+def _normalize_move_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value != value:
+        return ""
+    text = str(value).strip().lower()
+    if text in _INVALID_MOVE_VALUES:
+        return ""
+    return text
 
 def _validate_columns(frame: pd.DataFrame, required: set[str], name: str) -> None:
     missing = required - set(frame.columns)
@@ -48,7 +57,7 @@ def _select_diverse_moves(ordered_moves: list[str], *, width: int = 4) -> list[s
     """Select a bounded, deterministic, slightly-diverse moveset from ranked options."""
     unique_moves = []
     for move in ordered_moves:
-        move_norm = str(move).strip().lower()
+        move_norm = _normalize_move_value(move)
         if move_norm and move_norm not in unique_moves:
             unique_moves.append(move_norm)
 
@@ -109,9 +118,17 @@ def load_reconstructed_teams_from_silver(
             if not member_id:
                 continue
             if isinstance(row.get("moves"), list):
-                combo = [str(move).strip().lower() for move in row.get("moves", []) if str(move).strip()]
+                combo = []
+                for move in row.get("moves", []):
+                    normalized_move = _normalize_move_value(move)
+                    if normalized_move:
+                        combo.append(normalized_move)
             else:
-                combo = [str(row.get(f"move_{idx}")).strip().lower() for idx in range(1, 5) if str(row.get(f"move_{idx}") or "").strip()]
+                combo = []
+                for idx in range(1, 5):
+                    normalized_move = _normalize_move_value(row.get(f"move_{idx}"))
+                    if normalized_move:
+                        combo.append(normalized_move)
             if combo:
                 combos_by_member.setdefault(member_id, []).append(combo)
 
@@ -119,7 +136,7 @@ def load_reconstructed_teams_from_silver(
         sorted_options = move_options_df.sort_values(["team_member_id", "option_rank", "move_name"])
         for row in sorted_options.to_dict(orient="records"):
             member_id = str(row.get("team_member_id") or "").strip()
-            move_name = str(row.get("move_name") or "").strip().lower()
+            move_name = _normalize_move_value(row.get("move_name"))
             if not member_id or not move_name:
                 continue
             slot = moves_by_member.setdefault(member_id, [])

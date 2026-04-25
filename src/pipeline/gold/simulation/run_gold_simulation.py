@@ -23,6 +23,32 @@ from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig,
 
 
 logger = logging.getLogger(__name__)
+_INVALID_MOVE_VALUES = {"", "nan", "none", "null", "<na>", "na"}
+
+
+def _is_invalid_move_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    normalized = str(value).strip().lower()
+    return normalized in _INVALID_MOVE_VALUES
+
+
+def _assert_no_invalid_team_moves(teams_data: list[dict[str, Any]]) -> None:
+    invalid_count = 0
+    for team in teams_data:
+        for member_moves in team.get("moves", []):
+            if not isinstance(member_moves, list):
+                continue
+            for move_name in member_moves:
+                if _is_invalid_move_value(move_name):
+                    invalid_count += 1
+    if invalid_count > 0:
+        raise ValueError(
+            "Gold simulation team persistence refused due to invalid move placeholders: "
+            f"invalid_move_values={invalid_count}"
+        )
 
 
 def _run_gold_team_battle_simulations(
@@ -92,6 +118,7 @@ def run_gold_simulation_from_silver(
         return
 
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
+    _assert_no_invalid_team_moves(teams_data)
     write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
     runtime_policy = load_runtime_battle_policy_config()
