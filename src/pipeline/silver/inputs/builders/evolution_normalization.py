@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from src.pipeline.silver.inputs.connectors.pokeapi_evolution import build_species_evolution_rules
+from src.pipeline.silver.transforms.keys import normalize_key_part
+
+logger = logging.getLogger(__name__)
+
+
+_SPECIAL_TRIGGERS = {
+    "trade",
+    "use-item",
+    "item",
+    "friendship",
+    "time",
+    "move",
+    "gender",
+    "known-move",
+    "held-item",
+}
+
+
+def _normalize_trigger(trigger: Any) -> str:
+    value = str(trigger or "level-up").strip().lower().replace("_", "-")
+    return value or "level-up"
+
+
+def _parse_level(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _rules_look_like_pokeapi_species_rules(rules: dict[str, Any]) -> bool:
+    if not rules:
+        return False
+    sample_value = next(iter(rules.values()))
+    return isinstance(sample_value, dict) and "evolution_stage" in sample_value
+
+
+def build_level_up_evolution_index_from_species_rules(
+    species_rules: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Convert flattened PokeAPI species rules into adjacency transitions."""
+    by_base_stage: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for species_name, info in species_rules.items():
+        species = normalize_key_part(species_name)
+        if not species or not isinstance(info, dict):
+            continue
+        base_species = normalize_key_part(info.get("base_species") or species)
+        stage = int(info.get("evolution_stage") or 1)
+        by_base_stage.setdefault((base_species, stage), []).append(
+            {
+                "species": species,
+                "min_level_from_previous": _parse_level(info.get("min_level_from_previous")),
+                "special_evolution_conditions": list(info.get("special_evolution_conditions") or []),
+            }
+        )
+
+    transitions: dict[str, list[dict[str, Any]]] = {}
+    for species_name, info in species_rules.items():
+        current_species = normalize_key_part(species_name)
+        if not current_species or not isinstance(info, dict):
+            continue
+        base_species = normalize_key_part(info.get("base_species") or current_species)
+        stage = int(info.get("evolution_stage") or 1)
+        next_species_rows = by_base_stage.get((base_species, stage + 1), [])
+        if not next_species_rows:
+            continue
+        for candidate in next_species_rows:
+            trigger = "level-up"
+            special_conditions = candidate.get("special_evolution_conditions") or []
+            if special_conditions:
+                trigger_name = str((special_conditions[0] or {}).get("trigger") or "").strip().lower()
+                trigger = trigger_name or "special"
+            transitions.setdefault(current_species, []).append(
+                {
+                    "to_species": candidate.get("species"),
+                    "trigger": trigger,
+                    "min_level": candidate.get("min_level_from_previous"),
+                }
+            )
+    return transitions
+
+
+def build_level_up_evolution_index_from_chain(chain: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Build transition rules from a raw PokeAPI evolution chain payload."""
+    species_rules = build_species_evolution_rules(chain)
+    return build_level_up_evolution_index_from_species_rules(species_rules)
+
+
+def normalize_species_for_level(
+    species: str,
+    *,
+    member_level: int,
+    evolution_rules: dict[str, list[dict[str, Any]]] | None,
+    allow_trade_evolutions: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Normalize a species to the highest legal level-up evolution at the given level."""
+    current = normalize_key_part(species)
+    if not current:
+        return "", []
+
+    rules_raw = evolution_rules or {}
+    rules: dict[str, list[dict[str, Any]]]
+    if _rules_look_like_pokeapi_species_rules(rules_raw):
+        rules = build_level_up_evolution_index_from_species_rules(rules_raw)  # type: ignore[arg-type]
+    else:
+        rules = rules_raw  # type: ignore[assignment]
+    applied: list[dict[str, Any]] = []
+    level_cap = max(1, int(member_level or 1))
+
+    for _ in range(8):
+        options = rules.get(current, [])
+        if not isinstance(options, list) or not options:
+            break
+
+        eligible: list[tuple[int, str, dict[str, Any]]] = []
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            target = normalize_key_part(option.get("to_species") or option.get("evolves_to") or option.get("species"))
+            if not target:
+                continue
+            trigger = _normalize_trigger(option.get("trigger") or option.get("evolution_trigger"))
+            if trigger in _SPECIAL_TRIGGERS and not (allow_trade_evolutions and trigger == "trade"):
+                continue
+            min_level = _parse_level(option.get("min_level") or option.get("min_level_from_previous") or option.get("level"))
+            if trigger == "level-up":
+                if min_level is None or level_cap < min_level:
+                    continue
+            elif trigger == "trade" and allow_trade_evolutions:
+                min_level = min_level or 1
+            else:
+                continue
+            eligible.append((min_level or 0, target, option))
+
+        if not eligible:
+            break
+
+        eligible.sort(key=lambda row: (row[0], row[1]))
+        min_level, target, option = eligible[-1]
+        if target == current:
+            break
+        applied.append({
+            "from_species": current,
+            "to_species": target,
+            "trigger": _normalize_trigger(option.get("trigger") or option.get("evolution_trigger")),
+            "min_level": min_level,
+        })
+        current = target
+
+    return current, applied
+
+
+def normalize_candidate_pool_for_level(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    member_level: int,
+    evolution_rules: dict[str, list[dict[str, Any]]] | None,
+    legal_species: set[str] | None,
+    allow_trade_evolutions: bool = False,
+) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
+    """Apply level-up normalization and deduplicate the candidate pool."""
+    normalized_rows: dict[str, tuple[str, int, int, int]] = {}
+    transformed = 0
+    removed_invalid = 0
+
+    for species, chance, lvl_max, capture in candidates:
+        normalized_species, applied = normalize_species_for_level(
+            species,
+            member_level=member_level,
+            evolution_rules=evolution_rules,
+            allow_trade_evolutions=allow_trade_evolutions,
+        )
+        if applied:
+            transformed += 1
+        if not normalized_species:
+            continue
+        if legal_species is not None and normalized_species not in legal_species:
+            removed_invalid += 1
+            continue
+
+        existing = normalized_rows.get(normalized_species)
+        if existing is None:
+            normalized_rows[normalized_species] = (normalized_species, int(chance or 0), int(lvl_max or 0), int(capture or 0))
+            continue
+        normalized_rows[normalized_species] = (
+            normalized_species,
+            max(existing[1], int(chance or 0)),
+            max(existing[2], int(lvl_max or 0)),
+            max(existing[3], int(capture or 0)),
+        )
+
+    normalized = sorted(normalized_rows.values(), key=lambda item: (-item[1], -item[2], -item[3], item[0]))
+    diagnostics = {
+        "input": len(candidates),
+        "transformed": transformed,
+        "removed_after_validation": removed_invalid,
+        "deduped": max(0, len(candidates) - len(normalized)),
+        "output": len(normalized),
+    }
+    return normalized, diagnostics
+
+
+def validate_candidate_pool(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    legal_species: set[str],
+    game_version: str,
+) -> None:
+    invalid = sorted({species for species, _, _, _ in candidates if species not in legal_species})
+    if invalid:
+        raise ValueError(
+            f"Invalid normalized candidates for game={game_version}: "
+            f"missing_from_legal_encounters={invalid[:20]}"
+        )
+
+
+def validate_generated_team(
+    team_species: list[str],
+    *,
+    legal_species: set[str],
+    game_version: str,
+    boss_name: str,
+) -> None:
+    invalid = sorted({normalize_key_part(species) for species in team_species if normalize_key_part(species) not in legal_species})
+    if invalid:
+        raise ValueError(
+            f"Invalid generated team for game={game_version} boss={boss_name}: "
+            f"illegal_species={invalid}"
+        )

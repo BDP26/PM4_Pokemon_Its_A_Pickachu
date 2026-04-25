@@ -29,7 +29,7 @@ from src.pipeline.silver.enrichment.schema_normalizer import (
 )
 from src.pipeline.silver.inputs.builders.player_teams import (
     build_player_team_compact_tables,
-    build_progression_source_teams,
+    build_progression_source_teams_from_encounters,
 )
 from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
     bootstrap_move_reference_cache,
@@ -1233,6 +1233,10 @@ def build_silver_from_bronze(
     if encounters_file.exists():
         encounters_frame = read_jsonl(encounters_file)
         write_parquet(references_dir / "encounters.parquet", encounters_frame, partition_cols=["game"])
+    encounters_reference_path = references_dir / "encounters.parquet"
+    bosses_reference_path = references_dir / "bosses.parquet"
+    encounters_reference_df = read_parquet(encounters_reference_path) if encounters_reference_path.exists() else pd.DataFrame()
+    bosses_reference_df = read_parquet(bosses_reference_path) if bosses_reference_path.exists() else pd.DataFrame()
 
     write_json(diagnostics_dir / "unmapped_locations_detailed.json", mapper.misses)
     write_json(diagnostics_dir / "unmapped_locations_summary.json", summarize_unmapped_locations(mapper.misses))
@@ -1329,10 +1333,24 @@ def build_silver_from_bronze(
         if game_version:
             boss_teams_by_game[game_version].append(team)
 
-    for game_key, records in records_with_game_keys:
+    progression_source_teams_all = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_reference_df,
+        bosses_df=bosses_reference_df,
+        boss_teams=boss_teams,
+    )
+    progression_source_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in progression_source_teams_all:
+        game_version = str(row.get("game_version") or "").strip().lower()
+        if game_version:
+            progression_source_teams_by_game[game_version].append(row)
+
+    for game in games_config:
+        game_key = str(game.get("game_key") or "").strip().lower()
+        if not game_key:
+            continue
         paths = _game_output_paths(simulation_dir, game_key)
         boss_teams_game = boss_teams_by_game.get(game_key, [])
-        progression_source_teams = build_progression_source_teams(records, boss_teams_game)
+        progression_source_teams = progression_source_teams_by_game.get(game_key, [])
         player_compact = build_player_team_compact_tables(progression_source_teams, reference_context)
         boss_compact = _build_boss_compact_tables(boss_teams_game, boss_move_data)
 
