@@ -150,24 +150,6 @@ _GAME_TO_VERSION_GROUP: dict[str, str] = {
     "y": "x-y",
 }
 
-_STRUGGLE_MOVE: MoveProfile = {
-    "name": "struggle",
-    "type": "Normal",
-    "power": 50,
-    "raw_power": 50,
-    "effective_power": 50.0,
-    "power_handling": "direct_power",
-    "is_status_move": False,
-    "is_damage_move": True,
-    "is_null_power": False,
-    "damage_class": "physical",
-    "accuracy": 100,
-    "pp": 1,
-    "level_learned_at": 0,
-    "version_group": "fallback",
-    "degraded_data": True,
-}
-
 _POKEMON_REQUIRED_STATS = [
     "base_hp",
     "base_attack",
@@ -610,10 +592,63 @@ def _legal_moves_for_pokemon(
 
     if not legal_moves:
         degraded = True
-        warnings.warn(f"No damaging legal moves for '{species_id}' at level {level}; using struggle")
-        legal_moves.append(dict(_STRUGGLE_MOVE))
 
     return legal_moves, degraded
+
+
+def filter_simulation_teams(teams_data: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+    filtered_teams: list[dict[str, Any]] = []
+    skipped_members = 0
+    dropped_teams = 0
+
+    for team in teams_data:
+        team_id = team.get("team_id")
+        game_version = cast(str | None, team.get("game_version"))
+        valid_members: list[dict[str, Any]] = []
+
+        for member in _team_members(team):
+            species = str(member.get("species") or "")
+            level = int(member.get("level") or 1)
+            warnings = WarningCollector()
+            legal_moves, _ = _legal_moves_for_pokemon(
+                normalize_species_name(species),
+                level,
+                game_version,
+                warnings,
+                preferred_moves=cast(list[str], member.get("moves", [])),
+            )
+            legal_move_names = [_normalize_move_name(move.get("name")) for move in legal_moves]
+            legal_move_names = [name for name in legal_move_names if name]
+            if not legal_move_names:
+                skipped_members += 1
+                logger.warning(
+                    "[simulation] skipping member with no legal damaging moves pokemon=%s level=%s team_id=%s",
+                    species or None,
+                    level,
+                    team_id,
+                )
+                continue
+            valid_members.append(
+                {
+                    **member,
+                    "moves": legal_move_names,
+                }
+            )
+
+        if not valid_members:
+            dropped_teams += 1
+            logger.warning("[simulation] dropping team with no valid battle members team_id=%s", team_id)
+            continue
+
+        filtered_team = dict(team)
+        filtered_team["pokemon"] = [member["species"] for member in valid_members]
+        filtered_team["levels"] = [int(member.get("level") or 1) for member in valid_members]
+        filtered_team["moves"] = [cast(list[str], member.get("moves", [])) for member in valid_members]
+        if "pokemon_instance_ids" in team:
+            filtered_team["pokemon_instance_ids"] = [member.get("pokemon_instance_id") for member in valid_members]
+        filtered_teams.append(filtered_team)
+
+    return filtered_teams, skipped_members, dropped_teams
 
 
 def get_pokemon_combat_profile(
@@ -1203,7 +1238,116 @@ def _run_local_simulations(
 
 
 def _should_use_spark() -> bool:
-    return os.environ.get("PIPELINE_USE_PYSPARK", "0").strip() in {"1", "true", "True"}
+    return os.environ.get("PIPELINE_USE_PYSPARK", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _result_schema(T: Any) -> Any:
+    return T.StructType(
+        [
+            T.StructField("team_id_attacker", T.StringType(), False),
+            T.StructField("team_id_defender", T.StringType(), False),
+            T.StructField("attacker_win", T.BooleanType(), False),
+            T.StructField("winner_team_id", T.StringType(), True),
+            T.StructField("attacker_remaining_pokemon", T.DoubleType(), False),
+            T.StructField("defender_remaining_pokemon", T.DoubleType(), False),
+            T.StructField("attacker_total_remaining_hp", T.DoubleType(), False),
+            T.StructField("defender_total_remaining_hp", T.DoubleType(), False),
+            T.StructField("battle_turns", T.DoubleType(), False),
+            T.StructField("simulation_score", T.DoubleType(), False),
+            T.StructField("degraded_data", T.BooleanType(), False),
+            T.StructField("warnings", T.ArrayType(T.StringType(), containsNull=False), False),
+            T.StructField("duel_summaries", T.ArrayType(T.MapType(T.StringType(), T.StringType(), valueContainsNull=False), containsNull=False), False),
+            T.StructField("predicted_player_win_chance", T.DoubleType(), False),
+            T.StructField("attacker_wins", T.IntegerType(), False),
+            T.StructField("attacker_losses", T.IntegerType(), False),
+            T.StructField("n_trials", T.IntegerType(), False),
+            T.StructField("attacker_game_version", T.StringType(), True),
+            T.StructField("defender_game_version", T.StringType(), True),
+            T.StructField("is_compatible_version", T.BooleanType(), False),
+            T.StructField("representative_simulation_score", T.DoubleType(), False),
+            T.StructField("representative_duel_summaries", T.ArrayType(T.MapType(T.StringType(), T.StringType(), valueContainsNull=False), containsNull=False), False),
+            T.StructField("representative_warnings", T.ArrayType(T.StringType(), containsNull=False), False),
+        ]
+    )
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        parsed = float(value)
+        if math.isnan(parsed):
+            return default
+        return parsed
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: Any) -> bool:
+    return bool(value)
+
+
+def _safe_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_summary_entries(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        normalized_entry: dict[str, str] = {}
+        for key, entry_value in entry.items():
+            normalized_key = str(key).strip()
+            if not normalized_key:
+                continue
+            normalized_entry[normalized_key] = "" if entry_value is None else str(entry_value)
+        if normalized_entry:
+            normalized.append(normalized_entry)
+    return normalized
+
+
+def _normalize_result_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    attacker_id = _safe_string(row.get("team_id_attacker"))
+    defender_id = _safe_string(row.get("team_id_defender"))
+    if attacker_id is None or defender_id is None:
+        return None
+    warnings = [str(item) for item in cast(list[Any], row.get("warnings", [])) if item is not None and str(item).strip()]
+    rep_warnings = [
+        str(item)
+        for item in cast(list[Any], row.get("representative_warnings", []))
+        if item is not None and str(item).strip()
+    ]
+    return {
+        "team_id_attacker": attacker_id,
+        "team_id_defender": defender_id,
+        "attacker_win": _safe_bool(row.get("attacker_win")),
+        "winner_team_id": _safe_string(row.get("winner_team_id")),
+        "attacker_remaining_pokemon": _safe_float(row.get("attacker_remaining_pokemon")),
+        "defender_remaining_pokemon": _safe_float(row.get("defender_remaining_pokemon")),
+        "attacker_total_remaining_hp": _safe_float(row.get("attacker_total_remaining_hp")),
+        "defender_total_remaining_hp": _safe_float(row.get("defender_total_remaining_hp")),
+        "battle_turns": _safe_float(row.get("battle_turns")),
+        "simulation_score": _safe_float(row.get("simulation_score")),
+        "degraded_data": _safe_bool(row.get("degraded_data")),
+        "warnings": warnings,
+        "duel_summaries": _normalize_summary_entries(row.get("duel_summaries", [])),
+        "predicted_player_win_chance": _safe_float(row.get("predicted_player_win_chance")),
+        "attacker_wins": int(_safe_float(row.get("attacker_wins"))),
+        "attacker_losses": int(_safe_float(row.get("attacker_losses"))),
+        "n_trials": int(_safe_float(row.get("n_trials"))),
+        "attacker_game_version": _safe_string(row.get("attacker_game_version")),
+        "defender_game_version": _safe_string(row.get("defender_game_version")),
+        "is_compatible_version": _safe_bool(row.get("is_compatible_version")),
+        "representative_simulation_score": _safe_float(row.get("representative_simulation_score")),
+        "representative_duel_summaries": _normalize_summary_entries(row.get("representative_duel_summaries", [])),
+        "representative_warnings": rep_warnings,
+    }
 
 
 def _run_spark_simulations(
@@ -1219,7 +1363,6 @@ def _run_spark_simulations(
         logger.warning("[type_matchups] pyspark not installed; falling back to local engine")
         return _run_local_simulations(teams_data, type_chart, config)
 
-    Row = cast(Any, getattr(pyspark_sql, "Row"))
     SparkSession = cast(Any, getattr(pyspark_sql, "SparkSession"))
     F = cast(Any, pyspark_functions)
     T = cast(Any, pyspark_types)
@@ -1325,11 +1468,16 @@ def _run_spark_simulations(
                     ),
                     config=local_config,
                 )
-                yield Row(**result)
+                normalized = _normalize_result_row(result)
+                if normalized is not None:
+                    yield normalized
 
         partitions = max(4, min(256, total_pairs // 2000 + 1))
         result_rdd = pairs_df.repartition(partitions).rdd.mapPartitions(_simulate_partition)
-        result_df = spark.createDataFrame(result_rdd)
+        result_rows = [row for row in result_rdd.collect() if row]
+        if not result_rows:
+            return []
+        result_df = spark.createDataFrame(result_rows, schema=_result_schema(T))
         result_df = result_df.orderBy("team_id_attacker", "team_id_defender")
         return [cast(dict[str, Any], row.asDict(recursive=True)) for row in result_df.toLocalIterator()]
     finally:
@@ -1364,13 +1512,26 @@ def build_team_battle_simulations(
     config = runtime_config or BattleSimulationConfig()
     if not _allow_simulation_fallbacks():
         _validate_profile_coverage(teams_data)
+    filtered_teams, skipped_members, dropped_teams = filter_simulation_teams(teams_data)
+    logger.info(
+        "[simulation] filtered teams original=%s remaining=%s skipped_members=%s dropped_teams=%s",
+        len(teams_data),
+        len(filtered_teams),
+        skipped_members,
+        dropped_teams,
+    )
+    if not filtered_teams:
+        logger.warning("[type_matchups] no valid teams remain after filtering; writing empty simulation outputs")
+        write_parquet(simulation_dir / "team_battle_simulations.parquet", [])
+        write_parquet(simulation_dir / "team_battle_simulation_diagnostics.parquet", [])
+        return
     use_spark = _should_use_spark() if force_spark is None else bool(force_spark)
     logger.info("[type_matchups] engine=%s", "spark" if use_spark else "local")
 
     if use_spark:
-        simulations = _run_spark_simulations(teams_data, type_chart, config)
+        simulations = _run_spark_simulations(filtered_teams, type_chart, config)
     else:
-        simulations = _run_local_simulations(teams_data, type_chart, config)
+        simulations = _run_local_simulations(filtered_teams, type_chart, config)
 
     incompatible_rows = [row for row in simulations if not bool(row.get("is_compatible_version", False))]
     if incompatible_rows:
