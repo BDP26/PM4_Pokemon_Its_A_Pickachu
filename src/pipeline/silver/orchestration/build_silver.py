@@ -790,13 +790,12 @@ def _build_boss_compact_tables(
     boss_teams: list[dict[str, Any]],
     move_data: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
+    del move_data  # Boss teams carry fixed Kaggle moves; they are not expanded into move-option tables.
     source_teams: list[dict[str, Any]] = []
     source_team_members: list[dict[str, Any]] = []
-    member_move_options: list[dict[str, Any]] = []
     pokemon_moveset_options: list[dict[str, Any]] = []
 
     seen_contexts: set[tuple[str, str, int]] = set()
-    seen_context_moves: set[tuple[str, str, int, str]] = set()
 
     for team in boss_teams:
         source_team_id = str(team.get("team_id") or "").strip()
@@ -808,7 +807,8 @@ def _build_boss_compact_tables(
             {
                 "source_team_id": source_team_id,
                 "game_version": game_version,
-                "team_role": "boss_source",
+                "team_role": "boss",
+                "origin": "kaggle",
                 "boss_name": boss_name,
                 "starter_base": None,
                 "starter_evolved_species": None,
@@ -830,25 +830,29 @@ def _build_boss_compact_tables(
                 continue
             level = int(levels[slot - 1] if slot - 1 < len(levels) else team.get("avg_level") or 1)
             member_id = str(member_ids[slot - 1]).strip() if slot - 1 < len(member_ids) else f"{source_team_id}:m{slot}"
+            fixed_moves = [
+                normalize_move_name(move_name)
+                for move_name in (
+                    team.get("moves", [])[slot - 1] if slot - 1 < len(team.get("moves", [])) else []
+                )
+                if normalize_move_name(move_name)
+            ]
             source_team_members.append(
                 {
                     "team_member_id": member_id,
                     "source_team_id": source_team_id,
                     "game_version": game_version,
+                    "team_role": "boss",
+                    "origin": "kaggle",
                     "boss_name": boss_name,
                     "slot": slot,
                     "pokemon_species": species,
                     "level": level,
+                    "fixed_moves": fixed_moves,
                     "progression_pool_id": None,
                     "is_starter": False,
                 }
             )
-
-            payload = move_data.get(member_id, {}) if isinstance(move_data, dict) else {}
-            learnable = payload.get("learnable_moves", []) if isinstance(payload, dict) else []
-            ranked_moves = sorted({str(move).strip().lower() for move in learnable if str(move).strip()})
-            if not ranked_moves:
-                ranked_moves = [str(move).strip().lower() for move in (team.get("moves", [])[slot - 1] if slot - 1 < len(team.get("moves", [])) else []) if str(move).strip()]
 
             context_key = (game_version, species, level)
             context_id = f"ctx:{stable_digest(*context_key, length=20)}"
@@ -860,47 +864,15 @@ def _build_boss_compact_tables(
                         "game_version": game_version,
                         "pokemon_species": species,
                         "level": level,
-                        "move_policy": "boss-source-v1",
-                        "candidate_move_count": len(ranked_moves),
-                    }
-                )
-
-            for rank, move_name in enumerate(ranked_moves, start=1):
-                member_move_options.append(
-                    {
-                        "team_member_id": member_id,
-                        "source_team_id": source_team_id,
-                        "game_version": game_version,
-                        "slot": slot,
-                        "pokemon_species": species,
-                        "level": level,
-                        "move_name": move_name,
-                        "option_rank": rank,
-                        "option_score": float(max(1, len(ranked_moves) - rank + 1)),
-                        "moveset_context_id": context_id,
-                    }
-                )
-                ctx_move_key = (*context_key, move_name)
-                if ctx_move_key in seen_context_moves:
-                    continue
-                seen_context_moves.add(ctx_move_key)
-                pokemon_moveset_options.append(
-                    {
-                        "moveset_context_id": context_id,
-                        "game_version": game_version,
-                        "pokemon_species": species,
-                        "level": level,
-                        "move_policy": "boss-source-v1",
-                        "move_name": move_name,
-                        "option_rank": rank,
-                        "option_score": float(max(1, len(ranked_moves) - rank + 1)),
+                        "move_policy": "boss-fixed-kaggle-v1",
+                        "candidate_move_count": len(fixed_moves),
                     }
                 )
 
     return {
         "source_teams": source_teams,
         "source_team_members": source_team_members,
-        "member_move_options": member_move_options,
+        "member_move_options": [],
         "pokemon_moveset_options": pokemon_moveset_options,
     }
 
@@ -1345,6 +1317,9 @@ def build_silver_from_bronze(
     total_members = 0
     total_moveset_combos = 0
     total_boss_teams = 0
+    total_boss_rows_skipped_from_move_options = 0
+    total_player_rows_used_for_move_options = 0
+    total_fixed_boss_teams_carried_forward = 0
     required_team_species: set[str] = set()
     required_team_moves: set[str] = set()
 
@@ -1361,12 +1336,50 @@ def build_silver_from_bronze(
         player_compact = build_player_team_compact_tables(progression_source_teams, reference_context)
         boss_compact = _build_boss_compact_tables(boss_teams_game, boss_move_data)
 
-        source_teams_rows = list(boss_compact["source_teams"]) + [
-            {**row, "is_player_candidate": True} for row in player_compact["source_teams"]
-        ]
+        source_teams_rows = list(boss_compact["source_teams"]) + list(player_compact["source_teams"])
         source_member_rows = list(boss_compact["source_team_members"]) + list(player_compact["source_team_members"])
-        member_move_rows = list(boss_compact["member_move_options"]) + list(player_compact["member_move_options"])
-        member_moveset_combo_rows = list(player_compact["member_moveset_combos"])
+        source_team_meta = {
+            str(row.get("source_team_id") or "").strip(): row
+            for row in source_teams_rows
+            if str(row.get("source_team_id") or "").strip()
+        }
+        member_id_to_team_id = {
+            str(row.get("team_member_id") or "").strip(): str(row.get("source_team_id") or "").strip()
+            for row in source_member_rows
+            if str(row.get("team_member_id") or "").strip() and str(row.get("source_team_id") or "").strip()
+        }
+
+        boss_rows_skipped = 0
+        player_rows_used = 0
+        member_move_rows: list[dict[str, Any]] = []
+        for row in player_compact["member_move_options"]:
+            team_id = str(row.get("source_team_id") or "").strip()
+            meta = source_team_meta.get(team_id, {})
+            team_role = str(meta.get("team_role") or "").strip().lower()
+            origin = str(meta.get("origin") or "").strip().lower()
+            if team_role == "boss" or origin == "kaggle":
+                boss_rows_skipped += 1
+                continue
+            if bool(meta.get("is_player_candidate")) and team_role == "player":
+                member_move_rows.append(row)
+                player_rows_used += 1
+                continue
+            boss_rows_skipped += 1
+
+        member_moveset_combo_rows: list[dict[str, Any]] = []
+        for row in player_compact["member_moveset_combos"]:
+            team_id = str(row.get("team_id") or "").strip()
+            if not team_id:
+                team_id = member_id_to_team_id.get(str(row.get("pokemon_instance_id") or "").strip(), "")
+            meta = source_team_meta.get(team_id, {})
+            team_role = str(meta.get("team_role") or "").strip().lower()
+            origin = str(meta.get("origin") or "").strip().lower()
+            if team_role == "boss" or origin == "kaggle" or (meta and not bool(meta.get("is_player_candidate", False))):
+                continue
+            if meta and team_role != "player":
+                continue
+            member_moveset_combo_rows.append(row)
+
         pokemon_moveset_rows = list(boss_compact["pokemon_moveset_options"]) + list(player_compact["pokemon_moveset_options"])
         sampling_rows = list(player_compact["simulation_sampling_plan"])
 
@@ -1424,14 +1437,38 @@ def build_silver_from_bronze(
         total_members += len(source_member_rows)
         total_moveset_combos += len(member_moveset_combo_rows)
         total_boss_teams += len(boss_teams_game)
+        total_boss_rows_skipped_from_move_options += boss_rows_skipped
+        total_player_rows_used_for_move_options += player_rows_used
+        total_fixed_boss_teams_carried_forward += len(boss_compact["source_teams"])
+
+        boss_move_option_rows = sum(
+            1
+            for row in member_move_rows
+            if str(source_team_meta.get(str(row.get("source_team_id") or "").strip(), {}).get("team_role") or "").strip().lower() == "boss"
+        )
+        boss_moveset_combo_rows = sum(
+            1
+            for row in member_moveset_combo_rows
+            if str(source_team_meta.get(str(row.get("team_id") or "").strip(), {}).get("team_role") or "").strip().lower() == "boss"
+        )
+        if boss_move_option_rows or boss_moveset_combo_rows:
+            raise ValueError(
+                f"Boss rows leaked into compact move tables for game={game_key}: "
+                f"member_move_options_boss_rows={boss_move_option_rows} "
+                f"member_moveset_combos_boss_rows={boss_moveset_combo_rows}"
+            )
 
         logger.info(
-            "[silver] wrote compact team shards game=%s source_teams=%s members=%s moveset_combos=%s move_options=%s",
+            "[silver] wrote compact team shards game=%s source_teams=%s members=%s moveset_combos=%s move_options=%s "
+            "boss_rows_skipped_from_move_option_generation=%s player_rows_used_for_move_option_generation=%s fixed_boss_teams_carried_forward=%s",
             game_key,
             len(source_teams_rows),
             len(source_member_rows),
             len(member_moveset_combo_rows),
             len(member_move_rows),
+            boss_rows_skipped,
+            player_rows_used,
+            len(boss_compact["source_teams"]),
         )
 
         gc.collect()
@@ -1595,11 +1632,16 @@ def build_silver_from_bronze(
     )
 
     logger.info(
-        "[silver] build finished records=%s source_teams=%s source_team_members=%s member_moveset_combos=%s unmapped=%s elapsed_s=%.2f",
+        "[silver] build finished records=%s source_teams=%s source_team_members=%s member_moveset_combos=%s "
+        "move_option_generation_boss_rows_skipped=%s move_option_generation_player_rows_used=%s fixed_boss_teams_carried_forward=%s "
+        "unmapped=%s elapsed_s=%.2f",
         len(all_records),
         total_source_teams,
         total_members,
         total_moveset_combos,
+        total_boss_rows_skipped_from_move_options,
+        total_player_rows_used_for_move_options,
+        total_fixed_boss_teams_carried_forward,
         len(mapper.misses),
         time.perf_counter() - started_at,
     )

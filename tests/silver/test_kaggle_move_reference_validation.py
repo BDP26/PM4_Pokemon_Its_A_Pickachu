@@ -111,8 +111,8 @@ def test_gold_facing_boss_move_records_are_complete() -> None:
     compact = _build_boss_compact_tables(boss_teams, move_data)
     assert len(compact["source_teams"]) == 1
     assert len(compact["source_team_members"]) == 1
-    move_names = {row["move_name"] for row in compact["member_move_options"]}
-    assert {"surf", "flail"}.issubset(move_names)
+    assert compact["member_move_options"] == []
+    assert compact["source_team_members"][0]["fixed_moves"] == ["surf", "flail"]
 
 
 def test_kaggle_bootstrap_entries_use_full_kaggle_rows(tmp_path: Path) -> None:

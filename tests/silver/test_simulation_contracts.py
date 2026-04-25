@@ -170,3 +170,9 @@ def test_version_compatibility_contract() -> None:
     cfg = BattleSimulationConfig(require_exact_version_match=True)
     assert _is_version_compatible("red", "red", cfg)
     assert not _is_version_compatible("red", "black", cfg)
+
+
+def test_spark_pairing_uses_keyed_join_not_cross_join() -> None:
+    source = Path("src/pipeline/silver/simulation/type_matchups.py").read_text(encoding="utf-8")
+    assert ".crossJoin(" not in source
+    assert 'on=["game_version", "target"]' in source

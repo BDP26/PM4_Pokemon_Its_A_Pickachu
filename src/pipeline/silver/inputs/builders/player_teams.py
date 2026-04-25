@@ -294,6 +294,9 @@ def build_progression_source_teams(
                 {
                     "team_id": source_team_id,
                     "game_version": game_version,
+                    "team_role": "player",
+                    "origin": "generated",
+                    "is_player_candidate": True,
                     "boss_name": boss_name,
                     "gym": str(boss_name).strip() or None,
                     "avg_level": boss_level,
@@ -329,8 +332,13 @@ def build_player_team_compact_tables(
     estimated_avoided_variants = 0
 
     for progression_team in progression_source_teams:
-        game_version = normalize_key_part(progression_team.get("game_version"))
+        team_role = normalize_key_part(progression_team.get("team_role"))
+        origin = normalize_key_part(progression_team.get("origin"))
+        is_player_candidate = bool(progression_team.get("is_player_candidate", True))
         boss_name = normalize_key_part(progression_team.get("boss_name") or progression_team.get("gym"))
+        if team_role == "boss" or origin == "kaggle" or not is_player_candidate:
+            continue
+        game_version = normalize_key_part(progression_team.get("game_version"))
         avg_level = int(progression_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
         starters = get_starter_choices(game_version)
         if not game_version or not starters:
@@ -354,7 +362,9 @@ def build_player_team_compact_tables(
                 {
                     "source_team_id": source_team_id,
                     "game_version": game_version,
-                    "team_role": "player_source",
+                    "team_role": "player",
+                    "origin": "generated",
+                    "is_player_candidate": True,
                     "boss_name": boss_name,
                     "starter_base": normalize_key_part(starter_base),
                     "starter_evolved_species": normalize_key_part(starter_species),
