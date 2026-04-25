@@ -96,46 +96,134 @@ def _ensure_parquet_cache_loaded(silver_dir: Path = SILVER_DIR) -> None:
     _CACHE_SILVER_DIR = cache_key
 
 
+def _format_invalid_move_rows(rows: list[dict[str, Any]], *, limit: int = 50) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        examples.append(
+            {
+                "move_name": row.get("move_name"),
+                "type": row.get("type"),
+                "damage_class": row.get("damage_class"),
+                "effective_power": row.get("effective_power"),
+                "power_handling": row.get("power_handling"),
+                "is_status_move": row.get("is_status_move"),
+                "is_damage_move": row.get("is_damage_move"),
+            }
+        )
+    return examples
+
+
+def _validate_move_reference_rows(rows: list[dict[str, Any]]) -> None:
+    invalid_rows: list[dict[str, Any]] = []
+    for row in rows:
+        move_name = normalize_move_name(row.get("move_name"))
+        move_type = str(row.get("type") or "").strip().lower()
+        damage_class = str(row.get("damage_class") or "").strip().lower()
+        power_handling = str(row.get("power_handling") or "").strip().lower()
+
+        try:
+            effective_power = float(row.get("effective_power"))
+        except (TypeError, ValueError):
+            effective_power = None
+
+        is_status_move = bool(row.get("is_status_move"))
+        is_damage_move = bool(row.get("is_damage_move"))
+
+        invalid = False
+        if not move_name or not move_type or not damage_class:
+            invalid = True
+        elif damage_class == "status":
+            if effective_power is None or effective_power != 0.0:
+                invalid = True
+            if power_handling != "status_no_damage":
+                invalid = True
+            if not is_status_move or is_damage_move:
+                invalid = True
+        else:
+            if effective_power is None or effective_power <= 0.0:
+                invalid = True
+            if not power_handling or power_handling == "status_no_damage":
+                invalid = True
+            if is_status_move or not is_damage_move:
+                invalid = True
+
+        if invalid:
+            invalid_rows.append({**row, "move_name": move_name, "type": move_type or row.get("type"), "damage_class": damage_class or row.get("damage_class")})
+
+    if invalid_rows:
+        raise ValueError(
+            f"Invalid move_reference rows: total={len(invalid_rows)}, examples={_format_invalid_move_rows(invalid_rows)}"
+        )
+
+
+def _build_move_row_from_profile(move_name: str, profile: dict[str, Any]) -> dict[str, Any]:
+    normalized_move = normalize_move_name(move_name)
+    damage_class = str(profile.get("damage_class") or "").strip().lower()
+    raw_power = profile.get("raw_power", profile.get("power"))
+    effective_power, power_handling = resolve_effective_power(
+        move_name=normalized_move,
+        power=raw_power,
+        damage_class=damage_class,
+    )
+
+    stored_effective_power = profile.get("effective_power")
+    if stored_effective_power is None:
+        stored_effective_power = effective_power
+    stored_power_handling = str(profile.get("power_handling") or "").strip().lower() or power_handling
+
+    row = {
+        "move_name": normalized_move,
+        "power": profile.get("power"),
+        "raw_power": raw_power,
+        "damage_class": damage_class,
+        "type": str(profile.get("type") or "").strip().lower() or None,
+        "accuracy": profile.get("accuracy"),
+        "pp": profile.get("pp"),
+        "effective_power": float(stored_effective_power),
+        "power_handling": stored_power_handling,
+        "is_status_move": bool(profile.get("is_status_move", damage_class == "status")),
+        "is_damage_move": bool(profile.get("is_damage_move", float(stored_effective_power) > 0.0)),
+        "is_null_power": bool(profile.get("is_null_power", raw_power is None)),
+    }
+
+    return row
+
+
 def _api_move_profile(move_name: str) -> dict[str, Any]:
     normalized = normalize_move_name(move_name)
     try:
         move = pb.move(normalized)
-        raw_power = getattr(move, "power", None)
-        damage_class = str(getattr(getattr(move, "damage_class", None), "name", "status") or "status")
-        effective_power, power_handling = resolve_effective_power(
-            move_name=normalized,
-            power=raw_power,
-            damage_class=damage_class,
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Unable to fetch canonical move metadata for move={normalized}") from exc
+
+    raw_power = getattr(move, "power", None)
+    damage_class = str(getattr(getattr(move, "damage_class", None), "name", "") or "").strip().lower()
+    move_type = str(getattr(getattr(move, "type", None), "name", "") or "").strip().lower()
+
+    if not damage_class or not move_type:
+        raise ValueError(
+            f"Canonical move metadata incomplete for move={normalized}: type={move_type or None} damage_class={damage_class or None}"
         )
-        return {
-            "move_name": normalized,
-            "power": raw_power,
-            "raw_power": raw_power,
-            "damage_class": damage_class,
-            "type": str(getattr(getattr(move, "type", None), "name", "") or "") or None,
-            "accuracy": getattr(move, "accuracy", None),
-            "pp": getattr(move, "pp", None),
-            "effective_power": effective_power,
-            "power_handling": power_handling,
-            "is_status_move": damage_class == "status",
-            "is_damage_move": effective_power > 0,
-            "is_null_power": raw_power is None,
-        }
-    except Exception:
-        return {
-            "move_name": normalized,
-            "power": None,
-            "raw_power": None,
-            "damage_class": "status",
-            "type": None,
-            "accuracy": None,
-            "pp": None,
-            "effective_power": 0.0,
-            "power_handling": "status_no_damage",
-            "is_status_move": True,
-            "is_damage_move": False,
-            "is_null_power": True,
-        }
+
+    effective_power, power_handling = resolve_effective_power(
+        move_name=normalized,
+        power=raw_power,
+        damage_class=damage_class,
+    )
+    return {
+        "move_name": normalized,
+        "power": raw_power,
+        "raw_power": raw_power,
+        "damage_class": damage_class,
+        "type": move_type,
+        "accuracy": getattr(move, "accuracy", None),
+        "pp": getattr(move, "pp", None),
+        "effective_power": effective_power,
+        "power_handling": power_handling,
+        "is_status_move": damage_class == "status",
+        "is_damage_move": effective_power > 0,
+        "is_null_power": raw_power is None,
+    }
 
 
 def _api_learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
@@ -227,7 +315,9 @@ def bootstrap_move_reference_cache(
 
     move_rows: list[dict[str, Any]] = []
     for move_name in sorted(all_referenced_moves):
-        move_rows.append(_api_move_profile(move_name))
+        move_rows.append(_build_move_row_from_profile(move_name, _api_move_profile(move_name)))
+
+    _validate_move_reference_rows(move_rows)
 
     references_dir = silver_dir / "references"
     references_dir.mkdir(parents=True, exist_ok=True)
@@ -264,20 +354,7 @@ def _move_profile(move_name: str, silver_dir: Path = SILVER_DIR) -> dict[str, An
     normalized = normalize_move_name(move_name)
     payload = _MOVE_PROFILE_CACHE.get(normalized)
     if payload is None:
-        return {
-            "move_name": normalized,
-            "power": None,
-            "raw_power": None,
-            "damage_class": "status",
-            "type": None,
-            "accuracy": None,
-            "pp": None,
-            "effective_power": 0.0,
-            "power_handling": "status_no_damage",
-            "is_status_move": True,
-            "is_damage_move": False,
-            "is_null_power": True,
-        }
+        raise ValueError(f"Missing canonical move metadata for move={normalized}")
     return payload
 
 
@@ -392,22 +469,9 @@ def persist_move_reference_cache(
     move_rows: list[dict[str, Any]] = []
     for move_name in sorted(all_referenced_moves):
         profile = _move_profile(move_name, silver_dir=silver_dir)
-        move_rows.append(
-            {
-                "move_name": move_name,
-                "power": profile.get("power"),
-                "raw_power": profile.get("raw_power", profile.get("power")),
-                "damage_class": str(profile.get("damage_class") or "status"),
-                "type": profile.get("type"),
-                "accuracy": profile.get("accuracy"),
-                "pp": profile.get("pp"),
-                "effective_power": profile.get("effective_power"),
-                "power_handling": profile.get("power_handling"),
-                "is_status_move": profile.get("is_status_move"),
-                "is_damage_move": profile.get("is_damage_move"),
-                "is_null_power": profile.get("is_null_power"),
-            }
-        )
+        move_rows.append(_build_move_row_from_profile(move_name, profile))
+
+    _validate_move_reference_rows(move_rows)
 
     references_dir = silver_dir / "references"
     references_dir.mkdir(parents=True, exist_ok=True)
