@@ -13,6 +13,7 @@ from typing import Any
 
 from src.pipeline.common.io import read_parquet
 from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP, SPECIES_SLUG_ALIASES
+from src.pipeline.silver.move_power import normalize_move_power_name, resolve_effective_power
 from src.pipeline.settings import SILVER_DIR
 
 
@@ -20,7 +21,10 @@ def normalize_key(value: Any) -> str:
     normalized = str(value).strip().lower().replace(".", " ").replace("_", " ")
     normalized = " ".join(normalized.split())
     normalized = normalized.replace("'", "")
-    return normalized.replace(" ", "-")
+    normalized = normalized.replace(" ", "-")
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
 
 
 def normalize_species_slug(species: Any) -> str:
@@ -32,7 +36,7 @@ def normalize_species_slug(species: Any) -> str:
 
 
 def normalize_move_name(move: Any) -> str:
-    return normalize_key(move)
+    return normalize_move_power_name(move)
 
 
 @dataclass(frozen=True)
@@ -69,9 +73,9 @@ class MoveReferenceContext:
         kept: list[str] = []
         for move in candidates:
             profile = self.move_profiles.get(move, {})
-            power = int(profile.get("power") or 0)
-            damage_class = str(profile.get("damage_class") or "status")
-            if power > 0 and damage_class in {"physical", "special"}:
+            effective_power = float(profile.get("effective_power") or 0.0)
+            damage_class = str(profile.get("damage_class") or "").strip().lower()
+            if effective_power > 0 and damage_class in {"physical", "special"}:
                 kept.append(move)
         return kept
 
@@ -164,13 +168,33 @@ def load_move_reference_tables(
         move_name = normalize_move_name(row.get("move_name"))
         if not move_name:
             continue
+        raw_power = row.get("power")
+        if isinstance(raw_power, float) and raw_power != raw_power:
+            raw_power = None
+        effective_power, power_handling = resolve_effective_power(
+            move_name=move_name,
+            power=raw_power,
+            damage_class=row.get("damage_class"),
+        )
+        stored_effective_power = row.get("effective_power", effective_power)
+        if isinstance(stored_effective_power, float) and stored_effective_power != stored_effective_power:
+            stored_effective_power = effective_power
+        stored_power_handling = row.get("power_handling", power_handling)
+        if not isinstance(stored_power_handling, str) or not stored_power_handling.strip():
+            stored_power_handling = power_handling
         move_profiles[move_name] = {
             "move_name": move_name,
-            "power": int(row.get("power") or 0),
+            "power": raw_power,
+            "raw_power": raw_power,
             "damage_class": str(row.get("damage_class") or "status"),
             "type": row.get("type"),
             "accuracy": row.get("accuracy"),
             "pp": row.get("pp"),
+            "effective_power": stored_effective_power,
+            "power_handling": stored_power_handling,
+            "is_status_move": row.get("is_status_move", str(row.get("damage_class") or "").strip().lower() == "status"),
+            "is_damage_move": row.get("is_damage_move", effective_power > 0),
+            "is_null_power": row.get("is_null_power", raw_power is None),
         }
 
     learnable_by_game_species: dict[tuple[str, str], dict[str, int]] = {}

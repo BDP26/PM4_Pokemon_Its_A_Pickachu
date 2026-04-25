@@ -39,6 +39,7 @@ from src.pipeline.silver.inputs.kaggle_boss_mapping import load_kaggle_rows_by_g
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
 from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
 from src.pipeline.silver.inputs.reference_context import load_reference_context, normalize_move_name, normalize_species_slug
+from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.silver.inputs.sources.boss_teams import extract_boss_teams_from_kaggle_source
 from src.pipeline.silver.orchestration.stages import run_parse_stage
 from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
@@ -489,13 +490,33 @@ def _move_profiles_from_reference(move_reference_df: pd.DataFrame) -> dict[str, 
         move_name = normalize_move_name(row.get("move_name"))
         if not move_name:
             continue
+        raw_power = row.get("power")
+        if isinstance(raw_power, float) and pd.isna(raw_power):
+            raw_power = None
+        effective_power, power_handling = resolve_effective_power(
+            move_name=move_name,
+            power=raw_power,
+            damage_class=row.get("damage_class"),
+        )
+        stored_effective_power = row.get("effective_power", effective_power)
+        if isinstance(stored_effective_power, float) and pd.isna(stored_effective_power):
+            stored_effective_power = effective_power
+        stored_power_handling = row.get("power_handling", power_handling)
+        if not isinstance(stored_power_handling, str) or not stored_power_handling.strip():
+            stored_power_handling = power_handling
         profiles[move_name] = {
             "move_name": move_name,
             "type": str(row.get("type") or "Normal"),
-            "power": int(row.get("power") or 0),
+            "power": raw_power,
+            "raw_power": raw_power,
             "damage_class": str(row.get("damage_class") or "status"),
             "accuracy": row.get("accuracy"),
             "pp": row.get("pp"),
+            "effective_power": stored_effective_power,
+            "power_handling": stored_power_handling,
+            "is_status_move": row.get("is_status_move", str(row.get("damage_class") or "").strip().lower() == "status"),
+            "is_damage_move": row.get("is_damage_move", effective_power > 0),
+            "is_null_power": row.get("is_null_power", raw_power is None),
             "level_learned_at": 0,
             "version_group": "reference",
             "degraded_data": False,

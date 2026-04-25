@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP
+from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.silver.schemas.contracts import BossSnapshotContract
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, normalize_key_part
 
@@ -218,13 +219,27 @@ def build_move_reference_table(move_data: dict[str, Any]) -> list[dict[str, Any]
             if not move_norm:
                 continue
             detail_dict = details if isinstance(details, dict) else {}
+            raw_power = detail_dict.get("power")
+            if isinstance(raw_power, float) and raw_power != raw_power:
+                raw_power = None
+            effective_power, power_handling = resolve_effective_power(
+                move_name=move_norm,
+                power=raw_power,
+                damage_class=detail_dict.get("damage_class"),
+            )
             rows_by_move[move_norm] = {
                 "move_name": move_norm,
-                "power": int(detail_dict.get("power") or 0),
+                "power": raw_power,
+                "raw_power": raw_power,
                 "damage_class": str(detail_dict.get("damage_class") or "status"),
                 "type": detail_dict.get("type"),
                 "accuracy": detail_dict.get("accuracy"),
                 "pp": detail_dict.get("pp"),
+                "effective_power": detail_dict.get("effective_power", effective_power),
+                "power_handling": detail_dict.get("power_handling", power_handling),
+                "is_status_move": detail_dict.get("is_status_move", str(detail_dict.get("damage_class") or "").strip().lower() == "status"),
+                "is_damage_move": detail_dict.get("is_damage_move", effective_power > 0),
+                "is_null_power": detail_dict.get("is_null_power", raw_power is None),
             }
     return sorted(rows_by_move.values(), key=lambda row: row["move_name"])
 
@@ -266,4 +281,3 @@ def build_learnable_moves_table(move_data: dict[str, Any]) -> list[dict[str, Any
                 }
             )
     return rows
-
