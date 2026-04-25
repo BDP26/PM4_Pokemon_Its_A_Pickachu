@@ -114,6 +114,7 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
         ("pokemon_data.parquet", "Battle-ready Pokemon reference table"),
         ("move_reference.parquet", "Move reference dimension"),
         ("learnable_moves.parquet", "Unified learnable moves fact by game and species (authoritative move source)"),
+        ("boss_team_members.parquet", "Persisted normalized boss members (one row per boss member move)"),
     ]:
         path = references_dir / reference_name
         if not path.exists():
