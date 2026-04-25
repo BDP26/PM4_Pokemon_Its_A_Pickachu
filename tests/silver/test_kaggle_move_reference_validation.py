@@ -6,9 +6,12 @@ import pandas as pd
 import pytest
 
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext, normalize_move_name
-from src.pipeline.silver.inputs.sources.boss_teams import _normalize_kaggle_row
+from src.pipeline.silver.inputs.sources.boss_teams import _normalize_kaggle_row, load_kaggle_boss_rows_by_game
 from src.pipeline.silver.orchestration.build_silver import (
     _build_boss_compact_tables,
+    _build_kaggle_bootstrap_entries,
+    _build_boss_team_members_reference_rows,
+    _validate_boss_reference_coverage,
     _validate_kaggle_boss_move_profiles,
     _validate_kaggle_moves_in_move_reference,
 )
@@ -110,3 +113,50 @@ def test_gold_facing_boss_move_records_are_complete() -> None:
     assert len(compact["source_team_members"]) == 1
     move_names = {row["move_name"] for row in compact["member_move_options"]}
     assert {"surf", "flail"}.issubset(move_names)
+
+
+def test_kaggle_bootstrap_entries_use_full_kaggle_rows(tmp_path: Path) -> None:
+    kaggle_dir = tmp_path / "kagglehub"
+    kaggle_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = kaggle_dir / "gym_leaders_elite_four.csv"
+    csv_path.write_text(
+        "Game;Gym leader;Gym;Pokemon;Level;Move 1;Move 2;Move 3;Move 4\n"
+        "silver;Bugsy;Azalea;Scyther;17;Quick Attack;Leer;;\n",
+        encoding="utf-8",
+    )
+
+    rows_by_game = load_kaggle_boss_rows_by_game(tmp_path, allowed_versions={"silver"})
+    entries = _build_kaggle_bootstrap_entries(rows_by_game)
+    assert ("scyther", 17, "silver", ["quick-attack", "leer"]) in entries
+
+
+def test_boss_coverage_warns_on_missing_learnable_pair_only(tmp_path: Path) -> None:
+    boss_teams = [
+        {
+            "team_id": "boss:silver:bugsy",
+            "boss_name": "Bugsy",
+            "game_version": "silver",
+            "team_role": "boss",
+            "pokemon": ["scyther"],
+            "levels": [17],
+            "moves": [["quick-attack"]],
+        }
+    ]
+    boss_members = pd.DataFrame(_build_boss_team_members_reference_rows(boss_teams))
+    pokemon_data_df = pd.DataFrame([{"pokemon_species": "scyther"}])
+    move_reference_df = pd.DataFrame(
+        [{"move_name": "quick-attack", "damage_class": "physical", "type": "normal", "power": 40}]
+    )
+    learnable_moves_df = pd.DataFrame(columns=["game_version", "pokemon_species", "move_name"])
+
+    _validate_boss_reference_coverage(
+        boss_team_members_df=boss_members,
+        boss_teams=boss_teams,
+        pokemon_data_df=pokemon_data_df,
+        move_reference_df=move_reference_df,
+        learnable_moves_df=learnable_moves_df,
+        diagnostics_dir=tmp_path,
+    )
+
+    report = pd.read_csv(tmp_path / "boss_silver_reference_coverage.csv")
+    assert set(report["severity"].tolist()) == {"WARN"}

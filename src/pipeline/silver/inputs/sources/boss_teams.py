@@ -24,6 +24,30 @@ def _read_kaggle_boss_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_kaggle_boss_rows_by_game(
+    bronze_dir: Path,
+    allowed_versions: Collection[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load raw Kaggle boss rows keyed by normalized game version.
+
+    This helper is used by Silver reference bootstrapping/validation before the
+    richer reference context is available.
+    """
+    kaggle_file = bronze_dir / "kagglehub" / "gym_leaders_elite_four.csv"
+    if not kaggle_file.exists():
+        return {}
+
+    raw_rows = _read_kaggle_boss_csv(kaggle_file)
+    selected_rows, _ = _filter_allowed_versions(raw_rows, allowed_versions)
+    rows_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in selected_rows:
+        game = str(row.get("Game") or "").strip().lower()
+        if not game:
+            continue
+        rows_by_game[game].append(row)
+    return dict(rows_by_game)
+
+
 def _filter_allowed_versions(
     rows: list[dict[str, Any]],
     allowed_versions: Collection[str] | None,
