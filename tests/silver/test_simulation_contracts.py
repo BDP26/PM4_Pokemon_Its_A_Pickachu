@@ -173,6 +173,6 @@ def test_version_compatibility_contract() -> None:
 
 
 def test_spark_pairing_uses_keyed_join_not_cross_join() -> None:
-    source = Path("src/pipeline/silver/simulation/type_matchups.py").read_text(encoding="utf-8")
+    source = Path("src/pipeline/gold/simulation/team_battle_simulations.py").read_text(encoding="utf-8")
     assert ".crossJoin(" not in source
     assert 'on=["game_version", "target"]' in source

@@ -17,9 +17,9 @@ from src.pipeline.settings import (
     SILVER_DIR,
     SILVER_SIMULATION_DIRNAME,
 )
-from src.pipeline.silver.simulation.battle_seeds import build_battle_seeds
-from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
-from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, build_team_battle_simulations
+from src.pipeline.gold.simulation.battle_seeds import build_battle_seeds
+from src.pipeline.gold.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
+from src.pipeline.gold.simulation.team_battle_simulations import BattleSimulationConfig, build_team_battle_simulations
 
 
 logger = logging.getLogger(__name__)
@@ -55,29 +55,34 @@ def _run_gold_team_battle_simulations(
     *,
     teams_data: list[dict[str, Any]],
     silver_dir: Path,
+    gold_dir: Path,
     bronze_dir: Path,
     runtime_config: BattleSimulationConfig,
 ) -> None:
     build_team_battle_simulations(
         teams_data=teams_data,
         silver_dir=silver_dir,
+        output_dir=gold_dir,
         bronze_dir=bronze_dir,
+        simulation_dirname=GOLD_SIMULATION_DIRNAME,
         force_spark=None,
         runtime_config=runtime_config,
     )
 
 
-def _build_gold_battle_seeds(*, gold_dir: Path) -> None:
+def _build_gold_battle_seeds(*, gold_dir: Path, silver_dir: Path) -> None:
     build_battle_seeds(
-        silver_dir=gold_dir,
+        gold_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
+        silver_dir=silver_dir,
     )
 
 
-def _run_gold_monte_carlo_optimizer(*, gold_dir: Path, n_trials: int, rng_seed: int) -> None:
+def _run_gold_monte_carlo_optimizer(*, gold_dir: Path, silver_dir: Path, n_trials: int, rng_seed: int) -> None:
     run_monte_carlo_team_optimizer(
-        silver_dir=gold_dir,
+        gold_dir=gold_dir,
         simulation_dirname=GOLD_SIMULATION_DIRNAME,
+        silver_dir=silver_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
@@ -92,7 +97,6 @@ def run_gold_simulation_from_silver(
     rng_seed: int = 42,
 ) -> None:
     started_at = time.perf_counter()
-    silver_simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
     gold_simulation_dir = gold_dir / GOLD_SIMULATION_DIRNAME
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
@@ -141,6 +145,7 @@ def run_gold_simulation_from_silver(
     _run_gold_team_battle_simulations(
         teams_data=teams_data,
         silver_dir=silver_dir,
+        gold_dir=gold_dir,
         bronze_dir=bronze_dir,
         runtime_config=runtime_config,
     )
@@ -148,13 +153,14 @@ def run_gold_simulation_from_silver(
 
     seeds_started_at = time.perf_counter()
     logger.info("[gold/simulation] building battle seeds")
-    _build_gold_battle_seeds(gold_dir=gold_dir)
+    _build_gold_battle_seeds(gold_dir=gold_dir, silver_dir=silver_dir)
     logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
     mc_started_at = time.perf_counter()
     logger.info("[gold/simulation] summarizing simulation results trials=%s seed=%s", n_trials, rng_seed)
     _run_gold_monte_carlo_optimizer(
         gold_dir=gold_dir,
+        silver_dir=silver_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )

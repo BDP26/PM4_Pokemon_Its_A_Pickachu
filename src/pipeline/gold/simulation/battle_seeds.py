@@ -1,0 +1,125 @@
+"""Prepare battle seeds from Gold team battle simulation outputs."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from src.pipeline.common.io import read_many_parquet, read_parquet, write_parquet
+from src.pipeline.silver.simulation.schema_contract import canonical_scenario_id
+from src.pipeline.settings import GOLD_DIR, GOLD_SIMULATION_DIRNAME, SILVER_DIR, SILVER_SIMULATION_DIRNAME
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_simulation_schema(simulations_df: pd.DataFrame) -> pd.DataFrame:
+    column_aliases = {
+        "player_team_id": "team_id_attacker",
+        "boss_team_id": "team_id_defender",
+        "win_probability": "predicted_player_win_chance",
+        "score": "simulation_score",
+    }
+    renamed = simulations_df.rename(columns={k: v for k, v in column_aliases.items() if k in simulations_df.columns})
+    required = {"team_id_attacker", "team_id_defender", "predicted_player_win_chance", "simulation_score"}
+    missing = sorted(required - set(renamed.columns))
+    if missing:
+        raise ValueError(f"team_battle_simulations missing required columns after schema normalization: {missing}")
+    return renamed
+
+
+def build_battle_seeds(
+    gold_dir: Path = GOLD_DIR,
+    simulation_dirname: str = GOLD_SIMULATION_DIRNAME,
+    silver_dir: Path = SILVER_DIR,
+) -> None:
+    simulation_dir = gold_dir / simulation_dirname
+    simulations_file = simulation_dir / "team_battle_simulations.parquet"
+    logger.info("[battle_seeds] reading simulations path=%s", simulations_file)
+
+    teams_shards = sorted(simulation_dir.glob("teams_*.parquet"))
+    if teams_shards:
+        teams_df = read_many_parquet(teams_shards)
+    else:
+        teams_file = simulation_dir / "teams.parquet"
+        if teams_file.exists():
+            teams_df = read_parquet(teams_file)
+        else:
+            fallback_teams_file = silver_dir / SILVER_SIMULATION_DIRNAME / "teams.parquet"
+            if fallback_teams_file.exists():
+                logger.warning("[gold/simulation] deprecated silver simulation path used")
+                teams_df = read_parquet(fallback_teams_file)
+            else:
+                logger.warning("[battle_seeds] no teams found in gold/silver paths; skipping")
+                return
+
+    logger.info("[battle_seeds] input teams rows=%s", len(teams_df))
+    boss_teams_df = teams_df[teams_df["boss_name"].notna()].copy()
+    logger.info("[battle_seeds] rows after boss filter=%s", len(boss_teams_df))
+
+    if simulations_file.exists():
+        simulations_df = _normalize_simulation_schema(read_parquet(simulations_file))
+    else:
+        fallback_simulations_file = silver_dir / SILVER_SIMULATION_DIRNAME / "team_battle_simulations.parquet"
+        if fallback_simulations_file.exists():
+            logger.warning("[gold/simulation] deprecated silver simulation path used")
+            simulations_df = _normalize_simulation_schema(read_parquet(fallback_simulations_file))
+        else:
+            simulations_df = pd.DataFrame()
+
+    logger.info("[battle_seeds] input simulation rows=%s", len(simulations_df))
+
+    scenarios: list[dict[str, Any]] = []
+    skipped_examples: list[dict[str, Any]] = []
+
+    for boss_team in boss_teams_df.to_dict(orient="records"):
+        boss_id = boss_team.get("team_id")
+        boss_name = boss_team.get("boss_name")
+        game_version = boss_team.get("game_version")
+        boss_level = boss_team.get("avg_level", 20)
+
+        if not simulations_df.empty:
+            boss_matchups = simulations_df[simulations_df["team_id_defender"] == boss_id]
+        else:
+            boss_matchups = pd.DataFrame()
+
+        for _, player_match in boss_matchups.iterrows():
+            player_id = player_match.get("team_id_attacker")
+            if player_id is None or boss_id is None:
+                if len(skipped_examples) < 5:
+                    skipped_examples.append({"reason": "null_team_id", "row": player_match.to_dict()})
+                continue
+
+            predicted_win_chance = round(float(player_match.get("predicted_player_win_chance", 0.5) or 0.5), 4)
+            simulation_score = float(player_match.get("simulation_score", 0.0) or 0.0)
+            attacker_win = bool(player_match.get("attacker_win", False))
+            degraded_data = bool(player_match.get("degraded_data", False))
+            n_trials = int(player_match.get("n_trials", 1) or 1)
+
+            scenarios.append(
+                {
+                    "scenario_id": canonical_scenario_id(player_id, boss_id),
+                    "player_team_id": player_id,
+                    "boss_team_id": boss_id,
+                    "boss_name": boss_name,
+                    "game_version": game_version,
+                    "boss_level": boss_level,
+                    "predicted_player_win_chance": predicted_win_chance,
+                    "simulation_score": round(simulation_score, 3),
+                    "simulated_attacker_win": attacker_win,
+                    "degraded_data": degraded_data,
+                    "n_trials": n_trials,
+                }
+            )
+
+    write_parquet(simulation_dir / "battle_seeds.parquet", scenarios)
+    logger.info("[battle_seeds] output battle seed rows=%s", len(scenarios))
+
+    if not simulations_df.empty and len(scenarios) == 0:
+        logger.error("[battle_seeds] zero output rows despite simulation input rows=%s skipped_examples=%s", len(simulations_df), skipped_examples)
+        raise ValueError(
+            "battle_seeds produced 0 rows even though team_battle_simulations.parquet has data; "
+            f"simulation_rows={len(simulations_df)} boss_rows={len(boss_teams_df)} skipped_examples={skipped_examples}"
+        )
