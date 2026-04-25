@@ -44,12 +44,17 @@ VARIABLE_POWER_MOVES = {
     "echoed-voice",
 }
 
+MOVE_NAME_ALIASES = {
+    "fla": "flail",
+}
+
 
 def normalize_move_power_name(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     normalized = normalized.replace("_", "-").replace(" ", "-").replace("'", "")
     normalized = re.sub(r"-{2,}", "-", normalized)
-    return normalized.strip("-")
+    normalized = normalized.strip("-")
+    return MOVE_NAME_ALIASES.get(normalized, normalized)
 
 
 def resolve_effective_power(
