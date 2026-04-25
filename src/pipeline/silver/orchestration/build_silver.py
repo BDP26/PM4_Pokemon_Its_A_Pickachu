@@ -691,6 +691,18 @@ def _validate_starter_chain_move_coverage(
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
 
+    if missing_rows:
+        preview = ", ".join(
+            f"{row['game_version']}:{row['species_name']}"
+            for row in missing_rows[:20]
+        )
+        raise ValueError(
+            "Starter-chain move reference validation failed: "
+            f"missing_species_count={len(missing_rows)} "
+            f"first_20=[{preview}] "
+            f"diagnostics={diagnostics_path}"
+        )
+
     return missing_rows
 
 
