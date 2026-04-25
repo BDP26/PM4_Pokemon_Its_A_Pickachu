@@ -730,6 +730,59 @@ def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str
     return entries
 
 
+def _validate_kaggle_moves_in_move_reference(
+    kaggle_rows_by_game: dict[str, list[dict[str, Any]]],
+    move_reference_df: pd.DataFrame,
+    diagnostics_dir: Path,
+) -> None:
+    move_reference_moves = {
+        normalize_move_name(row.get("move_name"))
+        for row in move_reference_df.to_dict(orient="records")
+        if normalize_move_name(row.get("move_name"))
+    }
+
+    missing_rows: list[dict[str, Any]] = []
+    move_columns = ("Move 1", "Move 2", "Move 3", "Move 4")
+    for game_key, rows in sorted(kaggle_rows_by_game.items()):
+        game_norm = str(game_key or "").strip().lower()
+        for row in rows:
+            species_slug = normalize_species_slug(row.get("Pokemon") or "")
+            for move_column in move_columns:
+                normalized_move = normalize_move_name(row.get(move_column) or "")
+                if not normalized_move:
+                    continue
+                if normalized_move in move_reference_moves:
+                    continue
+                missing_rows.append(
+                    {
+                        "game_version": game_norm,
+                        "pokemon_species": species_slug,
+                        "move_name": normalized_move,
+                        "source_column": move_column,
+                        "reason": "kaggle_move_missing_from_move_reference",
+                    }
+                )
+
+    diagnostics_path = diagnostics_dir / "kaggle_move_reference_gaps.csv"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        missing_rows,
+        columns=["game_version", "pokemon_species", "move_name", "source_column", "reason"],
+    ).to_csv(diagnostics_path, index=False)
+
+    if missing_rows:
+        preview = ", ".join(
+            f"{row['game_version']}:{row['pokemon_species']}:{row['move_name']}"
+            for row in missing_rows[:20]
+        )
+        raise ValueError(
+            "Kaggle move reference validation failed: "
+            f"missing_moves={len(missing_rows)} "
+            f"first_20=[{preview}] "
+            f"diagnostics={diagnostics_path}"
+        )
+
+
 def _build_boss_compact_tables(
     boss_teams: list[dict[str, Any]],
     move_data: dict[str, Any],
@@ -997,14 +1050,13 @@ def build_silver_from_bronze(
     starter_chain_species_by_game = _collect_starter_chain_species_by_game(games_config)
     starter_chain_entries = _starter_chain_bootstrap_entries(starter_chain_species_by_game)
     base_bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
-    bootstrap_entries = _dedupe_bootstrap_entries(base_bootstrap_entries + starter_chain_entries)
+    kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(kaggle_rows_by_game)
+    bootstrap_entries = _dedupe_bootstrap_entries(base_bootstrap_entries + starter_chain_entries + kaggle_bootstrap_entries)
     if not move_reference_path.exists() or not learnable_moves_path.exists():
         bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         logger.info("[silver] bootstrap move refs entries=%s", bootstrap_stats.get("entry_count", 0))
-    kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(kaggle_rows_by_game)
-    merged_entries = _dedupe_bootstrap_entries(bootstrap_entries + kaggle_bootstrap_entries)
-    if merged_entries:
-        persist_move_reference_cache(merged_entries, silver_dir=silver_dir)
+    if bootstrap_entries:
+        persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
     missing_starter_pairs = _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
     if missing_starter_pairs:
@@ -1012,14 +1064,14 @@ def build_silver_from_bronze(
             "[silver/moves] starter coverage gaps detected; refreshing move cache via API missing_pairs=%s",
             len(missing_starter_pairs),
         )
-        bootstrap_stats = bootstrap_move_reference_cache(merged_entries, silver_dir=silver_dir)
+        bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         logger.info(
             "[silver/moves] starter coverage refresh complete entries=%s target_pairs=%s learnable_rows=%s",
             bootstrap_stats.get("entry_count", 0),
             bootstrap_stats.get("target_pairs", 0),
             bootstrap_stats.get("learnable_rows", 0),
         )
-        persist_move_reference_cache(merged_entries, silver_dir=silver_dir)
+        persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
         missing_starter_pairs = _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
 
@@ -1030,6 +1082,9 @@ def build_silver_from_bronze(
             "Starter-chain move reference validation failed: "
             f"missing_pairs={len(missing_starter_pairs)} first_20=[{preview}] diagnostics={diagnostics_path}"
         )
+
+    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    _validate_kaggle_moves_in_move_reference(kaggle_rows_by_game, move_reference_df, diagnostics_dir)
 
     reference_context = load_reference_context(silver_dir=silver_dir)
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(bronze_dir, allowed_versions=allowed_versions, reference_context=reference_context)
@@ -1326,7 +1381,10 @@ def _validate_kaggle_boss_move_profiles(move_data: dict[str, Any], diagnostics_d
 
     diagnostics_path = diagnostics_dir / "kaggle_boss_move_profile_gaps.csv"
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
+    pd.DataFrame(
+        missing_rows,
+        columns=["pokemon_instance_id", "species", "game_version", "move_name", "reason"],
+    ).to_csv(diagnostics_path, index=False)
 
     if missing_rows:
         preview = ", ".join(

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Collection
 
 from src.pipeline.silver.config.team_config import CSV_PROGRESS_LOG_INTERVAL, DEFAULT_MEMBER_LEVEL, KAGGLE_CSV_DELIMITER
-from src.pipeline.silver.inputs.reference_context import MoveReferenceContext, normalize_species_slug
+from src.pipeline.silver.inputs.reference_context import MoveReferenceContext, normalize_move_name, normalize_species_slug
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, make_team_id
 
 
@@ -50,7 +50,7 @@ def _normalize_kaggle_row(row: dict[str, Any]) -> dict[str, Any]:
         level = DEFAULT_MEMBER_LEVEL
 
     moves = [
-        move.strip().lower().replace(" ", "-")
+        normalize_move_name(move)
         for move in [row.get("Move 1", ""), row.get("Move 2", ""), row.get("Move 3", ""), row.get("Move 4", "")]
         if move and str(move).strip()
     ]
