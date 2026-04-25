@@ -7,15 +7,13 @@ import math
 import os
 import random
 import time
-from collections import Counter
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import DEFAULT_TEAM_MEMBER_LIMIT
-from src.pipeline.silver.inputs.reference_context import normalize_key, normalize_species_slug
-from src.pipeline.silver.move_power import normalize_move_power_name, resolve_effective_power
+from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.settings import (
     BRONZE_DIR,
     SILVER_DIR,
@@ -180,6 +178,10 @@ _POKEMON_REQUIRED_STATS = [
 ]
 
 
+def _allow_simulation_fallbacks() -> bool:
+    return os.environ.get("PM4_ALLOW_SIMULATION_FALLBACKS", "0").strip() == "1"
+
+
 def _safe_int(value: Any, default: int) -> int:
     if value is None:
         return default
@@ -200,120 +202,151 @@ def _install_reference_profiles(
     _LOCAL_MOVE_PROFILES = dict(move_profiles)
 
 
-def _load_reference_profiles_from_parquet(silver_dir: Path) -> None:
-    references_dir = silver_dir / "references"
-    pokemon_profiles: dict[str, dict[str, Any]] = {}
-    move_profiles: dict[str, MoveProfile] = {}
-    skipped_species: list[str] = []
+def _is_nullish(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return False
 
-    pokemon_data_path = references_dir / "pokemon_data.parquet"
-    if pokemon_data_path.exists():
-        pokemon_data_df = read_parquet(pokemon_data_path)
-        for row in pokemon_data_df.to_dict(orient="records"):
-            species = normalize_species_name(str(row.get("pokemon_species") or row.get("name") or ""))
-            if not species:
-                continue
-            has_required = bool(str(row.get("type_1") or "").strip())
-            for stat_column in _POKEMON_REQUIRED_STATS:
-                if _safe_int(row.get(stat_column), -1) <= 0:
-                    has_required = False
-                    break
-            if not has_required:
-                skipped_species.append(species)
-                continue
-            pokemon_profiles[species] = {
-                "name": species,
-                "types": [
-                    str(value).title()
-                    for value in [row.get("type_1"), row.get("type_2")]
-                    if isinstance(value, str) and value.strip()
-                ] or ["Normal"],
-                "stats": {
-                    "hp": _safe_int(row.get("base_hp"), 50),
-                    "attack": _safe_int(row.get("base_attack"), 50),
-                    "defense": _safe_int(row.get("base_defense"), 50),
-                    "sp_attack": _safe_int(row.get("base_special_attack"), 50),
-                    "sp_defense": _safe_int(row.get("base_special_defense"), 50),
-                    "speed": _safe_int(row.get("base_speed"), 50),
-                },
-                "moves": [],
-            }
-    if skipped_species:
-        preview = ",".join(sorted(dict.fromkeys(skipped_species))[:20])
-        logger.warning(
-            "[type_matchups] skipped incomplete pokemon profiles count=%s first_20_species=[%s]",
-            len(skipped_species),
-            preview,
-        )
 
-    move_reference_path = references_dir / "move_reference.parquet"
-    if move_reference_path.exists():
-        move_ref_df = read_parquet(move_reference_path)
-        handling_counts: Counter[str] = Counter()
-        unknown_null_moves: list[str] = []
-        for row in move_ref_df.to_dict(orient="records"):
-            move_name = _normalize_move_name(str(row.get("move_name") or row.get("name") or ""))
-            if not move_name:
+def _normalize_profile_key(value: Any) -> str:
+    if _is_nullish(value):
+        return ""
+    normalized = str(value).strip().lower().replace(" ", "-").replace("_", "-")
+    return normalized
+
+
+def _require_non_null(row: dict[str, Any], column: str, context: str) -> Any:
+    value = row.get(column)
+    if _is_nullish(value):
+        raise ValueError(f"{context}: required column '{column}' is null")
+    return value
+
+
+def load_pokemon_profiles_from_silver(silver_dir: Path) -> dict[str, dict[str, Any]]:
+    pokemon_data_path = silver_dir / "references" / "pokemon_data.parquet"
+    if not pokemon_data_path.exists():
+        raise FileNotFoundError(f"Pokemon reference parquet missing: {pokemon_data_path}")
+    pokemon_data_df = read_parquet(pokemon_data_path)
+    profiles: dict[str, dict[str, Any]] = {}
+    strong_name_keys: set[str] = set()
+
+    alias_columns = [
+        "name",
+        "pokemon_species",
+        "requested_pokemon_name",
+        "normalized_requested_name",
+        "normalized_species",
+        "resolved_pokemon_name",
+    ]
+    for row in pokemon_data_df.to_dict(orient="records"):
+        name = _normalize_profile_key(_require_non_null(row, "name", "pokemon_data.parquet"))
+        _require_non_null(row, "type_1", f"pokemon_data.parquet[{name}]")
+        for stat_column in _POKEMON_REQUIRED_STATS:
+            _require_non_null(row, stat_column, f"pokemon_data.parquet[{name}]")
+
+        profile = {
+            "name": name,
+            "species": _normalize_profile_key(row.get("pokemon_species") or row.get("name")),
+            "pokeapi_id": row.get("pokeapi_id"),
+            "source_url": row.get("source_url"),
+            "types": [
+                str(value).title()
+                for value in [row.get("type_1"), row.get("type_2")]
+                if isinstance(value, str) and value.strip()
+            ],
+            "type_1": str(row.get("type_1") or "").title(),
+            "type_2": str(row.get("type_2")).title() if isinstance(row.get("type_2"), str) and str(row.get("type_2")).strip() else None,
+            "hp": int(row.get("base_hp")),
+            "attack": int(row.get("base_attack")),
+            "defense": int(row.get("base_defense")),
+            "special_attack": int(row.get("base_special_attack")),
+            "special_defense": int(row.get("base_special_defense")),
+            "speed": int(row.get("base_speed")),
+            "height": row.get("height"),
+            "weight": row.get("weight"),
+            "base_experience": row.get("base_experience"),
+            "is_default": row.get("is_default"),
+            "resolved_pokemon_name": row.get("resolved_pokemon_name"),
+            "resolved_pokeapi_id": row.get("resolved_pokeapi_id"),
+            "resolution_method": row.get("resolution_method"),
+            "resolution_warning": row.get("resolution_warning"),
+            "moves": [],
+            "stats": {
+                "hp": int(row.get("base_hp")),
+                "attack": int(row.get("base_attack")),
+                "defense": int(row.get("base_defense")),
+                "sp_attack": int(row.get("base_special_attack")),
+                "sp_defense": int(row.get("base_special_defense")),
+                "speed": int(row.get("base_speed")),
+            },
+        }
+        for column in alias_columns:
+            key = _normalize_profile_key(row.get(column))
+            if not key:
                 continue
-            accuracy = row.get("accuracy")
-            if isinstance(accuracy, float) and math.isnan(accuracy):
-                accuracy = None
+            if column == "name":
+                profiles[key] = profile
+                strong_name_keys.add(key)
+                continue
+            if key in strong_name_keys or key in profiles:
+                continue
+            profiles[key] = profile
+
+    return profiles
+
+
+def load_move_profiles_from_silver(silver_dir: Path) -> dict[str, MoveProfile]:
+    move_reference_path = silver_dir / "references" / "move_reference.parquet"
+    if not move_reference_path.exists():
+        raise FileNotFoundError(f"Move reference parquet missing: {move_reference_path}")
+    move_ref_df = read_parquet(move_reference_path)
+    profiles: dict[str, MoveProfile] = {}
+    for row in move_ref_df.to_dict(orient="records"):
+        move_name = _normalize_profile_key(_require_non_null(row, "move_name", "move_reference.parquet"))
+        move_type = row.get("type")
+        if _is_nullish(move_type):
+            raise ValueError(f"move_reference.parquet[{move_name}]: required column 'type' is null")
+        is_status_move = bool(row.get("is_status_move"))
+        damage_class_value = row.get("damage_class")
+        if _is_nullish(damage_class_value):
+            if is_status_move:
+                damage_class = "status"
+            else:
+                raise ValueError(f"move_reference.parquet[{move_name}]: damage_class is null for non-status move")
+        else:
+            damage_class = str(damage_class_value).strip().lower()
+        effective_power = row.get("effective_power")
+        if _is_nullish(effective_power):
+            effective_power = 0.0
+        raw_power = row.get("raw_power")
+        if _is_nullish(raw_power):
             raw_power = row.get("power")
-            if isinstance(raw_power, float) and math.isnan(raw_power):
-                raw_power = None
-            effective_power, power_handling = resolve_effective_power(
-                move_name=move_name,
-                power=raw_power,
-                damage_class=row.get("damage_class") or row.get("category"),
-            )
-            resolved_effective_power = row.get("effective_power", effective_power)
-            if isinstance(resolved_effective_power, float) and math.isnan(resolved_effective_power):
-                resolved_effective_power = effective_power
-            resolved_effective_power = float(resolved_effective_power)
-            resolved_power_handling = str(row.get("power_handling") or power_handling)
-            handling_counts[resolved_power_handling] += 1
-            if resolved_power_handling == "unknown_null_power_damage_proxy":
-                unknown_null_moves.append(move_name)
-            move_profiles[move_name] = {
-                "name": move_name,
-                "type": str(row.get("type") or row.get("move_type") or "Normal"),
-                "power": raw_power,
-                "raw_power": row.get("raw_power", raw_power),
-                "effective_power": resolved_effective_power,
-                "power_handling": resolved_power_handling,
-                "is_status_move": bool(row.get("is_status_move", str(row.get("damage_class") or row.get("category") or "").strip().lower() == "status")),
-                "is_damage_move": bool(row.get("is_damage_move", resolved_effective_power > 0)),
-                "is_null_power": bool(row.get("is_null_power", raw_power is None)),
-                "damage_class": str(row.get("damage_class") or row.get("category") or "physical"),
-                "accuracy": _safe_int(accuracy, 100) if accuracy is not None else None,
-                "pp": _safe_int(row.get("pp"), 0),
-                "level_learned_at": 0,
-                "version_group": "reference",
-                "degraded_data": False,
-            }
-        logger.info(
-            "[type_matchups] move power handling summary: direct_power=%s status_no_damage=%s fixed_damage_level=%s fixed_damage_40=%s fixed_damage_20=%s variable_power_proxy=%s unknown_null_power_damage_proxy=%s",
-            handling_counts.get("direct_power", 0),
-            handling_counts.get("status_no_damage", 0),
-            handling_counts.get("fixed_damage_level", 0),
-            handling_counts.get("fixed_damage_40", 0),
-            handling_counts.get("fixed_damage_20", 0),
-            handling_counts.get("variable_power_proxy", 0),
-            handling_counts.get("unknown_null_power_damage_proxy", 0),
-        )
-        if handling_counts.get("unknown_null_power_damage_proxy", 0) > 0:
-            logger.warning(
-                "[type_matchups] unknown null-power damage proxy moves count=%s sample_moves=[%s]",
-                handling_counts.get("unknown_null_power_damage_proxy", 0),
-                ",".join(sorted(dict.fromkeys(unknown_null_moves))[:20]),
-            )
+        if _is_nullish(raw_power):
+            raw_power = 0.0
+        accuracy = row.get("accuracy")
+        if isinstance(accuracy, float) and math.isnan(accuracy):
+            accuracy = None
 
-    _install_reference_profiles(pokemon_profiles, move_profiles)
-    logger.info(
-        "[type_matchups] loaded parquet reference profiles pokemon=%s moves=%s",
-        len(_LOCAL_POKEMON_PROFILES),
-        len(_LOCAL_MOVE_PROFILES),
-    )
+        profiles[move_name] = {
+            "name": move_name,
+            "type": str(move_type).strip().title(),
+            "power": float(effective_power),
+            "raw_power": float(raw_power),
+            "effective_power": float(effective_power),
+            "power_handling": str(row.get("power_handling") or ""),
+            "is_status_move": is_status_move,
+            "is_damage_move": bool(row.get("is_damage_move")),
+            "is_null_power": bool(row.get("is_null_power")),
+            "damage_class": damage_class,
+            "accuracy": None if accuracy is None else _safe_int(accuracy, 100),
+            "pp": _safe_int(row.get("pp"), 0),
+            "level_learned_at": 0,
+            "version_group": "reference",
+            "degraded_data": False,
+        }
+    return profiles
 
 
 def _default_stats() -> dict[str, int]:
@@ -328,7 +361,7 @@ def _default_stats() -> dict[str, int]:
 
 
 def normalize_species_name(name: str) -> str:
-    return normalize_species_slug(name)
+    return _normalize_profile_key(name)
 
 
 _MISSING_MOVE_MARKERS = {"", "nan", "none", "null", "<na>", "na"}
@@ -352,24 +385,43 @@ def _is_missing_move_value(value: Any) -> bool:
 def _normalize_move_name(name: Any) -> str:
     if _is_missing_move_value(name):
         return ""
-    return normalize_move_power_name(name) or normalize_key(name)
+    return _normalize_profile_key(name)
 
 
-def _fetch_pokemon_profile_from_api(species_id: str) -> tuple[dict[str, Any], bool, str | None]:
+def _stable_pair_seed(attacker_team_id: Any, defender_team_id: Any, base_seed: int) -> int:
+    payload = f"{attacker_team_id}|{defender_team_id}|{int(base_seed)}".encode("utf-8")
+    return int(hashlib.sha256(payload).hexdigest()[:8], 16)
+
+
+def _get_pokemon_profile(species_id: str, warnings: WarningCollector) -> tuple[dict[str, Any], bool]:
+    cached = _LOCAL_POKEMON_PROFILES.get(species_id)
+    if cached is not None:
+        return cached, False
+    if not _allow_simulation_fallbacks():
+        raise ValueError(f"Missing Pokemon profile in pokemon_data.parquet for '{species_id}'")
+    warnings.warn(f"Missing Pokemon profile for '{species_id}'; using deterministic fallback profile")
     return (
         {
             "name": species_id,
+            "species": species_id,
             "types": ["Normal"],
+            "type_1": "Normal",
+            "type_2": None,
             "stats": _default_stats(),
             "moves": [],
         },
         True,
-        f"Pokemon profile not found in local cache for '{species_id}'; using deterministic fallback profile",
     )
 
 
-def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str | None]:
+def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveProfile, bool]:
+    cached = _LOCAL_MOVE_PROFILES.get(move_name)
+    if cached is not None:
+        return cached, False
+    if not _allow_simulation_fallbacks():
+        raise ValueError(f"Missing move profile in move_reference.parquet for '{move_name}'")
     effective_power, power_handling = resolve_effective_power(move_name, 40, "physical")
+    warnings.warn(f"Missing move profile for '{move_name}'; using deterministic fallback profile")
     return (
         {
             "name": move_name,
@@ -389,40 +441,10 @@ def _fetch_move_profile_from_api(move_name: str) -> tuple[MoveProfile, bool, str
             "degraded_data": True,
         },
         True,
-        f"Move profile not found in local cache for '{move_name}'; using deterministic fallback profile",
     )
 
 
-def _stable_pair_seed(attacker_team_id: Any, defender_team_id: Any, base_seed: int) -> int:
-    payload = f"{attacker_team_id}|{defender_team_id}|{int(base_seed)}".encode("utf-8")
-    return int(hashlib.sha256(payload).hexdigest()[:8], 16)
-
-
-def _get_pokemon_profile(species_id: str, warnings: WarningCollector) -> tuple[dict[str, Any], bool]:
-    cached = _LOCAL_POKEMON_PROFILES.get(species_id)
-    if cached is not None:
-        return cached, False
-    profile, degraded, warning = _fetch_pokemon_profile_from_api(species_id)
-    if warning:
-        warnings.warn(warning)
-    if not degraded:
-        _LOCAL_POKEMON_PROFILES[species_id] = profile
-    return profile, degraded
-
-
-def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveProfile, bool]:
-    cached = _LOCAL_MOVE_PROFILES.get(move_name)
-    if cached is not None:
-        return cached, False
-    profile, degraded, warning = _fetch_move_profile_from_api(move_name)
-    if warning:
-        warnings.warn(warning)
-    if not degraded:
-        _LOCAL_MOVE_PROFILES[move_name] = profile
-    return profile, degraded
-
-
-def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None:
+def _validate_profile_coverage(teams_data: list[dict[str, Any]]) -> None:
     required_species: set[str] = set()
     required_moves: set[str] = set()
     for team in teams_data:
@@ -437,25 +459,15 @@ def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None
 
     missing_species = sorted(species for species in required_species if species not in _LOCAL_POKEMON_PROFILES)
     missing_moves = sorted(move for move in required_moves if move not in _LOCAL_MOVE_PROFILES)
-    incomplete_moves: list[str] = []
-    for move in sorted(required_moves):
-        profile = _LOCAL_MOVE_PROFILES.get(move)
-        if profile is None:
-            continue
-        normalized_name = _normalize_move_name(profile.get("name") or move)
-        move_type = str(profile.get("type") or "").strip()
-        damage_class = str(profile.get("damage_class") or "").strip().lower()
-        if not normalized_name or not move_type or not damage_class:
-            incomplete_moves.append(move)
-
-    if missing_species or missing_moves or incomplete_moves:
-        sample_species = ",".join(missing_species[:10])
-        sample_moves = ",".join(missing_moves[:10])
-        sample_incomplete_moves = ",".join(incomplete_moves[:10])
+    if missing_species:
         raise ValueError(
-            "Simulation strict mode requires complete cached combat profiles: "
-            f"missing_species={len(missing_species)} missing_moves={len(missing_moves)} incomplete_moves={len(incomplete_moves)} "
-            f"sample_species=[{sample_species}] sample_moves=[{sample_moves}] sample_incomplete_moves=[{sample_incomplete_moves}]"
+            "Missing Pokemon profiles in pokemon_data.parquet: "
+            f"total={len(missing_species)}, examples={','.join(missing_species[:50])}"
+        )
+    if missing_moves:
+        raise ValueError(
+            "Missing move profiles in move_reference.parquet: "
+            f"total={len(missing_moves)}, examples={','.join(missing_moves[:50])}"
         )
 
 
@@ -1280,13 +1292,18 @@ def _run_spark_simulations(
             return []
 
         team_lookup_bc = spark.sparkContext.broadcast(team_lookup)
+        pokemon_profiles_bc = spark.sparkContext.broadcast(_LOCAL_POKEMON_PROFILES)
+        move_profiles_bc = spark.sparkContext.broadcast(_LOCAL_MOVE_PROFILES)
         chart_bc = spark.sparkContext.broadcast(type_chart)
         config_bc = spark.sparkContext.broadcast(asdict(config))
 
         def _simulate_partition(rows: Any) -> Any:
             local_teams = cast(dict[str, dict[str, Any]], team_lookup_bc.value)
+            local_pokemon_profiles = cast(dict[str, dict[str, Any]], pokemon_profiles_bc.value)
+            local_move_profiles = cast(dict[str, MoveProfile], move_profiles_bc.value)
             local_chart = cast(dict[str, dict[str, float]], chart_bc.value)
             local_config = BattleSimulationConfig(**cast(dict[str, Any], config_bc.value))
+            _install_reference_profiles(local_pokemon_profiles, local_move_profiles)
             for row in rows:
                 attacker_team = local_teams[str(row.attacker_id)]
                 defender_team = local_teams[str(row.defender_id)]
@@ -1320,7 +1337,14 @@ def _run_spark_simulations(
 
 
 def _load_move_and_pokemon_profiles_from_disk(silver_dir: Path) -> None:
-    _load_reference_profiles_from_parquet(silver_dir)
+    pokemon_profiles = load_pokemon_profiles_from_silver(silver_dir)
+    move_profiles = load_move_profiles_from_silver(silver_dir)
+    _install_reference_profiles(pokemon_profiles, move_profiles)
+    logger.info(
+        "[type_matchups] loaded parquet reference profiles pokemon=%s moves=%s",
+        len(_LOCAL_POKEMON_PROFILES),
+        len(_LOCAL_MOVE_PROFILES),
+    )
 
 
 def build_team_battle_simulations(
@@ -1338,8 +1362,8 @@ def build_team_battle_simulations(
     _load_move_and_pokemon_profiles_from_disk(silver_dir)
 
     config = runtime_config or BattleSimulationConfig()
-    if config.fail_on_degraded_data:
-        _assert_profile_cache_completeness(teams_data)
+    if not _allow_simulation_fallbacks():
+        _validate_profile_coverage(teams_data)
     use_spark = _should_use_spark() if force_spark is None else bool(force_spark)
     logger.info("[type_matchups] engine=%s", "spark" if use_spark else "local")
 
