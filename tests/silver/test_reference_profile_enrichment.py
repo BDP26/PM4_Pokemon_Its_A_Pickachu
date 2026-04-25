@@ -5,6 +5,7 @@ import pandas as pd
 from src.pipeline.silver.orchestration.build_silver import (
     _collect_kaggle_boss_species_and_moves,
     _ensure_moves_in_combat_profiles,
+    _resolve_requested_pokemon_profile,
     _profile_from_pokemon_payload,
     _move_profiles_from_reference,
 )
@@ -99,3 +100,96 @@ def test_profile_flattening_maps_stats_and_types() -> None:
 
 def test_species_alias_normalization_for_mr_mime() -> None:
     assert normalize_species_slug("mr. mime") == "mr-mime"
+
+
+def _fake_payload(name: str, poke_id: int, species: str | None = None, is_default: bool = True) -> dict:
+    return {
+        "id": poke_id,
+        "name": name,
+        "species": {"name": species or name},
+        "types": [{"slot": 1, "type": {"name": "normal"}}],
+        "stats": [
+            {"stat": {"name": "hp"}, "base_stat": 60},
+            {"stat": {"name": "attack"}, "base_stat": 60},
+            {"stat": {"name": "defense"}, "base_stat": 60},
+            {"stat": {"name": "special-attack"}, "base_stat": 60},
+            {"stat": {"name": "special-defense"}, "base_stat": 60},
+            {"stat": {"name": "speed"}, "base_stat": 60},
+        ],
+        "height": 10,
+        "weight": 100,
+        "base_experience": 100,
+        "is_default": is_default,
+    }
+
+
+def test_species_default_resolution_examples() -> None:
+    species_payloads = {
+        "aegislash": {"name": "aegislash", "varieties": [{"is_default": True, "pokemon": {"name": "aegislash-shield"}}]},
+        "gourgeist": {"name": "gourgeist", "varieties": [{"is_default": True, "pokemon": {"name": "gourgeist-average"}}]},
+        "meowstic": {"name": "meowstic", "varieties": [{"is_default": True, "pokemon": {"name": "meowstic-male"}}]},
+        "pyroar": {"name": "pyroar", "varieties": [{"is_default": True, "pokemon": {"name": "pyroar-male"}}]},
+        "pumpkaboo": {"name": "pumpkaboo", "varieties": [{"is_default": True, "pokemon": {"name": "pumpkaboo-average"}}]},
+        "raichu": {"name": "raichu", "varieties": [{"is_default": True, "pokemon": {"name": "raichu"}}]},
+        "frillish": {"name": "frillish", "varieties": [{"is_default": True, "pokemon": {"name": "frillish"}}]},
+        "jellicent": {"name": "jellicent", "varieties": [{"is_default": True, "pokemon": {"name": "jellicent"}}]},
+    }
+    pokemon_payloads = {
+        "aegislash-shield": _fake_payload("aegislash-shield", 681, species="aegislash"),
+        "gourgeist-average": _fake_payload("gourgeist-average", 711, species="gourgeist"),
+        "meowstic-male": _fake_payload("meowstic-male", 678, species="meowstic"),
+        "pyroar-male": _fake_payload("pyroar-male", 668, species="pyroar"),
+        "pumpkaboo-average": _fake_payload("pumpkaboo-average", 710, species="pumpkaboo"),
+        "raichu": _fake_payload("raichu", 26, species="raichu"),
+        "frillish": _fake_payload("frillish", 592, species="frillish"),
+        "jellicent": _fake_payload("jellicent", 593, species="jellicent"),
+    }
+
+    def _fetch(url: str) -> dict | None:
+        if "/pokemon-species/" in url:
+            key = url.rstrip("/").split("/")[-1]
+            return species_payloads.get(key)
+        if "/pokemon/" in url:
+            key = url.rstrip("/").split("/")[-1]
+            return pokemon_payloads.get(key)
+        return None
+
+    expected = {
+        "aegislash": "aegislash-shield",
+        "gourgeist": "gourgeist-average",
+        "meowstic": "meowstic-male",
+        "pyroar": "pyroar-male",
+        "pumpkaboo-large": "pumpkaboo-average",
+        "pumpkaboo-small": "pumpkaboo-average",
+        "pumpkaboo-super": "pumpkaboo-average",
+        "raichu-alola": "raichu",
+        "frillish-male": "frillish",
+        "jellicent-male": "jellicent",
+    }
+    for requested, resolved in expected.items():
+        profile, failure = _resolve_requested_pokemon_profile(requested, _fetch)
+        assert failure is None
+        assert profile is not None
+        assert profile["resolved_pokemon_name"] == resolved
+        assert profile["resolved_pokeapi_id"] is not None
+
+
+def test_exact_resolution_examples_for_variant_forms() -> None:
+    pokemon_payloads = {
+        "basculin-blue-striped": _fake_payload("basculin-blue-striped", 550, species="basculin", is_default=False),
+        "basculin-red-striped": _fake_payload("basculin-red-striped", 550, species="basculin", is_default=True),
+        "zygarde-50": _fake_payload("zygarde-50", 718, species="zygarde", is_default=False),
+    }
+
+    def _fetch(url: str) -> dict | None:
+        if "/pokemon/" in url:
+            key = url.rstrip("/").split("/")[-1]
+            return pokemon_payloads.get(key)
+        return None
+
+    for requested in ("basculin-blue-striped", "basculin-red-striped", "zygarde-50"):
+        profile, failure = _resolve_requested_pokemon_profile(requested, _fetch)
+        assert failure is None
+        assert profile is not None
+        assert profile["resolution_method"] == "pokemon_exact"
+        assert profile["resolved_pokeapi_id"] is not None
