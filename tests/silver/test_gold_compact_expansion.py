@@ -112,3 +112,65 @@ def test_gold_simulation_consumes_compact_inputs(monkeypatch, tmp_path: Path) ->
 
     teams_out = read_parquet(gold_dir / "simulation" / "teams.parquet")
     assert {row["team_id"] for row in teams_out.to_dict(orient="records")} == {"player_t1", "boss_t1"}
+
+
+def test_gold_simulation_filters_invalid_move_placeholders_before_persistence(monkeypatch, tmp_path: Path) -> None:
+    silver_dir = tmp_path / "silver"
+    gold_dir = tmp_path / "gold"
+    bronze_dir = tmp_path / "bronze"
+    simulation_dir = silver_dir / "simulation"
+    simulation_dir.mkdir(parents=True, exist_ok=True)
+    _write_compact_inputs(simulation_dir)
+
+    write_parquet(
+        simulation_dir / "member_moveset_combos_red.parquet",
+        [
+            {
+                "moveset_combo_id": "c1",
+                "team_id": "player_t1",
+                "pokemon_instance_id": "m1",
+                "slot_index": 1,
+                "combo_rank": 1,
+                "move_1": "thunderbolt",
+                "move_2": float("nan"),
+                "move_3": "null",
+                "move_4": "swift",
+            },
+            {
+                "moveset_combo_id": "c2",
+                "team_id": "boss_t1",
+                "pokemon_instance_id": "m2",
+                "slot_index": 1,
+                "combo_rank": 1,
+                "move_1": "tackle",
+                "move_2": "na",
+            },
+        ],
+    )
+    write_parquet(
+        simulation_dir / "member_move_options_red.parquet",
+        [
+            {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": None, "option_rank": 1},
+            {"team_member_id": "m1", "source_team_id": "player_t1", "game_version": "red", "move_name": "thunderbolt", "option_rank": 2},
+            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "move_name": "<NA>", "option_rank": 1},
+            {"team_member_id": "m2", "source_team_id": "boss_t1", "game_version": "red", "move_name": "tackle", "option_rank": 2},
+        ],
+    )
+
+    monkeypatch.setattr(run_module, "_run_gold_team_battle_simulations", lambda **_: None)
+    monkeypatch.setattr(run_module, "_build_gold_battle_seeds", lambda **_: None)
+    monkeypatch.setattr(run_module, "_run_gold_monte_carlo_optimizer", lambda **_: None)
+
+    run_module.run_gold_simulation_from_silver(
+        silver_dir=silver_dir,
+        gold_dir=gold_dir,
+        bronze_dir=bronze_dir,
+        required_input_files=None,
+    )
+
+    invalid = {"", "nan", "none", "null", "<na>", "na"}
+    teams_out = read_parquet(gold_dir / "simulation" / "teams.parquet").to_dict(orient="records")
+    for row in teams_out:
+        for member_moves in row.get("moves", []):
+            for move_name in list(member_moves):
+                assert str(move_name).strip().lower() not in invalid

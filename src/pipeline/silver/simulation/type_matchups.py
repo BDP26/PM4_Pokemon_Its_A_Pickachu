@@ -331,7 +331,27 @@ def normalize_species_name(name: str) -> str:
     return normalize_species_slug(name)
 
 
-def _normalize_move_name(name: str) -> str:
+_MISSING_MOVE_MARKERS = {"", "nan", "none", "null", "<na>", "na"}
+
+
+def _is_missing_move_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    try:
+        if value != value:
+            return True
+    except Exception:
+        pass
+    if isinstance(value, str):
+        return value.strip().lower() in _MISSING_MOVE_MARKERS
+    return False
+
+
+def _normalize_move_name(name: Any) -> str:
+    if _is_missing_move_value(name):
+        return ""
     return normalize_move_power_name(name) or normalize_key(name)
 
 
@@ -411,7 +431,7 @@ def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None
             if species_id:
                 required_species.add(species_id)
             for move in cast(list[str], member.get("moves", [])):
-                normalized_move = _normalize_move_name(str(move))
+                normalized_move = _normalize_move_name(move)
                 if normalized_move:
                     required_moves.add(normalized_move)
 
@@ -422,7 +442,7 @@ def _assert_profile_cache_completeness(teams_data: list[dict[str, Any]]) -> None
         profile = _LOCAL_MOVE_PROFILES.get(move)
         if profile is None:
             continue
-        normalized_name = _normalize_move_name(str(profile.get("name") or move))
+        normalized_name = _normalize_move_name(profile.get("name") or move)
         move_type = str(profile.get("type") or "").strip()
         damage_class = str(profile.get("damage_class") or "").strip().lower()
         if not normalized_name or not move_type or not damage_class:
@@ -455,12 +475,26 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         raw_level = level_entries[slot_idx] if isinstance(level_entries, list) and slot_idx < len(level_entries) else team.get("avg_level", 20)
         raw_moves = move_entries[slot_idx] if isinstance(move_entries, list) and slot_idx < len(move_entries) else []
-        moves = [
-            _normalize_move_name(str(move))
-            for move in raw_moves if isinstance(raw_moves, list)
-            for _ in [0]
-            if str(move).strip()
-        ]
+        filtered_placeholders = 0
+        moves: list[str] = []
+        seen_moves: set[str] = set()
+        if isinstance(raw_moves, list):
+            for move in raw_moves:
+                normalized_move = _normalize_move_name(move)
+                if not normalized_move:
+                    filtered_placeholders += 1
+                    continue
+                if normalized_move in seen_moves:
+                    continue
+                seen_moves.add(normalized_move)
+                moves.append(normalized_move)
+        if filtered_placeholders > 0:
+            logger.info(
+                "[type_matchups] filtered invalid move placeholders team_id=%s slot=%s count=%s",
+                team.get("team_id"),
+                slot_idx + 1,
+                filtered_placeholders,
+            )
         members.append(
             {
                 "species": species,

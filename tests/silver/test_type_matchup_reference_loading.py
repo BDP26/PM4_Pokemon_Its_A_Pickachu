@@ -102,3 +102,52 @@ def test_load_reference_profiles_skips_incomplete_pokemon_rows(tmp_path: Path, m
     type_matchups._load_reference_profiles_from_parquet(silver_dir)
 
     assert captured["pokemon"] == {}
+
+
+def test_team_members_filters_invalid_move_placeholders() -> None:
+    team = {
+        "team_id": "t1",
+        "pokemon": ["pikachu"],
+        "levels": [12],
+        "moves": [[None, float("nan"), "nan", "NA", "", "thunderbolt", "THUNDERBOLT", "<NA>"]],
+    }
+    members = type_matchups._team_members(team)
+    assert members[0]["moves"] == ["thunderbolt"]
+
+
+def test_profile_cache_completeness_ignores_invalid_move_placeholders() -> None:
+    type_matchups._install_reference_profiles(
+        pokemon_profiles={"pikachu": {"name": "pikachu", "types": ["Electric"], "stats": {"hp": 35}, "moves": []}},
+        move_profiles={"thunderbolt": {"name": "thunderbolt", "type": "electric", "damage_class": "special"}},
+    )
+    teams = [
+        {
+            "team_id": "t1",
+            "pokemon": ["pikachu"],
+            "levels": [10],
+            "moves": [[None, "", "NaN", "<NA>", "thunderbolt"]],
+        }
+    ]
+    type_matchups._assert_profile_cache_completeness(teams)
+
+
+def test_profile_cache_completeness_still_fails_for_unknown_real_move() -> None:
+    type_matchups._install_reference_profiles(
+        pokemon_profiles={"pikachu": {"name": "pikachu", "types": ["Electric"], "stats": {"hp": 35}, "moves": []}},
+        move_profiles={"thunderbolt": {"name": "thunderbolt", "type": "electric", "damage_class": "special"}},
+    )
+    teams = [
+        {
+            "team_id": "t1",
+            "pokemon": ["pikachu"],
+            "levels": [10],
+            "moves": [["thunderbolt", "mystery-move"]],
+        }
+    ]
+    try:
+        type_matchups._assert_profile_cache_completeness(teams)
+        raise AssertionError("Expected missing move validation failure")
+    except ValueError as exc:
+        message = str(exc)
+        assert "missing_moves=1" in message
+        assert "mystery-move" in message
