@@ -1033,6 +1033,7 @@ def build_silver_from_bronze(
 
     reference_context = load_reference_context(silver_dir=silver_dir)
     boss_teams, boss_move_data = extract_boss_teams_from_kaggle_source(bronze_dir, allowed_versions=allowed_versions, reference_context=reference_context)
+    _validate_kaggle_boss_move_profiles(boss_move_data, diagnostics_dir)
     all_move_data = dict(boss_move_data)
     kaggle_boss_species, kaggle_boss_moves = _collect_kaggle_boss_species_and_moves(boss_teams)
 
@@ -1303,6 +1304,40 @@ def build_silver_from_bronze(
         time.perf_counter() - started_at,
     )
 
+def _validate_kaggle_boss_move_profiles(move_data: dict[str, Any], diagnostics_dir: Path) -> None:
+    missing_rows: list[dict[str, Any]] = []
 
+    for pokemon_instance_id, payload in move_data.items():
+        provided_moves = payload.get("provided_moves") or []
+        move_details = payload.get("move_details") or {}
+
+        for move_name in provided_moves:
+            normalized_move = normalize_move_name(move_name)
+            if normalized_move and normalized_move not in move_details:
+                missing_rows.append(
+                    {
+                        "pokemon_instance_id": pokemon_instance_id,
+                        "species": payload.get("species"),
+                        "game_version": payload.get("game_version"),
+                        "move_name": normalized_move,
+                        "reason": "provided_kaggle_move_missing_profile",
+                    }
+                )
+
+    diagnostics_path = diagnostics_dir / "kaggle_boss_move_profile_gaps.csv"
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
+
+    if missing_rows:
+        preview = ", ".join(
+            f"{row['game_version']}:{row['species']}:{row['move_name']}"
+            for row in missing_rows[:20]
+        )
+        raise ValueError(
+            "Kaggle boss move reference validation failed: "
+            f"missing_move_profiles={len(missing_rows)} "
+            f"first_20=[{preview}] "
+            f"diagnostics={diagnostics_path}"
+        )
 if __name__ == "__main__":
     build_silver_from_bronze()

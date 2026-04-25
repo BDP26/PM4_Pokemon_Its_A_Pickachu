@@ -132,12 +132,27 @@ class MoveReferenceContext:
         learnable_moves = self.learnable_moves(name, int(level), game_version)
         learnable_move_levels = self.learnable_levels(name, game_version)
 
+        missing_provided_moves = sorted(
+            move_name
+            for move_name in cleaned_moves
+            if move_name and move_name not in self.move_profiles
+        )
+        if missing_provided_moves:
+            raise ValueError(
+                "Kaggle boss move reference validation failed: "
+                f"species={normalize_species_slug(name)} "
+                f"game_version={str(game_version).strip().lower()} "
+                f"missing_moves={missing_provided_moves}"
+            )
+
         move_details: dict[str, Any] = {}
+
         for move_name in learnable_moves:
             if move_name in self.move_profiles:
                 move_details[move_name] = dict(self.move_profiles[move_name])
+
         for move_name in cleaned_moves:
-            if move_name not in move_details and move_name in self.move_profiles:
+            if move_name not in move_details:
                 move_details[move_name] = dict(self.move_profiles[move_name])
 
         return {
