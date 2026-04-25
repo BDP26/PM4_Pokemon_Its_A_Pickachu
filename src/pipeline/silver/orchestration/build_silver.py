@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pandas as pd
 
@@ -77,6 +77,19 @@ POKEMON_COMBAT_REQUIRED_COLUMNS = [
     "base_special_defense",
     "base_speed",
 ]
+
+POKEMON_RESOLUTION_ALIAS_FALLBACKS: dict[str, str] = {
+    "aegislash": "aegislash-shield",
+    "gourgeist": "gourgeist-average",
+    "meowstic": "meowstic-male",
+    "pyroar": "pyroar-male",
+    "pumpkaboo-small": "pumpkaboo",
+    "pumpkaboo-large": "pumpkaboo",
+    "pumpkaboo-super": "pumpkaboo",
+    "raichu-alola": "raichu",
+    "frillish-male": "frillish",
+    "jellicent-male": "jellicent",
+}
 
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
@@ -163,6 +176,22 @@ def _extract_pokeapi_id_from_source_url(source_url: str) -> int | None:
         return None
 
 
+def _normalize_requested_pokemon_name(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    return normalized
+
+
+def _species_resolution_candidates(normalized_name: str) -> list[str]:
+    parts = [part for part in normalized_name.split("-") if part]
+    candidates: list[str] = []
+    for length in range(len(parts), 0, -1):
+        candidate = "-".join(parts[:length]).strip("-")
+        if candidate:
+            candidates.append(candidate)
+    return list(dict.fromkeys(candidates))
+
+
 def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
     types_sorted = sorted(
         (
@@ -218,75 +247,158 @@ def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_requested_pokemon_profile(
+    requested_name: str,
+    fetch_json: Callable[[str], dict[str, Any] | None],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    normalized_requested_name = _normalize_requested_pokemon_name(requested_name)
+    lineage_base: dict[str, Any] = {
+        "requested_pokemon_name": str(requested_name or "").strip(),
+        "normalized_requested_name": normalized_requested_name,
+        "normalized_species": None,
+        "resolved_pokemon_name": None,
+        "resolved_pokeapi_id": None,
+        "is_default_variety": None,
+        "resolution_method": None,
+        "resolution_warning": None,
+    }
+    if not normalized_requested_name:
+        lineage = dict(lineage_base)
+        lineage["resolution_warning"] = "empty_requested_name"
+        return None, lineage
+
+    pokemon_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon/{normalized_requested_name}/")
+    if pokemon_payload is not None:
+        profile = _profile_from_pokemon_payload(pokemon_payload)
+        normalized_species = normalize_species_slug(((pokemon_payload.get("species") or {}).get("name")) or profile.get("pokemon_species") or "")
+        profile.update(
+            {
+                "pokemon_species": normalized_requested_name,
+                "name": normalized_requested_name,
+                "requested_pokemon_name": lineage_base["requested_pokemon_name"],
+                "normalized_requested_name": normalized_requested_name,
+                "normalized_species": normalized_species or normalize_species_slug(normalized_requested_name),
+                "resolved_pokemon_name": str(profile.get("name") or "").strip().lower() or normalized_requested_name,
+                "resolved_pokeapi_id": profile.get("pokeapi_id"),
+                "is_default_variety": bool(pokemon_payload.get("is_default")),
+                "resolution_method": "pokemon_exact",
+                "resolution_warning": None,
+            }
+        )
+        return profile, None
+
+    species_payload: dict[str, Any] | None = None
+    species_candidate: str | None = None
+    for candidate in _species_resolution_candidates(normalized_requested_name):
+        species_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon-species/{candidate}/")
+        if species_payload is not None:
+            species_candidate = candidate
+            break
+    used_alias_fallback = False
+    if species_payload is None:
+        alias_candidate = POKEMON_RESOLUTION_ALIAS_FALLBACKS.get(normalized_requested_name)
+        if alias_candidate:
+            species_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon-species/{alias_candidate}/")
+            if species_payload is not None:
+                species_candidate = alias_candidate
+                used_alias_fallback = True
+
+    if species_payload is None:
+        lineage = dict(lineage_base)
+        lineage["resolution_warning"] = "unresolved_after_pokemon_species_alias_fallback"
+        return None, lineage
+
+    normalized_species = normalize_species_slug(species_payload.get("name") or species_candidate or normalized_requested_name)
+    default_variety_name: str | None = None
+    for variety in species_payload.get("varieties", []):
+        if not isinstance(variety, dict):
+            continue
+        if bool(variety.get("is_default")):
+            default_variety_name = _normalize_requested_pokemon_name(((variety.get("pokemon") or {}).get("name")) or "")
+            break
+    if not default_variety_name:
+        lineage = dict(lineage_base)
+        lineage.update(
+            {
+                "normalized_species": normalized_species,
+                "resolution_method": "species_default_variety",
+                "resolution_warning": "species_without_default_variety",
+            }
+        )
+        return None, lineage
+
+    default_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon/{default_variety_name}/")
+    if default_payload is None:
+        lineage = dict(lineage_base)
+        lineage.update(
+            {
+                "normalized_species": normalized_species,
+                "resolved_pokemon_name": default_variety_name,
+                "resolution_method": "species_default_variety",
+                "resolution_warning": "default_variety_profile_lookup_failed",
+            }
+        )
+        return None, lineage
+
+    profile = _profile_from_pokemon_payload(default_payload)
+    profile.update(
+        {
+            "pokemon_species": normalized_requested_name,
+            "name": normalized_requested_name,
+            "requested_pokemon_name": lineage_base["requested_pokemon_name"],
+            "normalized_requested_name": normalized_requested_name,
+            "normalized_species": normalized_species or normalize_species_slug(default_variety_name),
+            "resolved_pokemon_name": str(profile.get("name") or "").strip().lower() or default_variety_name,
+            "resolved_pokeapi_id": profile.get("pokeapi_id"),
+            "is_default_variety": bool(default_payload.get("is_default")),
+            "resolution_method": "alias_species_default_variety" if used_alias_fallback else "species_default_variety",
+            "resolution_warning": None,
+        }
+    )
+    return profile, None
+
+
 def _build_enriched_pokemon_profiles(
     all_pokemon_references: dict[str, Any],
     required_species: set[str],
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     session = build_session()
-    profiles_by_species: dict[str, dict[str, Any]] = {}
+    profiles_by_requested: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
 
+    def _fetch_json(url: str) -> dict[str, Any] | None:
+        try:
+            response = session.get(url, timeout=30)
+        except Exception:  # noqa: BLE001
+            return None
+        if response.status_code >= 400:
+            return None
+        try:
+            return cast(dict[str, Any], response.json())
+        except Exception:  # noqa: BLE001
+            return None
+
     for species in sorted(required_species):
-        if not species:
+        requested_species = _normalize_requested_pokemon_name(species)
+        if not requested_species:
             continue
-        payload = all_pokemon_references.get(species, {}) if isinstance(all_pokemon_references.get(species), dict) else {}
+        payload = all_pokemon_references.get(requested_species, {}) if isinstance(all_pokemon_references.get(requested_species), dict) else {}
         source_url = str(payload.get("url") or payload.get("source_url") or "").strip()
-        reference_name = str(payload.get("name") or species).strip().lower()
-        candidates: list[str] = []
-        if source_url:
-            candidates.append(source_url)
-        pokeapi_id = _extract_pokeapi_id_from_source_url(source_url)
-        if pokeapi_id is not None:
-            candidates.append(f"https://pokeapi.co/api/v2/pokemon/{pokeapi_id}/")
-        candidates.append(f"https://pokeapi.co/api/v2/pokemon/{species}/")
-        if reference_name and reference_name != species:
-            candidates.append(f"https://pokeapi.co/api/v2/pokemon/{reference_name}/")
-
-        fetch_error = "missing candidate lookup url"
-        response_payload: dict[str, Any] | None = None
-        for url in dict.fromkeys(candidates):
-            if not url:
-                continue
-            try:
-                response = session.get(url, timeout=30)
-            except Exception as exc:  # noqa: BLE001
-                fetch_error = f"{type(exc).__name__}: {exc}"
-                continue
-            if response.status_code >= 400:
-                fetch_error = f"http_{response.status_code}"
-                continue
-            try:
-                response_payload = cast(dict[str, Any], response.json())
-                break
-            except Exception as exc:  # noqa: BLE001
-                fetch_error = f"json_decode_error: {exc}"
-
-        if response_payload is None:
+        reference_name = _normalize_requested_pokemon_name(payload.get("name") or requested_species)
+        profile, failure = _resolve_requested_pokemon_profile(reference_name or requested_species, fetch_json=_fetch_json)
+        if profile is None:
             diagnostics.append(
                 {
-                    "pokemon_species": species,
-                    "name": reference_name or species,
+                    "requested_pokemon_name": requested_species,
+                    "normalized_requested_name": requested_species,
                     "source_url": source_url or None,
-                    "error": fetch_error,
+                    **(failure or {"resolution_warning": "unknown_resolution_failure"}),
                 }
             )
             continue
+        profiles_by_requested[requested_species] = profile
 
-        profile = _profile_from_pokemon_payload(response_payload)
-        species_key = normalize_species_slug(profile.get("pokemon_species") or profile.get("name") or species)
-        if not species_key:
-            diagnostics.append(
-                {
-                    "pokemon_species": species,
-                    "name": reference_name or species,
-                    "source_url": source_url or None,
-                    "error": "empty_species_after_normalization",
-                }
-            )
-            continue
-        profiles_by_species[species_key] = profile
-
-    return pd.DataFrame(list(profiles_by_species.values())), diagnostics
+    return pd.DataFrame(list(profiles_by_requested.values())), diagnostics
 
 
 def _validate_and_persist_pokemon_data_contract(
@@ -301,8 +413,42 @@ def _validate_and_persist_pokemon_data_contract(
     }
     missing_species = sorted(species for species in required_species if species and species not in present_species)
     if missing_species:
-        missing_frame = pd.DataFrame([{"pokemon_species": species, "error": "missing_profile"} for species in missing_species])
+        missing_frame = pd.DataFrame(
+            [
+                {
+                    "pokemon_species": species,
+                    "requested_pokemon_name": species,
+                    "normalized_requested_name": species,
+                    "resolution_warning": "missing_profile",
+                    "error": "missing_profile",
+                }
+                for species in missing_species
+            ]
+        )
         pokemon_data_df = pd.concat([pokemon_data_df, missing_frame], ignore_index=True)
+
+    for column in (
+        "requested_pokemon_name",
+        "normalized_requested_name",
+        "normalized_species",
+        "resolved_pokemon_name",
+        "resolved_pokeapi_id",
+        "is_default_variety",
+        "resolution_method",
+        "resolution_warning",
+    ):
+        if column not in pokemon_data_df.columns:
+            pokemon_data_df[column] = None
+
+    unresolved_default_species = pokemon_data_df[
+        pokemon_data_df["resolution_warning"].astype("string").fillna("").eq("species_without_default_variety")
+    ]
+    if not unresolved_default_species.empty:
+        unresolved = ",".join(sorted(unresolved_default_species["normalized_requested_name"].astype("string").dropna().tolist())[:20])
+        raise ValueError(
+            "Silver pokemon profile resolution failed: species had no default variety "
+            f"count={len(unresolved_default_species)} first_20=[{unresolved}]"
+        )
 
     incomplete_mask = pd.Series(False, index=pokemon_data_df.index)
     for column in POKEMON_COMBAT_REQUIRED_COLUMNS:
@@ -313,6 +459,8 @@ def _validate_and_persist_pokemon_data_contract(
         if pd.api.types.is_object_dtype(pokemon_data_df[column]) or pd.api.types.is_string_dtype(pokemon_data_df[column]):
             stripped = pokemon_data_df[column].astype("string").str.strip()
             incomplete_mask = incomplete_mask | stripped.eq("")
+    incomplete_mask = incomplete_mask | pokemon_data_df["resolved_pokeapi_id"].isna()
+    incomplete_mask = incomplete_mask | pokemon_data_df["resolved_pokemon_name"].astype("string").str.strip().eq("")
 
     incomplete_rows = pokemon_data_df[incomplete_mask].copy()
     diagnostics_path = diagnostics_dir / "incomplete_pokemon_profiles.csv"
@@ -999,6 +1147,31 @@ def build_silver_from_bronze(
     pokemon_data_df, pokemon_diagnostics = _build_enriched_pokemon_profiles(all_pokemon_references, total_required_species)
     if pokemon_diagnostics:
         write_parquet(diagnostics_dir / "pokemon_profile_fetch_errors.parquet", pokemon_diagnostics)
+    exact_matches = 0
+    species_default_matches = 0
+    alias_matches = 0
+    unresolved_names: list[str] = []
+    if not pokemon_data_df.empty and "resolution_method" in pokemon_data_df.columns:
+        resolution_counts = pokemon_data_df["resolution_method"].astype("string").value_counts(dropna=True).to_dict()
+        exact_matches = int(resolution_counts.get("pokemon_exact", 0))
+        species_default_matches = int(resolution_counts.get("species_default_variety", 0))
+        alias_matches = int(resolution_counts.get("alias_species_default_variety", 0))
+    if pokemon_diagnostics:
+        unresolved_names = sorted(
+            {
+                _normalize_requested_pokemon_name(item.get("normalized_requested_name") or item.get("requested_pokemon_name") or "")
+                for item in pokemon_diagnostics
+                if _normalize_requested_pokemon_name(item.get("normalized_requested_name") or item.get("requested_pokemon_name") or "")
+            }
+        )
+    logger.info(
+        "[silver/reference_enrichment] pokemon_resolution_summary exact=%s species_default=%s alias_fallback=%s unresolved=%s unresolved_names=%s",
+        exact_matches,
+        species_default_matches,
+        alias_matches,
+        len(unresolved_names),
+        ",".join(unresolved_names[:20]),
+    )
     _validate_and_persist_pokemon_data_contract(pokemon_data_df, diagnostics_dir, total_required_species)
     write_parquet(pokemon_data_path, pokemon_data_df)
 
