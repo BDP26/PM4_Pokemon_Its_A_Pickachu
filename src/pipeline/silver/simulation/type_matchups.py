@@ -24,11 +24,15 @@ load_move_profiles_from_silver = _impl.load_move_profiles_from_silver
 
 _run_local_simulations = _impl._run_local_simulations
 _run_spark_simulations = _impl._run_spark_simulations
+_load_move_and_pokemon_profiles_from_disk = _impl._load_move_and_pokemon_profiles_from_disk
+_enrich_teams_with_boss_context = _impl._enrich_teams_with_boss_context
 
 
 def _sync_overrides_to_impl() -> None:
     _impl._run_local_simulations = _run_local_simulations
     _impl._run_spark_simulations = _run_spark_simulations
+    _impl._load_move_and_pokemon_profiles_from_disk = _load_move_and_pokemon_profiles_from_disk
+    _impl._enrich_teams_with_boss_context = _enrich_teams_with_boss_context
 
 
 def build_team_battle_simulations(

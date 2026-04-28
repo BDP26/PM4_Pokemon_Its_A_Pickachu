@@ -258,6 +258,7 @@ def test_spark_and_local_engines_use_same_profile_dictionaries(tmp_path: Path, m
         seen["spark"] = {"pokemon": dict(type_matchups._LOCAL_POKEMON_PROFILES), "moves": dict(type_matchups._LOCAL_MOVE_PROFILES)}
         return []
 
+    monkeypatch.setattr(type_matchups, "_enrich_teams_with_boss_context", lambda teams_data, _silver_dir: teams_data)
     monkeypatch.setattr(type_matchups, "_run_local_simulations", _fake_local)
     monkeypatch.setattr(type_matchups, "_run_spark_simulations", _fake_spark)
 

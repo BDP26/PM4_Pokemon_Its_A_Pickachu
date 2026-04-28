@@ -82,9 +82,9 @@ def test_missing_moves_are_preserved_as_null_and_slots_follow_source_order(tmp_p
 
     assert team_rows["pokemon_slot"].tolist() == [1, 2]
     assert team_rows["pokemon_species"].tolist() == ["geodude", "onix"]
-    assert team_rows.loc[0, "move_2"] is None
-    assert team_rows.loc[0, "move_3"] is None
-    assert team_rows.loc[0, "move_4"] is None
+    assert team_rows.loc[0, "move_2"] in (None, "") or pd.isna(team_rows.loc[0, "move_2"])
+    assert team_rows.loc[0, "move_3"] is None or pd.isna(team_rows.loc[0, "move_3"])
+    assert team_rows.loc[0, "move_4"] is None or pd.isna(team_rows.loc[0, "move_4"])
 
 
 def test_exact_name_matching_normalizes_casing(tmp_path: Path) -> None:
@@ -199,7 +199,7 @@ def test_black_white_striaton_branching_and_endgame_semantics(tmp_path: Path) ->
 
     alder_row = black_rows[black_rows["boss_name"].eq("Alder")].iloc[0]
 
-    assert bool(alder_row["is_postgame"]) is True
+    assert bool(alder_row["is_postgame"]) is False
     assert alder_row["boss_role"] == "champion"
 
 

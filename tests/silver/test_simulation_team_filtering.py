@@ -185,6 +185,7 @@ def test_filtered_teams_are_used_by_local_and_spark_paths(tmp_path: Path, monkey
     seen: dict[str, list[dict[str, Any]]] = {}
 
     monkeypatch.setattr(type_matchups, "_load_move_and_pokemon_profiles_from_disk", lambda _silver_dir: None)
+    monkeypatch.setattr(type_matchups, "_enrich_teams_with_boss_context", lambda teams_data, _silver_dir: teams_data)
 
     def _fake_local(teams_data, _type_chart, _config):
         seen["local"] = teams_data

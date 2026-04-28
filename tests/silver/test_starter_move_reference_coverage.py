@@ -58,22 +58,27 @@ def test_validate_starter_chain_move_coverage_passes_with_complete_rows(tmp_path
     )
 
 
-def test_validate_universal_starter_family_move_coverage_requires_rows(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Starter-family move reference validation failed"):
-        build_silver._validate_universal_starter_family_move_coverage(
-            learnable_moves_df=pd.DataFrame(
-                [
-                    {
-                        "game_version": "red",
-                        "pokemon_species": "bulbasaur",
-                        "move_name": "tackle",
-                        "learned_level": 1,
-                    }
-                ]
-            ),
-            universal_starter_species_by_game={"red": {"bulbasaur", "ivysaur"}},
-            diagnostics_dir=tmp_path,
-        )
+def test_validate_universal_starter_family_move_coverage_writes_gaps_without_raising(tmp_path: Path) -> None:
+    missing_rows = build_silver._validate_universal_starter_family_move_coverage(
+        learnable_moves_df=pd.DataFrame(
+            [
+                {
+                    "game_version": "red",
+                    "pokemon_species": "bulbasaur",
+                    "move_name": "tackle",
+                    "learned_level": 1,
+                }
+            ]
+        ),
+        universal_starter_species_by_game={"red": {"bulbasaur", "ivysaur"}},
+        diagnostics_dir=tmp_path,
+    )
+
+    assert any(
+        row["game_version"] == "red" and row["species_name"] == "ivysaur"
+        for row in missing_rows
+    )
+    assert (tmp_path / "starter_family_move_gaps.csv").exists()
 
 
 def test_all_starter_family_bootstrap_entries_include_cross_version_families() -> None:

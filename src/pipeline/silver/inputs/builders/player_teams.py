@@ -478,7 +478,7 @@ def build_progression_source_teams(
             if fallback:
                 species_combos = [fallback]
         level_by_species = {
-            species: _effective_member_level(boss_level=boss_level, encounter_level_max=level_max)
+            species: _effective_member_level(level_cap=boss_level, encounter_level_max=level_max)
             for species, _, level_max, _ in candidate_pool
         }
 

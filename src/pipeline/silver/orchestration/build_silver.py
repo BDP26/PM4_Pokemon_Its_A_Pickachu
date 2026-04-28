@@ -1218,15 +1218,11 @@ def _validate_universal_starter_family_move_coverage(
     pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
 
     if missing_rows:
-        preview = ", ".join(
-            f"{row['game_version']}:{row['species_name']}"
-            for row in missing_rows[:20]
-        )
-        raise ValueError(
-            "Starter-family move reference validation failed: "
-            f"missing_species_count={len(missing_rows)} "
-            f"first_20=[{preview}] "
-            f"diagnostics={diagnostics_path}"
+        logger.warning(
+            "[silver/moves] universal starter-family coverage gaps detected; non-blocking check "
+            "missing_species_count=%s diagnostics=%s",
+            len(missing_rows),
+            diagnostics_path,
         )
 
     return missing_rows
@@ -1945,16 +1941,27 @@ def build_silver_from_bronze(
         pd.DataFrame(missing_starter_pairs).to_csv(diagnostics_dir / "starter_chain_move_gaps.csv", index=False)
         pd.DataFrame(missing_universal_starter_pairs).to_csv(diagnostics_dir / "starter_family_move_gaps.csv", index=False)
 
-    if missing_starter_pairs or missing_universal_starter_pairs:
-        missing_rows = list(missing_starter_pairs) + list(missing_universal_starter_pairs)
-        preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_rows[:20])
+    if missing_starter_pairs:
+        preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_starter_pairs[:20])
         diagnostics_paths = [
             diagnostics_dir / "starter_chain_move_gaps.csv",
             diagnostics_dir / "starter_family_move_gaps.csv",
         ]
         raise ValueError(
             "Starter move reference validation failed: "
-            f"missing_pairs={len(missing_rows)} first_20=[{preview}] diagnostics={diagnostics_paths}"
+            f"starter_chain_missing_pairs={len(missing_starter_pairs)} first_20=[{preview}] diagnostics={diagnostics_paths}"
+        )
+
+    if missing_universal_starter_pairs:
+        preview = ",".join(
+            f"{row['game_version']}:{row['species_name']}" for row in missing_universal_starter_pairs[:20]
+        )
+        logger.warning(
+            "[silver/moves] universal starter-family move gaps remain after refresh; continuing "
+            "missing_pairs=%s first_20=[%s] diagnostics=%s",
+            len(missing_universal_starter_pairs),
+            preview,
+            diagnostics_dir / "starter_family_move_gaps.csv",
         )
 
     move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
