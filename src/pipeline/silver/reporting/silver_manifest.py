@@ -107,9 +107,12 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
     reference_count = 0
     for reference_name, description in [
         ("games.parquet", "Game dimension with region, generation, and version groups"),
-        ("bosses.parquet", "Boss dimension with canonical names and deterministic IDs"),
+        ("bosses.parquet", "Canonical boss dimension harmonized from Kaggle teams and Bulbapedia progression"),
+        ("boss_teams.parquet", "Canonical boss team fact table sourced from the Kaggle boss CSV"),
+        ("progression_edges.parquet", "Progression DAG edges sourced from story progression alignment"),
         ("locations.parquet", "Location dimension with mapping status"),
         ("encounters.parquet", "Encounter fact table normalized by location and species"),
+        ("progression_depth.parquet", "Deterministic progression-depth fact by boss step"),
         ("snapshot_available_pokemon.parquet", "Pokemon availability fact per boss snapshot"),
         ("pokemon_data.parquet", "Battle-ready Pokemon reference table"),
         ("move_reference.parquet", "Move reference dimension"),
@@ -131,6 +134,14 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
         }
 
     logger.info("[silver_manifest] found %s reference entries", reference_count)
+
+    boss_harmonization_report = silver_dir / "diagnostics" / "boss_harmonization_report.json"
+    if boss_harmonization_report.exists():
+        manifest["datasets"]["boss_harmonization_report"] = {
+            "file": _relative_to(silver_dir, boss_harmonization_report),
+            "format": "JSON",
+            "description": "Boss harmonization diagnostics and exclusion accounting",
+        }
 
     # Teams (sharded parquet-first contract)
     teams_shards = sorted(simulation_dir.glob("source_teams_*.parquet"))

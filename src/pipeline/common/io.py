@@ -29,6 +29,18 @@ def _to_dataframe(records: Iterable[dict] | pd.DataFrame) -> pd.DataFrame:
     return records if isinstance(records, pd.DataFrame) else pd.DataFrame(list(records))
 
 
+def _normalize_parquet_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    normalized = dataframe.copy()
+    for column in normalized.columns:
+        series = normalized[column]
+        if not pd.api.types.is_object_dtype(series.dtype):
+            continue
+        non_null = series.dropna()
+        if non_null.empty or non_null.map(lambda value: isinstance(value, str)).all():
+            normalized[column] = series.astype("string")
+    return normalized
+
+
 def _remove_path_if_exists(path: Path) -> None:
     if not path.exists():
         return
@@ -74,7 +86,7 @@ def write_parquet(
     partition_cols: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    dataframe = _to_dataframe(records)
+    dataframe = _normalize_parquet_dataframe(_to_dataframe(records))
     try:
         partitions = _existing_partitions(dataframe, partition_cols)
         if partition_cols and not partitions:

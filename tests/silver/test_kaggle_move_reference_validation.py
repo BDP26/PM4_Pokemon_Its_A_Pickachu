@@ -10,7 +10,7 @@ from src.pipeline.silver.inputs.sources.boss_teams import _normalize_kaggle_row,
 from src.pipeline.silver.orchestration.build_silver import (
     _build_boss_compact_tables,
     _build_kaggle_bootstrap_entries,
-    _build_boss_team_members_reference_rows,
+    _canonicalize_boss_teams_to_references,
     _validate_boss_reference_coverage,
     _validate_kaggle_boss_move_profiles,
     _validate_kaggle_moves_in_move_reference,
@@ -115,6 +115,198 @@ def test_gold_facing_boss_move_records_are_complete() -> None:
     assert compact["source_team_members"][0]["fixed_moves"] == ["surf", "flail"]
 
 
+def test_striaton_variants_remain_separate_reference_bosses() -> None:
+    boss_teams = [
+        {
+            "team_id": "boss:black:chili",
+            "boss_name": "Chili",
+            "game_version": "black",
+            "pokemon": ["lillipup", "pansear"],
+            "levels": [12, 14],
+            "moves": [["bite"], ["incinerate"]],
+            "pokemon_instance_ids": ["boss:black:chili:m1", "boss:black:chili:m2"],
+            "avg_level": 13,
+        },
+        {
+            "team_id": "boss:black:cilan",
+            "boss_name": "Cilan",
+            "game_version": "black",
+            "pokemon": ["lillipup", "pansage"],
+            "levels": [12, 14],
+            "moves": [["bite"], ["vine-whip"]],
+            "pokemon_instance_ids": ["boss:black:cilan:m1", "boss:black:cilan:m2"],
+            "avg_level": 13,
+        },
+        {
+            "team_id": "boss:black:cress",
+            "boss_name": "Cress",
+            "game_version": "black",
+            "pokemon": ["lillipup", "panpour"],
+            "levels": [12, 14],
+            "moves": [["bite"], ["water-gun"]],
+            "pokemon_instance_ids": ["boss:black:cress:m1", "boss:black:cress:m2"],
+            "avg_level": 13,
+        },
+        {
+            "team_id": "boss:black:lenora",
+            "boss_name": "Lenora",
+            "game_version": "black",
+            "pokemon": ["herdier"],
+            "levels": [18],
+            "moves": [["retaliate"]],
+            "pokemon_instance_ids": ["boss:black:lenora:m1"],
+            "avg_level": 18,
+        },
+    ]
+    boss_move_data = {
+        member_id: {"move_details": {}, "provided_moves": [], "learnable_moves": []}
+        for team in boss_teams
+        for member_id in team["pokemon_instance_ids"]
+    }
+    bosses_reference_df = pd.DataFrame(
+        [
+            {"game_version": "black-white", "boss_name_canonical": "Chili", "boss_name_kaggle": "Chili"},
+            {"game_version": "black-white", "boss_name_canonical": "Cilan", "boss_name_kaggle": "Cilan"},
+            {"game_version": "black-white", "boss_name_canonical": "Cress", "boss_name_kaggle": "Cress"},
+            {"game_version": "black", "boss_name_canonical": "Lenora", "boss_name_kaggle": "Lenora"},
+        ]
+    )
+    for team in boss_teams[:3]:
+        team["game_version"] = "black-white"
+
+    canonicalized_teams, filtered_move_data = _canonicalize_boss_teams_to_references(
+        boss_teams,
+        boss_move_data,
+        bosses_reference_df,
+    )
+
+    assert [team["team_id"] for team in canonicalized_teams] == [
+        "boss:black:chili",
+        "boss:black:cilan",
+        "boss:black:cress",
+        "boss:black:lenora",
+    ]
+    assert [team["boss_name"] for team in canonicalized_teams] == ["chili", "cilan", "cress", "lenora"]
+    assert set(filtered_move_data) == {
+        "boss:black:chili:m1",
+        "boss:black:chili:m2",
+        "boss:black:cilan:m1",
+        "boss:black:cilan:m2",
+        "boss:black:cress:m1",
+        "boss:black:cress:m2",
+        "boss:black:lenora:m1",
+    }
+
+
+def test_champion_alias_variants_collapse_to_single_reference_boss() -> None:
+    boss_teams = [
+        {
+            "team_id": "boss:blue:bulbasaur",
+            "boss_id": "blue:champion-blue-bulbasaur",
+            "boss_name": "Champion Blue Bulbasaur",
+            "game_version": "blue",
+            "pokemon": ["pidgeot"],
+            "levels": [65],
+            "moves": [["wing-attack"]],
+            "pokemon_instance_ids": ["boss:blue:bulbasaur:m1"],
+            "avg_level": 65,
+        },
+        {
+            "team_id": "boss:blue:squirtle",
+            "boss_id": "blue:champion-blue-squirtle",
+            "boss_name": "Blue",
+            "game_version": "blue",
+            "pokemon": ["pidgeot"],
+            "levels": [65],
+            "moves": [["wing-attack"]],
+            "pokemon_instance_ids": ["boss:blue:squirtle:m1"],
+            "avg_level": 65,
+        },
+    ]
+    boss_move_data = {
+        "boss:blue:bulbasaur:m1": {"move_details": {}, "provided_moves": [], "learnable_moves": []},
+        "boss:blue:squirtle:m1": {"move_details": {}, "provided_moves": [], "learnable_moves": []},
+    }
+    bosses_reference_df = pd.DataFrame(
+        [
+            {
+                "game_version": "blue",
+                "boss_id": "blue:blue",
+                "boss_name_canonical": "Blue",
+                "boss_name_kaggle": "Champion Blue Squirtle",
+                "boss_name_aliases": [
+                    "Blue",
+                    "Champion Blue Squirtle",
+                    "Champion Blue Bulbasaur",
+                    "Champion Blue Charmander",
+                ],
+            }
+        ]
+    )
+
+    canonicalized_teams, filtered_move_data = _canonicalize_boss_teams_to_references(
+        boss_teams,
+        boss_move_data,
+        bosses_reference_df,
+    )
+
+    assert [team["team_id"] for team in canonicalized_teams] == ["boss:blue:squirtle"]
+    assert [team["boss_name"] for team in canonicalized_teams] == ["blue"]
+    assert [team["boss_id"] for team in canonicalized_teams] == ["blue:blue"]
+    assert set(filtered_move_data) == {"boss:blue:squirtle:m1"}
+
+
+def test_unmatched_boss_teams_are_dropped_during_canonicalization() -> None:
+    boss_teams = [
+        {
+            "team_id": "boss:gold:blaine",
+            "boss_id": "gold:blaine",
+            "boss_name": "Blaine",
+            "game_version": "gold",
+            "pokemon": ["magcargo"],
+            "levels": [46],
+            "moves": [["flamethrower"]],
+            "pokemon_instance_ids": ["boss:gold:blaine:m1"],
+            "avg_level": 46,
+        },
+        {
+            "team_id": "boss:gold:falkner",
+            "boss_id": "gold:falkner",
+            "boss_name": "Falkner",
+            "game_version": "gold",
+            "pokemon": ["pidgeotto"],
+            "levels": [9],
+            "moves": [["gust"]],
+            "pokemon_instance_ids": ["boss:gold:falkner:m1"],
+            "avg_level": 9,
+        },
+    ]
+    boss_move_data = {
+        "boss:gold:blaine:m1": {"move_details": {}, "provided_moves": [], "learnable_moves": []},
+        "boss:gold:falkner:m1": {"move_details": {}, "provided_moves": [], "learnable_moves": []},
+    }
+    bosses_reference_df = pd.DataFrame(
+        [
+            {
+                "game_version": "gold",
+                "boss_id": "gold:falkner",
+                "boss_name_canonical": "Falkner",
+                "boss_name_kaggle": "Falkner",
+            }
+        ]
+    )
+
+    canonicalized_teams, filtered_move_data = _canonicalize_boss_teams_to_references(
+        boss_teams,
+        boss_move_data,
+        bosses_reference_df,
+    )
+
+    assert [team["team_id"] for team in canonicalized_teams] == ["boss:gold:falkner"]
+    assert [team["boss_id"] for team in canonicalized_teams] == ["gold:falkner"]
+    assert set(filtered_move_data) == {"boss:gold:falkner:m1"}
+
+
 def test_kaggle_bootstrap_entries_use_full_kaggle_rows(tmp_path: Path) -> None:
     kaggle_dir = tmp_path / "kagglehub"
     kaggle_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +334,19 @@ def test_boss_coverage_warns_on_missing_learnable_pair_only(tmp_path: Path) -> N
             "moves": [["quick-attack"]],
         }
     ]
-    boss_members = pd.DataFrame(_build_boss_team_members_reference_rows(boss_teams))
+    boss_members = pd.DataFrame(
+        [
+            {
+                "game_version": "silver",
+                "boss_id": "boss:silver:bugsy",
+                "boss_name": "bugsy",
+                "slot": 1,
+                "pokemon_species": "scyther",
+                "level": 17,
+                "move_name": "quick-attack",
+            }
+        ]
+    )
     pokemon_data_df = pd.DataFrame([{"pokemon_species": "scyther"}])
     move_reference_df = pd.DataFrame(
         [{"move_name": "quick-attack", "damage_class": "physical", "type": "normal", "power": 40}]

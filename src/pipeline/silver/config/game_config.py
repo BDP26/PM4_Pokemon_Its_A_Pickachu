@@ -13,8 +13,32 @@ STARTER_CHOICES_BY_VERSION: dict[str, list[str]] = {
     "pearl": ["turtwig", "chimchar", "piplup"],
     "black": ["snivy", "tepig", "oshawott"],
     "white": ["snivy", "tepig", "oshawott"],
+    "black-white": ["snivy", "tepig", "oshawott"],
     "x": ["chespin", "fennekin", "froakie"],
     "y": ["chespin", "fennekin", "froakie"],
+}
+
+CANONICAL_STARTER_TYPES: tuple[str, str, str] = ("grass", "fire", "water")
+
+STARTER_TYPE_BY_BASE: dict[str, str] = {
+    "bulbasaur": "grass",
+    "charmander": "fire",
+    "squirtle": "water",
+    "chikorita": "grass",
+    "cyndaquil": "fire",
+    "totodile": "water",
+    "treecko": "grass",
+    "torchic": "fire",
+    "mudkip": "water",
+    "turtwig": "grass",
+    "chimchar": "fire",
+    "piplup": "water",
+    "snivy": "grass",
+    "tepig": "fire",
+    "oshawott": "water",
+    "chespin": "grass",
+    "fennekin": "fire",
+    "froakie": "water",
 }
 
 _STARTER_FAMILY_LEVELS: dict[str, tuple[tuple[str, int | None], ...]] = {
@@ -117,6 +141,7 @@ BASE_GAME_GROUPS = [
         "bosses": [
             "Falkner", "Bugsy", "Whitney", "Morty", "Chuck", "Jasmine", "Pryce",
             "Clair", "Will", "Koga", "Bruno", "Karen", "Lance",
+            "Lt. Surge", "Sabrina", "Misty", "Erika", "Janine", "Brock", "Blaine", "Blue",
         ],
     },
     {
@@ -153,10 +178,16 @@ BASE_GAME_GROUPS = [
             "white": ["Walkthrough:Pokémon White Version", "Walkthrough:Pokémon White"],
         },
         "route_prefix": "unova-route",
-        "bosses": [
-            "Cilan", "Lenora", "Burgh", "Elesa", "Clay", "Skyla", "Brycen", "Drayden",
-            "Shauntal", "Grimsley", "Caitlin", "Marshal", "N", "Ghetsis", "Alder",
-        ],
+        "bosses_by_version": {
+            "black": [
+                "Chili", "Cilan", "Cress", "Lenora", "Burgh", "Elesa", "Clay", "Skyla", "Brycen", "Drayden",
+                "Shauntal", "Grimsley", "Caitlin", "Marshal", "Alder",
+            ],
+            "white": [
+                "Chili", "Cilan", "Cress", "Lenora", "Burgh", "Elesa", "Clay", "Skyla", "Brycen", "Iris",
+                "Shauntal", "Grimsley", "Caitlin", "Marshal", "Alder",
+            ],
+        },
     },
     {
         "versions": ["x", "y"],
@@ -185,7 +216,7 @@ def get_games_config() -> list[dict[str, Any]]:
                     "root_title": group["root_title"],
                     "candidate_root_titles": version_titles + [group["root_title"]],
                     "route_prefix": group["route_prefix"],
-                    "bosses": group["bosses"],
+                    "bosses": group.get("bosses_by_version", {}).get(version, group.get("bosses", [])),
                     "starter_choices": STARTER_CHOICES_BY_VERSION.get(version, []),
                 }
             )
@@ -194,6 +225,29 @@ def get_games_config() -> list[dict[str, Any]]:
 
 def get_starter_choices(version: str) -> list[str]:
     return STARTER_CHOICES_BY_VERSION.get(version, [])
+
+
+def normalize_starter_type(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in CANONICAL_STARTER_TYPES:
+        return normalized
+    root = get_starter_family_root(normalized)
+    return STARTER_TYPE_BY_BASE.get(root)
+
+
+def get_starter_type(species: str | None) -> str | None:
+    return normalize_starter_type(species)
+
+
+def get_starters_by_type(version: str, starter_type: str | None) -> list[str]:
+    normalized_type = normalize_starter_type(starter_type)
+    if normalized_type is None:
+        return []
+    return [
+        starter
+        for starter in get_starter_choices(version)
+        if get_starter_type(starter) == normalized_type
+    ]
 
 
 def resolve_starter_species_for_level(base_starter: str, level: int) -> str:
@@ -250,4 +304,3 @@ def get_starter_family_root(species: str) -> str:
     if not normalized:
         return ""
     return _starter_family_root_lookup().get(normalized, normalized)
-

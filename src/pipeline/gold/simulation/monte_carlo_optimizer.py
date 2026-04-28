@@ -143,6 +143,11 @@ def run_monte_carlo_team_optimizer(
                 "win_rate_ci95_high": float(row.get("win_rate_ci95_high") or 0.0),
                 "mc_resamples": int(row.get("mc_resamples") or n_trials),
                 "interval_method": row.get("interval_method") or "beta_posterior_mc_95",
+                "boss_sequence_id": seed_row.get("boss_sequence_id"),
+                "sequence_position": seed_row.get("sequence_position"),
+                "remaining_team_state": seed_row.get("remaining_team_state", []),
+                "gauntlet_success": bool(seed_row.get("gauntlet_success", False)),
+                "simulation_mode": seed_row.get("simulation_mode") or row.get("simulation_mode") or "gym",
             }
         )
 

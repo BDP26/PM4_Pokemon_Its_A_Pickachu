@@ -75,6 +75,7 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
     bosses = _profile_from_any(tables.get("bosses"))
     locations = _profile_from_any(tables.get("locations"))
     encounters = _profile_from_any(tables.get("encounters"))
+    progression_depth = _profile_from_any(tables.get("progression_depth"))
     teams = _profile_from_any(tables.get("teams"))
     team_members = _profile_from_any(tables.get("team_members"))
     team_member_moves = _profile_from_any(tables.get("team_member_moves"))
@@ -129,6 +130,36 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
                 table="encounters",
                 detail="encounters.game references unknown games.game_version",
                 count=len(invalid),
+            )
+
+    if progression_depth.row_count == 0:
+        _append_issue(
+            issues,
+            level="error",
+            code="EMPTY_PROGRESSION_DEPTH",
+            table="progression_depth",
+            detail="progression_depth table is empty",
+        )
+    else:
+        invalid_games = [v for v in _series_set(progression_depth, "game_version") if v and v not in game_versions]
+        invalid_bosses = [v for v in _series_set(progression_depth, "boss_id") if v and v not in boss_ids]
+        if invalid_games:
+            _append_issue(
+                issues,
+                level="error",
+                code="FK_PROGRESSION_DEPTH_GAME",
+                table="progression_depth",
+                detail="progression_depth.game_version references unknown games",
+                count=len(invalid_games),
+            )
+        if invalid_bosses:
+            _append_issue(
+                issues,
+                level="error",
+                code="FK_PROGRESSION_DEPTH_BOSS",
+                table="progression_depth",
+                detail="progression_depth.boss_id references unknown bosses",
+                count=len(invalid_bosses),
             )
 
     if teams.row_count > 0:

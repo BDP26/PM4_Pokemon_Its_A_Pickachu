@@ -15,6 +15,8 @@ import pandas as pd
 
 from src.pipeline.silver.config.game_config import (
     get_starter_choices,
+    get_starter_type,
+    get_starters_by_type,
     resolve_starter_species_for_level,
 )
 from src.pipeline.silver.config.team_config import (
@@ -28,11 +30,13 @@ from src.pipeline.silver.config.team_config import (
     MOVESET_WIDTH,
 )
 from src.pipeline.silver.inputs.builders.evolution_normalization import (
+    legal_species_pool_for_level,
     normalize_candidate_pool_for_level,
     validate_candidate_pool,
     validate_generated_team,
 )
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
+from src.pipeline.silver.inputs.species_classification import is_restricted_encounter_species
 from src.pipeline.silver.transforms.keys import (
     make_moveset_combo_id,
     make_pokemon_instance_id,
@@ -40,10 +44,37 @@ from src.pipeline.silver.transforms.keys import (
     normalize_key_part,
     stable_digest,
 )
+from src.pipeline.silver.transforms.progression_depth import (
+    ProgressionDepthContext,
+    build_progression_depth_context,
+)
 
 
 logger = logging.getLogger(__name__)
 MAX_SOURCE_TEAM_SIZE = 5
+EARLY_GAME_LEVEL_OFFSET = 6
+LATE_GAME_LEVEL_OFFSET = 1
+INVALID_NULLABLE_KEY_TOKENS = {"", "nan", "none", "null", "<na>", "na"}
+
+
+def _normalize_nullable_key_part(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    normalized = normalize_key_part(value)
+    if normalized in INVALID_NULLABLE_KEY_TOKENS:
+        return None
+    return normalized or None
+
+
+def _normalize_boss_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _boss_slug_from_id(value: Any) -> str:
+    normalized = _normalize_boss_id(value)
+    if not normalized:
+        return ""
+    return normalize_key_part(normalized.split(":")[-1])
 
 
 def _family_root_for_species(species: str) -> str:
@@ -53,8 +84,128 @@ def _family_root_for_species(species: str) -> str:
     return normalized
 
 
+def _resolve_starters_for_condition(game_version: str, starter_condition: str | None) -> list[str]:
+    condition = _normalize_nullable_key_part(starter_condition)
+    if condition is None:
+        return get_starter_choices(game_version)
+    starters_by_type = get_starters_by_type(game_version, condition)
+    if starters_by_type:
+        return starters_by_type
+    return [condition]
+
+
 def _stable_species_signature(species_names: list[str]) -> str:
     return "|".join(sorted(normalize_key_part(name) for name in species_names if normalize_key_part(name)))
+
+
+def _clamp_progression_depth(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = 0.0
+    return max(0.0, min(1.0, numeric))
+
+
+def _progression_level_offset(progression_depth: float) -> int:
+    depth = _clamp_progression_depth(progression_depth)
+    span = EARLY_GAME_LEVEL_OFFSET - LATE_GAME_LEVEL_OFFSET
+    return max(LATE_GAME_LEVEL_OFFSET, int(round(LATE_GAME_LEVEL_OFFSET + ((1.0 - depth) * span))))
+
+
+def _level_cap_from_progression(*, boss_ace_level: int, progression_depth: float) -> int:
+    ace_level = max(1, int(boss_ace_level or DEFAULT_MEMBER_LEVEL))
+    return max(1, ace_level - _progression_level_offset(progression_depth))
+
+
+def _effective_member_level(*, level_cap: int, encounter_level_max: int) -> int:
+    capped_level_cap = max(1, int(level_cap or DEFAULT_MEMBER_LEVEL))
+    capped_encounter_level = max(1, int(encounter_level_max or capped_level_cap))
+    return min(capped_level_cap, capped_encounter_level)
+
+
+def _legacy_progression_depth_context_from_boss_teams(
+    *,
+    encounters_df: pd.DataFrame,
+    bosses_df: pd.DataFrame,
+    boss_teams: list[dict[str, Any]],
+) -> ProgressionDepthContext:
+    bosses = bosses_df.copy()
+    bosses["game_version"] = bosses["game_version"].map(normalize_key_part)
+    bosses["boss_id"] = bosses["boss_id"].map(normalize_key_part)
+    bosses["boss_name"] = bosses["boss_name_canonical"].map(normalize_key_part)
+    bosses["boss_order"] = pd.to_numeric(bosses["boss_order"], errors="coerce").fillna(0).astype(int)
+    bosses = bosses[(bosses["game_version"] != "") & (bosses["boss_id"] != "") & (bosses["boss_name"] != "")]
+
+    encounters = encounters_df.copy()
+    encounters["game_version"] = encounters["game"].map(normalize_key_part)
+    encounters["boss_id"] = encounters["boss_id"].map(_normalize_boss_id)
+    encounters["pokemon"] = encounters["pokemon"].map(normalize_key_part)
+    encounters = encounters[
+        (encounters["game_version"] != "")
+        & (encounters["boss_id"] != "")
+        & (encounters["pokemon"] != "")
+    ]
+
+    progression_rows: list[dict[str, Any]] = []
+    for game_version, bosses_game in bosses.groupby("game_version", sort=True):
+        bosses_sorted = bosses_game.sort_values(["boss_order", "boss_id"]).reset_index(drop=True)
+        max_boss_index = len(bosses_sorted)
+        species_by_boss = {
+            str(boss_id): set(group["pokemon"].tolist())
+            for boss_id, group in encounters[encounters["game_version"] == game_version].groupby("boss_id")
+        }
+        max_species_count = len({species for values in species_by_boss.values() for species in values}) or 1
+        seen_species: set[str] = set()
+        for boss_index, boss in enumerate(bosses_sorted.itertuples(index=False), start=1):
+            boss_species = species_by_boss.get(str(boss.boss_id), set())
+            seen_species.update(boss_species)
+            available_species_count = len(seen_species) if seen_species else len(boss_species)
+            progression_rows.append(
+                {
+                    "game_version": game_version,
+                    "boss_id": str(boss.boss_id),
+                    "boss_name": str(boss.boss_name),
+                    "boss_index": boss_index,
+                    "max_boss_index": max_boss_index,
+                    "available_species_count": available_species_count,
+                    "max_species_count": max_species_count,
+                    "progression_depth": (0.6 * (boss_index / max_boss_index)) + (0.4 * (available_species_count / max_species_count)),
+                }
+            )
+
+    progression_depth_df = pd.DataFrame(progression_rows)
+
+    boss_level_rows: list[dict[str, Any]] = []
+    for team in boss_teams:
+        game_version = normalize_key_part(team.get("game_version"))
+        boss_name = normalize_key_part(team.get("boss_name") or team.get("gym"))
+        if not game_version or not boss_name:
+            continue
+        levels = [int(level) for level in list(team.get("levels") or []) if int(level or 0) > 0]
+        if not levels:
+            fallback = int(team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
+            levels = [fallback]
+        boss_level_rows.append(
+            {
+                "game_version": game_version,
+                "boss_name": boss_name,
+                "boss_ace_level": max(levels),
+                "boss_avg_level": int(round(sum(levels) / len(levels))),
+            }
+        )
+
+    boss_level_df = pd.DataFrame(boss_level_rows)
+    if boss_level_df.empty:
+        raise ValueError("boss_teams is empty; cannot derive fallback progression depth context")
+    boss_level_df = (
+        boss_level_df.groupby(["game_version", "boss_name"], as_index=False)
+        .agg(boss_ace_level=("boss_ace_level", "max"), boss_avg_level=("boss_avg_level", "max"))
+        .sort_values(["game_version", "boss_name"])
+    )
+    return build_progression_depth_context(
+        progression_depth_df=progression_depth_df,
+        boss_level_df=boss_level_df,
+    )
 
 
 def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, int, int]]:
@@ -74,7 +225,7 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
                 if not isinstance(encounter, dict):
                     continue
                 species = normalize_key_part(encounter.get("species"))
-                if not species:
+                if not species or is_restricted_encounter_species(species):
                     continue
                 slot = by_species.setdefault(species, {"level_max": 0, "chance_max": 0, "capture_rate": 0})
                 slot["level_max"] = max(slot["level_max"], _safe_int(encounter.get("level_max")))
@@ -169,7 +320,7 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
                 if not isinstance(encounter, dict):
                     continue
                 species = normalize_key_part(encounter.get("species"))
-                if not species:
+                if not species or is_restricted_encounter_species(species):
                     continue
                 chance_max = int(encounter.get("encounter_chance_max") or 0)
                 level_max = int(encounter.get("level_max") or 0)
@@ -273,25 +424,6 @@ def build_progression_source_teams(
     level_by_boss = _boss_level_lookup(boss_teams)
     progression_pools = build_boss_progression_pools(progression_records)
 
-    legal_species_by_game: dict[str, set[str]] = {}
-    for record in progression_records:
-        game_version = normalize_key_part(record.get("game") or record.get("version"))
-        if not game_version:
-            continue
-        slot = legal_species_by_game.setdefault(game_version, set())
-        location_encounters = record.get("reachable_location_encounters", {})
-        if not isinstance(location_encounters, dict):
-            continue
-        for encounters in location_encounters.values():
-            if not isinstance(encounters, list):
-                continue
-            for encounter in encounters:
-                if not isinstance(encounter, dict):
-                    continue
-                species = normalize_key_part(encounter.get("species"))
-                if species:
-                    slot.add(species)
-
     evolution_rules_by_game = evolution_rules_by_game or {}
 
     team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
@@ -302,8 +434,13 @@ def build_progression_source_teams(
         boss_name = pool["boss_name"]
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
         raw_candidates = list(pool["pool_candidates"])
-        legal_species = legal_species_by_game.get(game_version, set())
         evolution_rules = evolution_rules_by_game.get(game_version, {})
+        legal_species = legal_species_pool_for_level(
+            raw_candidates,
+            member_level=boss_level,
+            evolution_rules=evolution_rules,
+            allow_trade_evolutions=allow_trade_evolutions,
+        )
         normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
             raw_candidates,
             member_level=boss_level,
@@ -340,6 +477,10 @@ def build_progression_source_teams(
             fallback = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
             if fallback:
                 species_combos = [fallback]
+        level_by_species = {
+            species: _effective_member_level(boss_level=boss_level, encounter_level_max=level_max)
+            for species, _, level_max, _ in candidate_pool
+        }
 
         part = pool.get("part")
         for combo_index, selected_species in enumerate(species_combos, start=1):
@@ -367,7 +508,7 @@ def build_progression_source_teams(
                     "gym": str(boss_name).strip() or None,
                     "avg_level": boss_level,
                     "pokemon": selected_species,
-                    "levels": [boss_level for _ in selected_species],
+                    "levels": [level_by_species.get(species, boss_level) for species in selected_species],
                     "progression_pool_id": pool["progression_pool_id"],
                     "part": part,
                 }
@@ -384,16 +525,24 @@ def build_progression_source_teams(
 def build_progression_source_teams_from_encounters(
     encounters_df: pd.DataFrame,
     bosses_df: pd.DataFrame,
-    boss_teams: list[dict[str, Any]],
+    boss_teams: list[dict[str, Any]] | None = None,
+    progression_depth_context: ProgressionDepthContext | None = None,
     catch_pool_size: int = DEFAULT_CATCH_POOL_SIZE,
     evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     allow_trade_evolutions: bool = False,
 ) -> list[dict[str, Any]]:
     """Build player source teams using persisted Silver references only."""
     required_encounter_columns = {"boss_id", "location", "pokemon", "level_min", "level_max", "game"}
+    optional_encounter_columns = {"encounter_chance_max", "capture_rate"}
     missing_encounter_columns = sorted(required_encounter_columns - set(encounters_df.columns))
     if missing_encounter_columns:
         raise ValueError(f"encounters.parquet missing required columns: {missing_encounter_columns}")
+    missing_optional_columns = sorted(optional_encounter_columns - set(encounters_df.columns))
+    if missing_optional_columns:
+        logger.warning(
+            "[silver/teams] encounters parquet missing optional ranking columns %s; defaulting to 0 for backward compatibility",
+            missing_optional_columns,
+        )
 
     required_boss_columns = {"boss_id", "game_version", "boss_name_canonical", "boss_order"}
     missing_boss_columns = sorted(required_boss_columns - set(bosses_df.columns))
@@ -407,11 +556,18 @@ def build_progression_source_teams_from_encounters(
         }
     ).copy()
     encounters["game_version"] = encounters["game_version"].map(normalize_key_part)
-    encounters["boss_id"] = encounters["boss_id"].map(normalize_key_part)
+    encounters["boss_id"] = encounters["boss_id"].map(_normalize_boss_id)
+    encounters["boss_slug"] = encounters["boss_id"].map(_boss_slug_from_id)
     encounters["location"] = encounters["location"].map(normalize_key_part)
     encounters["pokemon_species"] = encounters["pokemon_species"].map(normalize_key_part)
     encounters["level_min"] = pd.to_numeric(encounters["level_min"], errors="coerce").fillna(0).astype(int)
     encounters["level_max"] = pd.to_numeric(encounters["level_max"], errors="coerce").fillna(0).astype(int)
+    if "encounter_chance_max" not in encounters.columns:
+        encounters["encounter_chance_max"] = 0
+    if "capture_rate" not in encounters.columns:
+        encounters["capture_rate"] = 0
+    encounters["encounter_chance_max"] = pd.to_numeric(encounters["encounter_chance_max"], errors="coerce").fillna(0).astype(int)
+    encounters["capture_rate"] = pd.to_numeric(encounters["capture_rate"], errors="coerce").fillna(0).astype(int)
     encounters = encounters[
         (encounters["game_version"] != "")
         & (encounters["boss_id"] != "")
@@ -420,9 +576,17 @@ def build_progression_source_teams_from_encounters(
 
     bosses = bosses_df.copy()
     bosses["game_version"] = bosses["game_version"].map(normalize_key_part)
-    bosses["boss_id"] = bosses["boss_id"].map(normalize_key_part)
+    bosses["boss_id"] = bosses["boss_id"].map(_normalize_boss_id)
     bosses["boss_name"] = bosses["boss_name_canonical"].map(normalize_key_part)
+    bosses["boss_slug"] = bosses["boss_name"].map(normalize_key_part)
     bosses["boss_order"] = pd.to_numeric(bosses["boss_order"], errors="coerce").fillna(0).astype(int)
+    if "gym_index" in bosses.columns:
+        bosses["gym_index"] = pd.to_numeric(bosses["gym_index"], errors="coerce").fillna(bosses["boss_order"]).astype(int)
+    else:
+        bosses["gym_index"] = bosses["boss_order"]
+    bosses["starter_condition"] = (
+        bosses["starter_condition"].map(_normalize_nullable_key_part) if "starter_condition" in bosses.columns else None
+    )
     bosses = bosses[(bosses["game_version"] != "") & (bosses["boss_id"] != "")]
 
     logger.info(
@@ -433,11 +597,28 @@ def build_progression_source_teams_from_encounters(
     per_game_rows = encounters.groupby("game_version", dropna=False).size().to_dict()
     logger.info("[silver/teams] per-game encounter rows=%s", per_game_rows)
 
+    boss_id_by_game_slug = {
+        (str(row.game_version), str(row.boss_slug)): str(row.boss_id)
+        for row in bosses[["game_version", "boss_slug", "boss_id"]].drop_duplicates().itertuples(index=False)
+        if str(row.game_version) and str(row.boss_slug) and str(row.boss_id)
+    }
+    encounters["boss_id"] = [
+        boss_id_by_game_slug.get((str(game_version), str(boss_slug)), str(boss_id))
+        for game_version, boss_slug, boss_id in encounters[["game_version", "boss_slug", "boss_id"]].itertuples(index=False, name=None)
+    ]
+
     legal_pairs = {
         (str(row.game_version), str(row.boss_id))
         for row in encounters[["game_version", "boss_id"]].drop_duplicates().itertuples(index=False)
     }
-    boss_level_by_game_name = _boss_level_lookup(boss_teams)
+    if progression_depth_context is None:
+        if boss_teams is None:
+            raise ValueError("progression_depth_context is required when boss_teams fallback is not supplied")
+        progression_depth_context = _legacy_progression_depth_context_from_boss_teams(
+            encounters_df=encounters_df,
+            bosses_df=bosses_df,
+            boss_teams=boss_teams,
+        )
     evolution_rules_by_game = evolution_rules_by_game or {}
     team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
     candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
@@ -448,7 +629,9 @@ def build_progression_source_teams_from_encounters(
         game_version = str(boss.game_version)
         boss_id = str(boss.boss_id)
         boss_name = normalize_key_part(getattr(boss, "boss_name", None) or boss_id)
-        part = f"order-{int(getattr(boss, 'boss_order', 0))}"
+        starter_condition = _normalize_nullable_key_part(getattr(boss, "starter_condition", None))
+        gym_index = int(getattr(boss, "gym_index", getattr(boss, "boss_order", 0)) or 0)
+        part = f"order-{gym_index}"
 
         if (game_version, boss_id) not in legal_pairs:
             dropped_missing_boss += 1
@@ -463,16 +646,35 @@ def build_progression_source_teams_from_encounters(
         boss_rows = encounters[(encounters["game_version"] == game_version) & (encounters["boss_id"] == boss_id)]
         if boss_rows.empty:
             continue
-        boss_level = boss_level_by_game_name.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
+        progression = progression_depth_context.require(
+            game_version=game_version,
+            boss_id=boss_id,
+            boss_name=boss_name,
+        )
+        player_level_cap = _level_cap_from_progression(
+            boss_ace_level=progression.boss_ace_level,
+            progression_depth=progression.progression_depth,
+        )
 
         grouped = (
             boss_rows.groupby("pokemon_species", as_index=False)
-            .agg(level_max=("level_max", "max"), level_min=("level_min", "min"))
+            .agg(
+                level_max=("level_max", "max"),
+                level_min=("level_min", "min"),
+                encounter_chance_max=("encounter_chance_max", "max"),
+                capture_rate=("capture_rate", "max"),
+            )
             .sort_values(["pokemon_species"])
         )
         raw_candidates = [
-            (str(row.pokemon_species), 0, int(row.level_max), 0)
+            (
+                str(row.pokemon_species),
+                int(row.encounter_chance_max),
+                int(row.level_max),
+                int(row.capture_rate),
+            )
             for row in grouped.itertuples(index=False)
+            if not is_restricted_encounter_species(str(row.pokemon_species))
         ]
         raw_species = {species for species, _, _, _ in raw_candidates}
         logger.debug(
@@ -484,22 +686,28 @@ def build_progression_source_teams_from_encounters(
         )
 
         evolution_rules = evolution_rules_by_game.get(game_version, {})
-        normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
+        legal_species = legal_species_pool_for_level(
             raw_candidates,
-            member_level=boss_level,
+            member_level=player_level_cap,
             evolution_rules=evolution_rules,
-            legal_species=raw_species,
             allow_trade_evolutions=allow_trade_evolutions,
         )
-        validate_candidate_pool(normalized_candidates, legal_species=raw_species, game_version=game_version)
+        normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
+            raw_candidates,
+            member_level=player_level_cap,
+            evolution_rules=evolution_rules,
+            legal_species=legal_species if legal_species else None,
+            allow_trade_evolutions=allow_trade_evolutions,
+        )
+        validate_candidate_pool(normalized_candidates, legal_species=legal_species or raw_species, game_version=game_version)
 
         candidate_pool, rank_diag = _rank_candidate_pool(
             normalized_candidates,
-            boss_level=boss_level,
+            boss_level=player_level_cap,
             pool_size=candidate_pool_size,
         )
         logger.debug(
-            "[silver/teams] per-boss final candidate count game=%s boss_id=%s boss_name=%s raw=%s final=%s evolved=%s removed=%s pruned=%s",
+            "[silver/teams] per-boss final candidate count game=%s boss_id=%s boss_name=%s raw=%s final=%s evolved=%s removed=%s pruned=%s progression_depth=%.4f level_cap=%s offset=%s ace_level=%s",
             game_version,
             boss_id,
             boss_name,
@@ -508,6 +716,10 @@ def build_progression_source_teams_from_encounters(
             normalization_diag.get("transformed", 0),
             normalization_diag.get("removed_after_validation", 0),
             rank_diag.get("pruned", 0),
+            progression.progression_depth,
+            player_level_cap,
+            _progression_level_offset(progression.progression_depth),
+            progression.boss_ace_level,
         )
 
         species_combos = _generate_diverse_species_combos(
@@ -519,11 +731,15 @@ def build_progression_source_teams_from_encounters(
             fallback = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
             if fallback:
                 species_combos = [fallback]
+        level_by_species = {
+            species: _effective_member_level(level_cap=player_level_cap, encounter_level_max=level_max)
+            for species, _, level_max, _ in candidate_pool
+        }
 
         for combo_index, selected_species in enumerate(species_combos, start=1):
             invalid_reasons: list[dict[str, str]] = []
             for pokemon_species in selected_species:
-                if pokemon_species not in raw_species:
+                if pokemon_species not in (legal_species or raw_species):
                     invalid_reasons.append(
                         {
                             "game_version": game_version,
@@ -538,7 +754,7 @@ def build_progression_source_teams_from_encounters(
 
             validate_generated_team(
                 selected_species,
-                legal_species=raw_species,
+                legal_species=legal_species or raw_species,
                 game_version=game_version,
                 boss_name=boss_name,
             )
@@ -558,11 +774,22 @@ def build_progression_source_teams_from_encounters(
                     "boss_id": boss_id,
                     "boss_name": boss_name,
                     "gym": str(boss_name).strip() or None,
-                    "avg_level": boss_level,
+                    "gym_index": gym_index,
+                    "starter_condition": starter_condition,
+                    "starter_type": starter_condition,
+                    "avg_level": player_level_cap,
                     "pokemon": selected_species,
-                    "levels": [boss_level for _ in selected_species],
+                    "levels": [level_by_species.get(species, player_level_cap) for species in selected_species],
                     "progression_pool_id": f"pool:{game_version}:{boss_id}",
                     "part": part,
+                    "boss_index": progression.boss_index,
+                    "max_boss_index": progression.max_boss_index,
+                    "available_species_count": progression.available_species_count,
+                    "max_species_count": progression.max_species_count,
+                    "progression_depth": progression.progression_depth,
+                    "boss_ace_level": progression.boss_ace_level,
+                    "boss_avg_level": progression.boss_avg_level,
+                    "level_cap_offset": _progression_level_offset(progression.progression_depth),
                 }
             )
         logger.info(
@@ -602,16 +829,19 @@ def build_player_team_compact_tables(
         origin = normalize_key_part(progression_team.get("origin"))
         is_player_candidate = bool(progression_team.get("is_player_candidate", True))
         boss_name = normalize_key_part(progression_team.get("boss_name") or progression_team.get("gym"))
+        boss_id = str(progression_team.get("boss_id") or "").strip().lower()
+        starter_condition = _normalize_nullable_key_part(progression_team.get("starter_condition"))
         if team_role == "boss" or origin == "kaggle" or not is_player_candidate:
             continue
         game_version = normalize_key_part(progression_team.get("game_version"))
         avg_level = int(progression_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
-        starters = get_starter_choices(game_version)
+        starters = _resolve_starters_for_condition(game_version, starter_condition)
         if not game_version or not starters:
             continue
 
         for starter_base in starters:
             starter_species = resolve_starter_species_for_level(starter_base, avg_level)
+            starter_type = get_starter_type(starter_base)
             source_team_id = make_team_id(
                 "player-source",
                 game_version,
@@ -631,13 +861,25 @@ def build_player_team_compact_tables(
                     "team_role": "player",
                     "origin": "generated",
                     "is_player_candidate": True,
+                    "boss_id": boss_id,
                     "boss_name": boss_name,
+                    "gym_index": progression_team.get("gym_index"),
+                    "starter_condition": starter_condition,
+                    "starter_type": starter_type,
                     "starter_base": normalize_key_part(starter_base),
                     "starter_evolved_species": normalize_key_part(starter_species),
                     "progression_source_team_id": progression_team.get("team_id"),
                     "progression_pool_id": progression_team.get("progression_pool_id"),
                     "avg_level": avg_level,
                     "member_count": len(logical_species),
+                    "boss_index": progression_team.get("boss_index"),
+                    "max_boss_index": progression_team.get("max_boss_index"),
+                    "available_species_count": progression_team.get("available_species_count"),
+                    "max_species_count": progression_team.get("max_species_count"),
+                    "progression_depth": progression_team.get("progression_depth"),
+                    "boss_ace_level": progression_team.get("boss_ace_level"),
+                    "boss_avg_level": progression_team.get("boss_avg_level"),
+                    "level_cap_offset": progression_team.get("level_cap_offset"),
                 }
             )
 
@@ -651,7 +893,11 @@ def build_player_team_compact_tables(
                         "team_member_id": member_id,
                         "source_team_id": source_team_id,
                         "game_version": game_version,
+                        "boss_id": boss_id,
                         "boss_name": boss_name,
+                        "gym_index": progression_team.get("gym_index"),
+                        "starter_condition": starter_condition,
+                        "starter_type": starter_type,
                         "slot": slot,
                         "pokemon_species": species_norm,
                         "level": level,
@@ -802,13 +1048,25 @@ def build_player_teams_from_progression_context(
             "team_id": row.get("source_team_id"),
             "source_team_id": row.get("progression_source_team_id"),
             "game_version": row.get("game_version"),
+            "boss_id": row.get("boss_id"),
             "gym": row.get("boss_name"),
             "boss_name": row.get("boss_name"),
+            "gym_index": row.get("gym_index"),
+            "starter_condition": row.get("starter_condition"),
+            "starter_type": row.get("starter_type"),
             "avg_level": row.get("avg_level"),
             "starter_base": row.get("starter_base"),
             "starter_evolved_species": row.get("starter_evolved_species"),
             "team_role": "player",
             "is_player_candidate": True,
+            "boss_index": row.get("boss_index"),
+            "max_boss_index": row.get("max_boss_index"),
+            "available_species_count": row.get("available_species_count"),
+            "max_species_count": row.get("max_species_count"),
+            "progression_depth": row.get("progression_depth"),
+            "boss_ace_level": row.get("boss_ace_level"),
+            "boss_avg_level": row.get("boss_avg_level"),
+            "level_cap_offset": row.get("level_cap_offset"),
         }
         for row in compact["source_teams"]
     ]

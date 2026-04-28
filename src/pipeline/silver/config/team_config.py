@@ -58,6 +58,7 @@ GAME_TO_VERSION_GROUP: dict[str, str] = {
     "soulsilver": "heartgold-soulsilver",
     "black": "black-white",
     "white": "black-white",
+    "black-white": "black-white",
     "black-2": "black-2-white-2",
     "white-2": "black-2-white-2",
     "x": "x-y",

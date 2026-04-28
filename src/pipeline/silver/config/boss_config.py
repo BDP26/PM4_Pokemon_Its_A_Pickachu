@@ -22,7 +22,13 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Bruno": ["bruno", "elite four bruno"],
         "Agatha": ["agatha", "elite four agatha"],
         "Lance": ["lance", "elite four lance"],
-        "Blue": ["champion blue", "blue"],
+        "Blue": [
+            "champion blue",
+            "champion blue bulbasaur",
+            "champion blue squirtle",
+            "champion blue charmander",
+            "blue",
+        ],
     },
     "blue": {
         "Brock": ["brock", "pewter gym", "pewter city"],
@@ -37,7 +43,13 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Bruno": ["bruno", "elite four bruno"],
         "Agatha": ["agatha", "elite four agatha"],
         "Lance": ["lance", "elite four lance"],
-        "Blue": ["champion blue", "blue"],
+        "Blue": [
+            "champion blue",
+            "champion blue bulbasaur",
+            "champion blue squirtle",
+            "champion blue charmander",
+            "blue",
+        ],
     },
     "gold": {
         "Falkner": ["falkner", "violet gym", "violet city"],
@@ -53,6 +65,14 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Bruno": ["bruno", "elite four bruno"],
         "Karen": ["karen", "elite four karen"],
         "Lance": ["champion lance", "lance"],
+        "Lt. Surge": ["lt surge", "lt. surge", "vermilion gym", "vermilion city"],
+        "Sabrina": ["sabrina", "saffron gym", "saffron city"],
+        "Misty": ["misty", "cerulean gym", "cerulean city"],
+        "Erika": ["erika", "celadon gym", "celadon city"],
+        "Janine": ["janine", "fuchsia gym", "fuchsia city"],
+        "Brock": ["brock", "pewter gym", "pewter city"],
+        "Blaine": ["blaine", "seafoam islands"],
+        "Blue": ["viridian gym", "blue's house", "blue"],
     },
     "silver": {
         "Falkner": ["falkner", "violet gym", "violet city"],
@@ -68,6 +88,14 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Bruno": ["bruno", "elite four bruno"],
         "Karen": ["karen", "elite four karen"],
         "Lance": ["champion lance", "lance"],
+        "Lt. Surge": ["lt surge", "lt. surge", "vermilion gym", "vermilion city"],
+        "Sabrina": ["sabrina", "saffron gym", "saffron city"],
+        "Misty": ["misty", "cerulean gym", "cerulean city"],
+        "Erika": ["erika", "celadon gym", "celadon city"],
+        "Janine": ["janine", "fuchsia gym", "fuchsia city"],
+        "Brock": ["brock", "pewter gym", "pewter city"],
+        "Blaine": ["blaine", "seafoam islands"],
+        "Blue": ["viridian gym", "blue's house", "blue"],
     },
     "ruby": {
         "Roxanne": ["roxanne", "rustboro gym", "rustboro city"],
@@ -102,7 +130,7 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
     "diamond": {
         "Roark": ["roark", "oreburgh gym", "oreburgh city"],
         "Gardenia": ["gardenia", "eterna gym", "eterna city"],
-        "Maylene": ["maylene", "veilstone gym", "veilstone city"],
+        "Maylene": ["maylene", "veilstone gym", "veilstone city", "veilstone town"],
         "Crasher Wake": ["crasher wake", "pastoria gym", "pastoria city"],
         "Fantina": ["fantina", "hearthome gym", "hearthome city"],
         "Byron": ["byron", "canalave gym", "canalave city"],
@@ -117,7 +145,7 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
     "pearl": {
         "Roark": ["roark", "oreburgh gym", "oreburgh city"],
         "Gardenia": ["gardenia", "eterna gym", "eterna city"],
-        "Maylene": ["maylene", "veilstone gym", "veilstone city"],
+        "Maylene": ["maylene", "veilstone gym", "veilstone city", "veilstone town"],
         "Crasher Wake": ["crasher wake", "pastoria gym", "pastoria city"],
         "Fantina": ["fantina", "hearthome gym", "hearthome city"],
         "Byron": ["byron", "canalave gym", "canalave city"],
@@ -130,7 +158,9 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Cynthia": ["champion cynthia", "cynthia"],
     },
     "black": {
+        "Chili": ["chili", "striaton gym", "striaton city"],
         "Cilan": ["cilan", "striaton gym", "striaton city"],
+        "Cress": ["cress", "striaton gym", "striaton city"],
         "Lenora": ["lenora", "nacrene gym", "nacrene city"],
         "Burgh": ["burgh", "castelia gym", "castelia city"],
         "Elesa": ["elesa", "nimbasa gym", "nimbasa city"],
@@ -142,32 +172,30 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Grimsley": ["grimsley"],
         "Caitlin": ["caitlin"],
         "Marshal": ["marshal"],
-        "N": ["n's castle", "the champion's temple"],
-        "Ghetsis": ["ghetsis"],
-        "Alder": ["the champion, alder", "alder"],
+        "Alder": ["champion alder", "the champion, alder", "alder"],
     },
     "white": {
+        "Chili": ["chili", "striaton gym", "striaton city"],
         "Cilan": ["cilan", "striaton gym", "striaton city"],
+        "Cress": ["cress", "striaton gym", "striaton city"],
         "Lenora": ["lenora", "nacrene gym", "nacrene city"],
         "Burgh": ["burgh", "castelia gym", "castelia city"],
         "Elesa": ["elesa", "nimbasa gym", "nimbasa city"],
         "Clay": ["clay", "driftveil gym", "driftveil city"],
         "Skyla": ["skyla", "mistralton gym", "mistralton city"],
         "Brycen": ["brycen", "icirrus gym", "icirrus city"],
-        "Drayden": ["drayden", "opelucid gym", "opelucid city"],
+        "Iris": ["iris", "opelucid gym", "opelucid city"],
         "Shauntal": ["shauntal"],
         "Grimsley": ["grimsley"],
         "Caitlin": ["caitlin"],
         "Marshal": ["marshal"],
-        "N": ["n's castle", "the champion's temple"],
-        "Ghetsis": ["ghetsis"],
-        "Alder": ["the champion, alder", "alder"],
+        "Alder": ["champion alder", "the champion, alder", "alder"],
     },
     "x": {
         "Viola": ["viola", "santalune gym", "santalune city"],
         "Grant": ["grant", "cyllage gym", "cyllage city"],
         "Korrina": ["korrina", "shalour gym", "shalour city"],
-        "Ramos": ["ramos", "coumarine gym", "coumarine city"],
+        "Ramos": ["ramos", "coumarine gym", "coumarine city", "courmaline gym", "courmaline city"],
         "Clemont": ["clemont", "lumiose gym", "lumiose city"],
         "Valerie": ["valerie", "laverre gym", "laverre city"],
         "Olympia": ["olympia", "anistar gym", "anistar city"],
@@ -182,7 +210,7 @@ BOSS_ALIASES: dict[str, dict[str, list[str]]] = {
         "Viola": ["viola", "santalune gym", "santalune city"],
         "Grant": ["grant", "cyllage gym", "cyllage city"],
         "Korrina": ["korrina", "shalour gym", "shalour city"],
-        "Ramos": ["ramos", "coumarine gym", "coumarine city"],
+        "Ramos": ["ramos", "coumarine gym", "coumarine city", "courmaline gym", "courmaline city"],
         "Clemont": ["clemont", "lumiose gym", "lumiose city"],
         "Valerie": ["valerie", "laverre gym", "laverre city"],
         "Olympia": ["olympia", "anistar gym", "anistar city"],
@@ -204,6 +232,8 @@ ELITE_FOUR_BY_GAME: dict[str, list[str]] = {
     "sapphire": ["Sidney", "Phoebe", "Glacia", "Drake"],
     "diamond": ["Aaron", "Bertha", "Flint", "Lucian"],
     "pearl": ["Aaron", "Bertha", "Flint", "Lucian"],
+    "black": ["Shauntal", "Grimsley", "Caitlin", "Marshal"],
+    "white": ["Shauntal", "Grimsley", "Caitlin", "Marshal"],
     "x": ["Malva", "Siebold", "Wikstrom", "Drasna"],
     "y": ["Malva", "Siebold", "Wikstrom", "Drasna"],
 }
@@ -222,6 +252,30 @@ CHAMPION_BY_GAME: dict[str, str] = {
     "x": "Diantha",
     "y": "Diantha",
 }
+
+STRIATON_CONDITIONAL_BOSSES: tuple[dict[str, str | int], ...] = (
+    {
+        "boss_name": "Chili",
+        "boss_name_kaggle": "Chili",
+        "starter_condition": "grass",
+        "game_version": "black-white",
+        "gym_index": 1,
+    },
+    {
+        "boss_name": "Cilan",
+        "boss_name_kaggle": "Cilan",
+        "starter_condition": "water",
+        "game_version": "black-white",
+        "gym_index": 1,
+    },
+    {
+        "boss_name": "Cress",
+        "boss_name_kaggle": "Cress",
+        "starter_condition": "fire",
+        "game_version": "black-white",
+        "gym_index": 1,
+    },
+)
 
 
 def boss_slug(name: str) -> str:
@@ -277,4 +331,3 @@ def dataset_boss_candidates(version: str, canonical_boss: str) -> list[str]:
         add_candidate(_normalize_alias(alias))
 
     return candidates
-

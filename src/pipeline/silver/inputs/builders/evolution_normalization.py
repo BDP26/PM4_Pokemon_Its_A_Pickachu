@@ -173,9 +173,10 @@ def normalize_candidate_pool_for_level(
     removed_invalid = 0
 
     for species, chance, lvl_max, capture in candidates:
+        effective_level = min(max(1, int(member_level or 1)), max(1, int(lvl_max or member_level or 1)))
         normalized_species, applied = normalize_species_for_level(
             species,
-            member_level=member_level,
+            member_level=effective_level,
             evolution_rules=evolution_rules,
             allow_trade_evolutions=allow_trade_evolutions,
         )
@@ -207,6 +208,28 @@ def normalize_candidate_pool_for_level(
         "output": len(normalized),
     }
     return normalized, diagnostics
+
+
+def legal_species_pool_for_level(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    member_level: int,
+    evolution_rules: dict[str, list[dict[str, Any]]] | None,
+    allow_trade_evolutions: bool = False,
+) -> set[str]:
+    """Return the species set that remains legal after forced evolutions at the given level."""
+    legal_species: set[str] = set()
+    for species, _, lvl_max, _ in candidates:
+        effective_level = min(max(1, int(member_level or 1)), max(1, int(lvl_max or member_level or 1)))
+        normalized_species, _ = normalize_species_for_level(
+            species,
+            member_level=effective_level,
+            evolution_rules=evolution_rules,
+            allow_trade_evolutions=allow_trade_evolutions,
+        )
+        if normalized_species:
+            legal_species.add(normalized_species)
+    return legal_species
 
 
 def validate_candidate_pool(

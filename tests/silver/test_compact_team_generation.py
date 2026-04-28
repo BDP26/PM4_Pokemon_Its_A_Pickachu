@@ -17,10 +17,17 @@ def _reference_context() -> MoveReferenceContext:
             "quick-attack": {"power": 40, "damage_class": "physical"},
             "thunder-shock": {"power": 40, "damage_class": "special"},
             "growl": {"power": 0, "damage_class": "status"},
+            "vine-whip": {"power": 45, "damage_class": "physical"},
+            "ember": {"power": 40, "damage_class": "special"},
+            "water-gun": {"power": 40, "damage_class": "special"},
         },
         learnable_by_game_species={
             ("red", "pikachu"): {"tackle": 1, "quick-attack": 5, "thunder-shock": 1, "growl": 1},
             ("red", "pidgey"): {"tackle": 1, "quick-attack": 9},
+            ("black-white", "snivy"): {"tackle": 1, "vine-whip": 7},
+            ("black-white", "tepig"): {"tackle": 1, "ember": 7},
+            ("black-white", "oshawott"): {"tackle": 1, "water-gun": 7},
+            ("black-white", "patrat"): {"tackle": 1},
         },
     )
 
@@ -128,3 +135,82 @@ def test_make_team_id_is_stable() -> None:
 def test_player_team_builder_does_not_cartesian_expand_member_movesets() -> None:
     source = Path("src/pipeline/silver/inputs/builders/player_teams.py").read_text(encoding="utf-8")
     assert "product(*per_member_variants)" not in source
+
+
+def test_starter_condition_limits_striaton_player_team_generation() -> None:
+    compact = build_player_team_compact_tables(
+        progression_source_teams=[
+            {
+                "team_id": "progression:black-white:1",
+                "game_version": "black-white",
+                "boss_id": "black-white:chili",
+                "boss_name": "chili",
+                "starter_condition": "snivy",
+                "gym_index": 1,
+                "avg_level": 10,
+                "pokemon": ["patrat"],
+                "levels": [10],
+                "progression_pool_id": "pool-bw-1",
+            }
+        ],
+        reference_context=_reference_context(),
+    )
+
+    assert len(compact["source_teams"]) == 1
+    team = compact["source_teams"][0]
+    assert team["starter_base"] == "snivy"
+    assert team["boss_id"] == "black-white:chili"
+    assert team["starter_condition"] == "snivy"
+
+
+def test_canonical_starter_type_limits_striaton_player_team_generation() -> None:
+    compact = build_player_team_compact_tables(
+        progression_source_teams=[
+            {
+                "team_id": "progression:black-white:1",
+                "game_version": "black-white",
+                "boss_id": "black-white:chili",
+                "boss_name": "chili",
+                "starter_condition": "grass",
+                "gym_index": 1,
+                "avg_level": 10,
+                "pokemon": ["patrat"],
+                "levels": [10],
+                "progression_pool_id": "pool-bw-1",
+            }
+        ],
+        reference_context=_reference_context(),
+    )
+
+    assert len(compact["source_teams"]) == 1
+    team = compact["source_teams"][0]
+    assert team["starter_base"] == "snivy"
+    assert team["starter_type"] == "grass"
+    assert team["boss_id"] == "black-white:chili"
+
+
+def test_nan_starter_condition_falls_back_to_game_starters() -> None:
+    compact = build_player_team_compact_tables(
+        progression_source_teams=[
+            {
+                "team_id": "progression:blue:1",
+                "game_version": "blue",
+                "boss_id": "blue:brock",
+                "boss_name": "brock",
+                "starter_condition": float("nan"),
+                "gym_index": 1,
+                "avg_level": 9,
+                "pokemon": ["pidgey"],
+                "levels": [9],
+                "progression_pool_id": "pool-blue-1",
+            }
+        ],
+        reference_context=_reference_context(),
+    )
+
+    starters = {row["starter_base"] for row in compact["source_teams"]}
+    member_species = {row["pokemon_species"] for row in compact["source_team_members"] if row["slot"] == 1}
+
+    assert "nan" not in starters
+    assert "nan" not in member_species
+    assert starters == {"bulbasaur", "charmander", "squirtle"}

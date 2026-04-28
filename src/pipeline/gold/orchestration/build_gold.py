@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
+from src.pipeline.gold.simulation.progression_balancing import dynamic_level_gap_limits
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
 from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.settings import (
@@ -65,11 +66,24 @@ def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(df.columns):
         return df
 
+    player_depth = df["player_progression_depth"] if "player_progression_depth" in df.columns else pd.Series(0.0, index=df.index)
+    boss_depth = df["boss_progression_depth"] if "boss_progression_depth" in df.columns else pd.Series(0.0, index=df.index)
+    effective_depth = player_depth.fillna(boss_depth).fillna(0.0)
+    gap_limits = effective_depth.map(
+        lambda depth: dynamic_level_gap_limits(
+            depth,
+            base_max_overlevel=MAX_PLAYER_OVERLEVEL_GAP,
+            base_max_underlevel=MAX_PLAYER_UNDERLEVEL_GAP,
+        )
+    )
+    max_overlevels = gap_limits.map(lambda item: item[0])
+    max_underlevels = gap_limits.map(lambda item: item[1])
+
     level_mask = (
         df["player_avg_level"].notna()
         & df["boss_avg_level"].notna()
-        & (df["player_avg_level"] <= df["boss_avg_level"] + MAX_PLAYER_OVERLEVEL_GAP)
-        & (df["player_avg_level"] >= df["boss_avg_level"] - MAX_PLAYER_UNDERLEVEL_GAP)
+        & (df["player_avg_level"] <= (df["boss_avg_level"] + max_overlevels))
+        & (df["player_avg_level"] >= (df["boss_avg_level"] - max_underlevels))
     )
     filtered = df[level_mask].copy()
     # Fallback to the original frame if constraints remove all rows.
@@ -353,16 +367,20 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
     teams_df = read_parquet(teams_path)
     if monte_carlo_df.empty or teams_df.empty:
         return []
+    if "progression_depth" not in teams_df.columns:
+        teams_df["progression_depth"] = None
 
-    player_context = teams_df[["team_id", "game_version", "starter_base", "starter_evolved_species", "avg_level"]].rename(
+    player_context = teams_df[
+        ["team_id", "game_version", "starter_base", "starter_evolved_species", "avg_level", "progression_depth"]
+    ].rename(
         columns={"team_id": "player_team_id", "game_version": "player_game_version"}
     )
-    boss_context = teams_df[["team_id", "boss_name", "game_version", "avg_level"]].rename(
+    boss_context = teams_df[["team_id", "boss_name", "game_version", "avg_level", "progression_depth"]].rename(
         columns={"team_id": "boss_team_id", "game_version": "boss_game_version"}
     )
 
-    player_context = player_context.rename(columns={"avg_level": "player_avg_level"})
-    boss_context = boss_context.rename(columns={"avg_level": "boss_avg_level"})
+    player_context = player_context.rename(columns={"avg_level": "player_avg_level", "progression_depth": "player_progression_depth"})
+    boss_context = boss_context.rename(columns={"avg_level": "boss_avg_level", "progression_depth": "boss_progression_depth"})
 
     joined = monte_carlo_df.merge(player_context, on="player_team_id", how="left")
     joined = joined.merge(boss_context, on="boss_team_id", how="left", suffixes=("", "_team"))
@@ -434,18 +452,44 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             boss_rank_pdf = boss_rank.toPandas()
             outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank_pdf))
 
-            sequence = sdf.where(F.col("boss_stage").isin(["elite_four", "champion"]))
-            sequence = sequence.withColumn("safe_rate", F.when(F.col("mc_win_rate") < 1e-6, F.lit(1e-6)).otherwise(F.col("mc_win_rate")))
-            sequence = (
-                sequence.groupBy("effective_game_version", "starter_base", "player_team_id")
-                .agg(
-                    F.exp(F.avg(F.log("safe_rate"))).alias("sequence_win_rate"),
-                    F.avg("mc_win_rate").alias("mean_mc_win_rate"),
-                    F.countDistinct("effective_boss_name").alias("bosses_covered"),
-                    F.avg(F.col("degraded_data").cast("double")).alias("degraded_ratio"),
+            if "boss_sequence_id" in sdf.columns:
+                sequence = sdf.where(F.col("boss_sequence_id").isNotNull())
+                if "sequence_position" in sdf.columns:
+                    sequence_max = (
+                        sequence.groupBy("effective_game_version", "starter_base", "player_team_id", "boss_sequence_id")
+                        .agg(F.max("sequence_position").alias("max_sequence_position"))
+                    )
+                    sequence = (
+                        sequence.join(
+                            sequence_max,
+                            on=["effective_game_version", "starter_base", "player_team_id", "boss_sequence_id"],
+                            how="inner",
+                        )
+                        .where(F.col("sequence_position") == F.col("max_sequence_position"))
+                    )
+                sequence = (
+                    sequence.groupBy("effective_game_version", "starter_base", "player_team_id")
+                    .agg(
+                        F.avg("mc_win_rate").alias("sequence_win_rate"),
+                        F.avg("mc_win_rate").alias("mean_mc_win_rate"),
+                        F.max(F.coalesce(F.col("sequence_position"), F.lit(0))).alias("bosses_covered"),
+                        F.avg(F.col("degraded_data").cast("double")).alias("degraded_ratio"),
+                    )
+                    .withColumn("sequence_score", F.col("sequence_win_rate") * (F.lit(1.0) - F.coalesce(F.col("degraded_ratio"), F.lit(0.0)) * F.lit(0.2)))
                 )
-                .withColumn("sequence_score", F.col("sequence_win_rate") * (F.lit(1.0) - F.coalesce(F.col("degraded_ratio"), F.lit(0.0)) * F.lit(0.2)))
-            )
+            else:
+                sequence = sdf.where(F.col("boss_stage").isin(["elite_four", "champion"]))
+                sequence = sequence.withColumn("safe_rate", F.when(F.col("mc_win_rate") < 1e-6, F.lit(1e-6)).otherwise(F.col("mc_win_rate")))
+                sequence = (
+                    sequence.groupBy("effective_game_version", "starter_base", "player_team_id")
+                    .agg(
+                        F.exp(F.avg(F.log("safe_rate"))).alias("sequence_win_rate"),
+                        F.avg("mc_win_rate").alias("mean_mc_win_rate"),
+                        F.countDistinct("effective_boss_name").alias("bosses_covered"),
+                        F.avg(F.col("degraded_data").cast("double")).alias("degraded_ratio"),
+                    )
+                    .withColumn("sequence_score", F.col("sequence_win_rate") * (F.lit(1.0) - F.coalesce(F.col("degraded_ratio"), F.lit(0.0)) * F.lit(0.2)))
+                )
             seq_window = Window.partitionBy("effective_game_version", "starter_base").orderBy(
                 F.desc("sequence_score"),
                 F.desc("sequence_win_rate"),
@@ -482,20 +526,47 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
     boss_rank["rank_in_boss_starter"] = boss_rank.groupby(["effective_game_version", "effective_boss_name", "starter_base"]).cumcount() + 1
     outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank))
 
-    sequence_df = joined[joined["boss_stage"].isin(["elite_four", "champion"])].copy()
-    if not sequence_df.empty:
-        sequence_df["safe_rate"] = sequence_df["mc_win_rate"].clip(lower=1e-6)
-        sequence_df["log_rate"] = sequence_df["safe_rate"].map(lambda value: math.log(float(value)))
-        sequence_rank = (
-            sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
-            .agg(
-                mean_log_rate=("log_rate", "mean"),
-                mean_mc_win_rate=("mc_win_rate", "mean"),
-                bosses_covered=("effective_boss_name", "nunique"),
-                degraded_ratio=("degraded_data", "mean"),
+    if "boss_sequence_id" in joined.columns and joined["boss_sequence_id"].notna().any():
+        sequence_df = joined[joined["boss_sequence_id"].notna()].copy()
+        if "sequence_position" in sequence_df.columns:
+            sequence_df["sequence_position"] = pd.to_numeric(sequence_df["sequence_position"], errors="coerce").fillna(0).astype(int)
+            max_positions = (
+                sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id", "boss_sequence_id"], as_index=False)["sequence_position"]
+                .max()
+                .rename(columns={"sequence_position": "max_sequence_position"})
             )
-        )
-        sequence_rank["sequence_win_rate"] = sequence_rank["mean_log_rate"].map(lambda value: math.exp(float(value)))
+            sequence_df = sequence_df.merge(
+                max_positions,
+                on=["effective_game_version", "starter_base", "player_team_id", "boss_sequence_id"],
+                how="left",
+            )
+            sequence_df = sequence_df[sequence_df["sequence_position"] == sequence_df["max_sequence_position"]].copy()
+    else:
+        sequence_df = joined[joined["boss_stage"].isin(["elite_four", "champion"])].copy()
+    if not sequence_df.empty:
+        if "boss_sequence_id" in sequence_df.columns and sequence_df["boss_sequence_id"].notna().any():
+            sequence_rank = (
+                sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
+                .agg(
+                    sequence_win_rate=("mc_win_rate", "mean"),
+                    mean_mc_win_rate=("mc_win_rate", "mean"),
+                    bosses_covered=("sequence_position", "max"),
+                    degraded_ratio=("degraded_data", "mean"),
+                )
+            )
+        else:
+            sequence_df["safe_rate"] = sequence_df["mc_win_rate"].clip(lower=1e-6)
+            sequence_df["log_rate"] = sequence_df["safe_rate"].map(lambda value: math.log(float(value)))
+            sequence_rank = (
+                sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
+                .agg(
+                    mean_log_rate=("log_rate", "mean"),
+                    mean_mc_win_rate=("mc_win_rate", "mean"),
+                    bosses_covered=("effective_boss_name", "nunique"),
+                    degraded_ratio=("degraded_data", "mean"),
+                )
+            )
+            sequence_rank["sequence_win_rate"] = sequence_rank["mean_log_rate"].map(lambda value: math.exp(float(value)))
         sequence_rank["degraded_ratio"] = sequence_rank["degraded_ratio"].fillna(0.0)
         sequence_rank["sequence_score"] = sequence_rank["sequence_win_rate"] * (1.0 - sequence_rank["degraded_ratio"] * 0.2)
         sequence_rank = sequence_rank.sort_values(

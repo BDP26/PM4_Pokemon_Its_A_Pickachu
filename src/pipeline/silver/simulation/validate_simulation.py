@@ -102,6 +102,7 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
         attacker_win = matchup.get("attacker_win")
         battle_turns = matchup.get("battle_turns")
         simulation_score = matchup.get("simulation_score")
+        simulation_mode = str(matchup.get("simulation_mode") or "gym").strip().lower()
 
         if not isinstance(atk, str) or atk not in team_ids:
             issues.append(f"team_battle_simulations.parquet row {idx}: invalid attacker team reference")
@@ -114,8 +115,12 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
 
         if not isinstance(attacker_win, bool):
             issues.append(f"team_battle_simulations.parquet row {idx}: attacker_win must be boolean")
-        if not _is_numeric(battle_turns) or int(cast(int | float, battle_turns)) <= 0:
+        if not _is_numeric(battle_turns):
+            issues.append(f"team_battle_simulations.parquet row {idx}: battle_turns must be numeric")
+        elif simulation_mode == "gym" and int(cast(int | float, battle_turns)) <= 0:
             issues.append(f"team_battle_simulations.parquet row {idx}: battle_turns must be > 0")
+        elif simulation_mode == "gauntlet" and float(cast(int | float, battle_turns)) < 0:
+            issues.append(f"team_battle_simulations.parquet row {idx}: gauntlet battle_turns must be >= 0")
         if not isinstance(simulation_score, (int, float)):
             issues.append(f"team_battle_simulations.parquet row {idx}: simulation_score must be numeric")
 
@@ -227,7 +232,8 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
     )
     if player_team_count > 0 and boss_team_count > 0:
         expected_matchups = player_team_count * boss_team_count
-    if team_battles and len(team_battles) != expected_matchups:
+    has_gauntlet_rows = any(bool(str(row.get("boss_sequence_id") or "").strip()) for row in team_battles)
+    if team_battles and not has_gauntlet_rows and len(team_battles) != expected_matchups:
         issues.append(
             f"team_battle_simulations.parquet row count mismatch: got {len(team_battles)}, expected {expected_matchups}"
         )
@@ -261,7 +267,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
 
 
 

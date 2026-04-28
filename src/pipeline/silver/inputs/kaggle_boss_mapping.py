@@ -17,7 +17,7 @@ def is_probable_match(candidate: str, value: str) -> bool:
         return False
     if candidate_key == value_key:
         return True
-    # Avoid broad substring matches for very short names like "N".
+    # Avoid broad substring matches for very short canonical names.
     if len(candidate_key) < 3 or len(value_key) < 3:
         return False
     return candidate_key in value_key or value_key in candidate_key
@@ -137,5 +137,4 @@ def build_boss_mapping_payload(
             for idx, boss in enumerate(expected_bosses)
         ],
     }
-
 

@@ -96,6 +96,214 @@ Team tables in `data/silver/simulation/`:
 - `simulation/pokemon_moveset_options.parquet` (reusable per-species/level/game move options)
 - `simulation/move_data.parquet` (detailed move info: power, damage_class per move)
 
+## ERD
+
+The Silver layer is split into:
+
+- reference tables in `data/silver/references/`
+- simulation input tables in `data/silver/simulation/`
+
+```mermaid
+erDiagram
+    GAMES {
+        string game_version PK
+        string version_group
+        string region
+        int generation
+    }
+
+    BOSSES {
+        string boss_id PK
+        string game_version FK
+        string boss_name_canonical
+        string boss_name_kaggle
+        string boss_role
+        int boss_order
+        int gym_index
+        string starter_condition
+    }
+
+    LOCATIONS {
+        string location_id PK
+        string game_version FK
+        string normalized_location_name
+        string pokeapi_area_slug
+        string mapping_status
+    }
+
+    ENCOUNTERS {
+        string game_version FK
+        string boss_id FK
+        string location
+        string pokemon_species
+        int level_min
+        int level_max
+        int encounter_chance_max
+        int capture_rate
+    }
+
+    PROGRESSION_DEPTH {
+        string game_version FK
+        string boss_id FK
+        string boss_name
+        int boss_index
+        int max_boss_index
+        int available_species_count
+        int max_species_count
+        float progression_depth
+        int boss_ace_level
+        int boss_avg_level
+    }
+
+    POKEMON_DATA {
+        string pokemon_species PK
+        string name
+        string type_1
+        string type_2
+        int base_hp
+        int base_attack
+        int base_defense
+        int base_special_attack
+        int base_special_defense
+        int base_speed
+    }
+
+    MOVE_REFERENCE {
+        string move_name PK
+        string type
+        string damage_class
+        int power
+        int effective_power
+    }
+
+    LEARNABLE_MOVES {
+        string game_version FK
+        string pokemon_species FK
+        string move_name FK
+        int learned_level
+    }
+
+    BOSS_TEAM_MEMBERS {
+        string team_member_id PK
+        string boss_id FK
+        string game_version FK
+        string pokemon_species FK
+        int level
+        string boss_role
+    }
+
+    SOURCE_TEAMS {
+        string source_team_id PK
+        string game_version FK
+        string team_role
+        string origin
+        string boss_id FK
+        string boss_name
+        int gym_index
+        string starter_base
+        string starter_condition
+    }
+
+    SOURCE_TEAM_MEMBERS {
+        string team_member_id PK
+        string source_team_id FK
+        string game_version FK
+        string boss_id FK
+        string pokemon_species FK
+        int slot
+        int level
+        boolean is_starter
+    }
+
+    MEMBER_MOVE_OPTIONS {
+        string team_member_id FK
+        string source_team_id FK
+        string game_version FK
+        string pokemon_species FK
+        string move_name FK
+        int option_rank
+        float option_score
+        string moveset_context_id
+    }
+
+    MEMBER_MOVESET_COMBOS {
+        string moveset_combo_id PK
+        string team_id FK
+        string pokemon_instance_id FK
+        string game_version FK
+        string pokemon_name
+        int level
+        string move_1
+        string move_2
+        string move_3
+        string move_4
+    }
+
+    POKEMON_MOVESET_OPTIONS {
+        string moveset_context_id
+        string game_version FK
+        string pokemon_species FK
+        int level
+        string move_policy
+        string move_name
+        int option_rank
+    }
+
+    SIMULATION_SAMPLING_PLAN {
+        string source_team_id FK
+        string sampling_seed
+        string move_policy
+        int estimated_combo_space
+    }
+
+    MOVE_DATA {
+        string team_member_id FK
+        string game_version FK
+        string species FK
+    }
+
+    GAMES ||--o{ BOSSES : has
+    GAMES ||--o{ LOCATIONS : has
+    GAMES ||--o{ ENCOUNTERS : scopes
+    GAMES ||--o{ PROGRESSION_DEPTH : scopes
+    GAMES ||--o{ LEARNABLE_MOVES : scopes
+    GAMES ||--o{ BOSS_TEAM_MEMBERS : scopes
+    GAMES ||--o{ SOURCE_TEAMS : scopes
+    GAMES ||--o{ SOURCE_TEAM_MEMBERS : scopes
+
+    BOSSES ||--o{ ENCOUNTERS : gates
+    BOSSES ||--|| PROGRESSION_DEPTH : summarizes
+    BOSSES ||--o{ BOSS_TEAM_MEMBERS : owns
+    BOSSES ||--o{ SOURCE_TEAMS : target_for
+
+    LOCATIONS ||--o{ ENCOUNTERS : contains
+    POKEMON_DATA ||--o{ ENCOUNTERS : species
+    POKEMON_DATA ||--o{ LEARNABLE_MOVES : learns
+    POKEMON_DATA ||--o{ BOSS_TEAM_MEMBERS : used_by
+    POKEMON_DATA ||--o{ SOURCE_TEAM_MEMBERS : used_by
+    POKEMON_DATA ||--o{ POKEMON_MOVESET_OPTIONS : contextualized_for
+
+    MOVE_REFERENCE ||--o{ LEARNABLE_MOVES : defines
+    MOVE_REFERENCE ||--o{ MEMBER_MOVE_OPTIONS : ranks
+
+    SOURCE_TEAMS ||--o{ SOURCE_TEAM_MEMBERS : contains
+    SOURCE_TEAMS ||--o{ SIMULATION_SAMPLING_PLAN : samples_with
+    SOURCE_TEAM_MEMBERS ||--o{ MEMBER_MOVE_OPTIONS : can_use
+    SOURCE_TEAM_MEMBERS ||--o{ MEMBER_MOVESET_COMBOS : expands_to
+    SOURCE_TEAM_MEMBERS ||--|| MOVE_DATA : move_profile
+
+    POKEMON_MOVESET_OPTIONS ||--o{ MEMBER_MOVE_OPTIONS : reuses_context
+```
+
+### Relationship Notes
+
+- `bosses.parquet` is the canonical boss dimension for both progression and simulation joins.
+- `encounters.parquet` links a boss step to the wild species available before that boss.
+- `progression_depth.parquet` is a derived per-boss fact used to bound player team generation.
+- `source_teams_*.parquet` and `source_team_members_*.parquet` are the main Gold-facing team contracts.
+- `member_moveset_combos_*.parquet` stores bounded per-member move combinations, not full team Cartesian products.
+- `move_data.parquet`, `move_reference.parquet`, and `learnable_moves.parquet` together define the combat move layer.
+
 **Source Team Structure (compact)**:
 ```json
 {

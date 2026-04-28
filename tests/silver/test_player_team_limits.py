@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_restricted_species(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.pipeline.silver.inputs.builders.player_teams.is_restricted_encounter_species",
+        lambda species: False,
+    )
+
 
 def test_progression_pools_use_cumulative_location_deltas() -> None:
     module = importlib.import_module("src.pipeline.silver.inputs.builders.player_teams")

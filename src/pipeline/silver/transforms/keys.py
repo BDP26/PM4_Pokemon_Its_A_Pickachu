@@ -6,12 +6,21 @@ import hashlib
 import re
 from typing import Any
 
+import pandas as pd
+
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_key_part(value: Any) -> str:
-    text = str(value or "").strip().lower()
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    text = str(value).strip().lower()
     text = text.replace("&", " and ")
     text = _NON_ALNUM_RE.sub("-", text)
     return re.sub(r"-+", "-", text).strip("-")

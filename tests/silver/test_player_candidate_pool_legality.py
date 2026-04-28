@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from src.pipeline.silver.inputs.builders.evolution_normalization import (
     build_level_up_evolution_index_from_species_rules,
+    legal_species_pool_for_level,
     normalize_candidate_pool_for_level,
     normalize_species_for_level,
 )
@@ -55,6 +57,34 @@ def test_candidate_pool_post_normalization_drops_species_missing_in_game() -> No
     )
     assert normalized == []
     assert diagnostics["removed_after_validation"] == 1
+
+
+def test_legal_species_pool_for_level_tracks_forced_evolutions() -> None:
+    evolution_rules = {
+        "geodude": [{"to_species": "graveler", "trigger": "level-up", "min_level": 25}],
+    }
+
+    legal = legal_species_pool_for_level(
+        [("geodude", 40, 46, 120)],
+        member_level=53,
+        evolution_rules=evolution_rules,
+    )
+
+    assert legal == {"graveler"}
+
+
+def test_legal_species_pool_for_level_respects_encounter_level_cap() -> None:
+    evolution_rules = {
+        "geodude": [{"to_species": "graveler", "trigger": "level-up", "min_level": 25}],
+    }
+
+    legal = legal_species_pool_for_level(
+        [("geodude", 40, 20, 120)],
+        member_level=53,
+        evolution_rules=evolution_rules,
+    )
+
+    assert legal == {"geodude"}
 
 
 def test_pokeapi_species_rules_can_be_used_directly_for_normalization() -> None:
@@ -110,12 +140,22 @@ def _reference_context() -> MoveReferenceContext:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_restricted_species(monkeypatch) -> None:
+    restricted = {"articuno", "zapdos", "moltres", "mew", "mewtwo"}
+    monkeypatch.setattr(
+        "src.pipeline.silver.inputs.builders.player_teams.is_restricted_encounter_species",
+        lambda species: str(species or "").strip().lower() in restricted,
+    )
+
+
 def test_generated_player_candidates_use_encounters_single_source_of_truth() -> None:
     encounters_df = pd.DataFrame(
         [
             {"boss_id": "red-brock", "location": "route-1", "pokemon": "pidgey", "level_min": 2, "level_max": 5, "methods": [], "game": "red"},
             {"boss_id": "red-brock", "location": "route-1", "pokemon": "rattata", "level_min": 2, "level_max": 4, "methods": [], "game": "red"},
             {"boss_id": "red-misty", "location": "power-plant", "pokemon": "zapdos", "level_min": 50, "level_max": 50, "methods": [], "game": "red"},
+            {"boss_id": "red-misty", "location": "route-24", "pokemon": "pidgey", "level_min": 18, "level_max": 20, "methods": [], "game": "red"},
         ]
     )
     bosses_df = pd.DataFrame(
@@ -143,6 +183,82 @@ def test_generated_player_candidates_use_encounters_single_source_of_truth() -> 
     assert "articuno" not in {species for team in source_teams for species in team.get("pokemon", [])}
 
 
+def test_restricted_legendary_encounters_are_removed_from_player_candidates() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "articuno", "level_min": 50, "level_max": 50, "encounter_chance_max": 100, "capture_rate": 3, "methods": [], "game": "red"},
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "graveler", "level_min": 45, "level_max": 47, "encounter_chance_max": 20, "capture_rate": 120, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "game_version": "red", "boss_name_canonical": "Lance", "boss_order": 12},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "lance", "avg_level": 53}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert "articuno" not in generated_species
+    assert generated_species == {"graveler"}
+
+
+def test_progression_source_teams_preserve_colon_boss_ids() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "blue:lt-surge", "location": "route-11", "pokemon": "drowzee", "level_min": 11, "level_max": 15, "encounter_chance_max": 30, "capture_rate": 190, "methods": [], "game": "blue"},
+            {"boss_id": "blue:lt-surge", "location": "route-11", "pokemon": "rattata", "level_min": 12, "level_max": 14, "encounter_chance_max": 40, "capture_rate": 255, "methods": [], "game": "blue"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "blue:lt-surge", "game_version": "blue", "boss_name_canonical": "Lt. Surge", "boss_order": 3},
+        ]
+    )
+    boss_teams = [{"game_version": "blue", "boss_name": "lt-surge", "avg_level": 24}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=2,
+    )
+
+    assert source_teams
+    assert {row["boss_id"] for row in source_teams} == {"blue:lt-surge"}
+
+
+def test_progression_source_teams_map_legacy_encounter_boss_ids_to_canonical_ids() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "black:chili", "location": "unova-route-1", "pokemon": "patrat", "level_min": 2, "level_max": 4, "encounter_chance_max": 40, "capture_rate": 255, "methods": [], "game": "black"},
+            {"boss_id": "black:chili", "location": "unova-route-1", "pokemon": "lillipup", "level_min": 2, "level_max": 4, "encounter_chance_max": 35, "capture_rate": 255, "methods": [], "game": "black"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "boss:black:chili:abc123", "game_version": "black", "boss_name_canonical": "Chili", "boss_order": 1, "gym_index": 1},
+        ]
+    )
+    boss_teams = [{"game_version": "black", "boss_name": "chili", "avg_level": 14}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=2,
+    )
+
+    assert source_teams
+    assert {row["boss_id"] for row in source_teams} == {"boss:black:chili:abc123"}
+
+
 def test_articuno_and_reference_only_species_cannot_appear_in_player_source_team_members() -> None:
     encounters_df = pd.DataFrame(
         [
@@ -165,3 +281,117 @@ def test_articuno_and_reference_only_species_cannot_appear_in_player_source_team
 
     assert "articuno" not in generated_species
     assert generated_species.isdisjoint(pokemon_reference_only)
+
+
+def test_evolved_forms_from_encounter_pool_remain_legal_for_generated_teams() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "geodude", "level_min": 41, "level_max": 46, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "game_version": "red", "boss_name_canonical": "Lance", "boss_order": 12},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "lance", "avg_level": 53}]
+    evolution_rules_by_game = {
+        "red": {
+            "geodude": [{"to_species": "graveler", "trigger": "level-up", "min_level": 25}],
+        }
+    }
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+        evolution_rules_by_game=evolution_rules_by_game,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"graveler"}
+    assert {level for team in source_teams for level in team.get("levels", [])} == {46}
+
+
+def test_encounter_level_cap_prevents_forced_evolution_in_generated_teams() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-test", "location": "mt-moon", "pokemon": "geodude", "level_min": 18, "level_max": 20, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-test", "game_version": "red", "boss_name_canonical": "Test", "boss_order": 99},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "test", "avg_level": 53}]
+    evolution_rules_by_game = {
+        "red": {
+            "geodude": [{"to_species": "graveler", "trigger": "level-up", "min_level": 25}],
+        }
+    }
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+        evolution_rules_by_game=evolution_rules_by_game,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    generated_levels = {level for team in source_teams for level in team.get("levels", [])}
+    assert generated_species == {"geodude"}
+    assert generated_levels == {20}
+
+
+def test_build_progression_source_teams_from_encounters_uses_chance_and_capture_for_ranking() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-misty", "location": "route-24", "pokemon": "psyduck", "level_min": 18, "level_max": 20, "encounter_chance_max": 65, "capture_rate": 190, "methods": [], "game": "red"},
+            {"boss_id": "red-misty", "location": "route-24", "pokemon": "oddish", "level_min": 19, "level_max": 21, "encounter_chance_max": 5, "capture_rate": 45, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-misty", "game_version": "red", "boss_name_canonical": "Misty", "boss_order": 2},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "misty", "avg_level": 20}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+    )
+
+    generated_species = [species for team in source_teams for species in team.get("pokemon", [])]
+    assert generated_species
+    assert generated_species[0] == "psyduck"
+
+
+def test_build_progression_source_teams_from_encounters_defaults_missing_ranking_columns(caplog) -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "location": "route-1", "pokemon": "pidgey", "level_min": 2, "level_max": 5, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "game_version": "red", "boss_name_canonical": "Brock", "boss_order": 1},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "brock", "avg_level": 12}]
+
+    with caplog.at_level("WARNING"):
+        source_teams = build_progression_source_teams_from_encounters(
+            encounters_df=encounters_df,
+            bosses_df=bosses_df,
+            boss_teams=boss_teams,
+            catch_pool_size=1,
+        )
+
+    assert source_teams
+    assert "missing optional ranking columns" in caplog.text

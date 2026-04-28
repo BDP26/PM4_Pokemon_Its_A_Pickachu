@@ -41,3 +41,16 @@ def test_candidate_pool_ranking_prefers_level_realism() -> None:
     )
     assert ranked[0][0] == "species_close"
     assert diagnostics["output"] == 2
+
+
+def test_candidate_pool_ranking_uses_encounter_weight_when_levels_are_comparable() -> None:
+    ranked, diagnostics = _rank_candidate_pool(
+        [
+            ("species_common", 80, 21, 200),
+            ("species_rare", 10, 20, 45),
+        ],
+        boss_level=20,
+        pool_size=2,
+    )
+    assert ranked[0][0] == "species_common"
+    assert diagnostics["output"] == 2

@@ -111,6 +111,11 @@ def build_battle_seeds(
                     "simulated_attacker_win": attacker_win,
                     "degraded_data": degraded_data,
                     "n_trials": n_trials,
+                    "boss_sequence_id": player_match.get("boss_sequence_id"),
+                    "sequence_position": player_match.get("sequence_position"),
+                    "remaining_team_state": player_match.get("remaining_team_state", []),
+                    "gauntlet_success": bool(player_match.get("gauntlet_success", False)),
+                    "simulation_mode": player_match.get("simulation_mode") or "gym",
                 }
             )
 

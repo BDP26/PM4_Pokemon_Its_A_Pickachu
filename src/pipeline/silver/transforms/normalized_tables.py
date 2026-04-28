@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from src.pipeline.silver.config.boss_config import STRIATON_CONDITIONAL_BOSSES, boss_id
 from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP
 from src.pipeline.silver.move_power import resolve_effective_power
 from src.pipeline.silver.schemas.contracts import BossSnapshotContract
@@ -28,13 +29,17 @@ _GENERATION_BY_REGION: dict[str, int] = {
     "kalos": 6,
 }
 
+NON_SIMULATABLE_BOSSES_BY_GAME: dict[str, set[str]] = {}
+
 
 def build_games_table(games_config: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    seen_versions: set[str] = set()
     for game in games_config:
         version = str(game.get("game_key") or "").strip().lower()
         if not version:
             continue
+        seen_versions.add(version)
         route_prefix = str(game.get("route_prefix") or "").strip().lower()
         region = _REGION_BY_ROUTE_PREFIX.get(route_prefix, "unknown")
         rows.append(
@@ -46,31 +51,80 @@ def build_games_table(games_config: list[dict[str, Any]]) -> list[dict[str, Any]
                 "is_supported": True,
             }
         )
+    if {"black", "white"}.issubset(seen_versions):
+        rows.append(
+            {
+                "game_version": "black-white",
+                "version_group": "black-white",
+                "region": "unova",
+                "generation": 5,
+                "is_supported": True,
+            }
+        )
     return sorted(rows, key=lambda row: row["game_version"])
 
 
 def build_bosses_table(boss_mapping_by_version: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    striaton_injected = False
+    striaton_names = {
+        str(conditional_boss["boss_name"]).strip()
+        for conditional_boss in STRIATON_CONDITIONAL_BOSSES
+    }
     for game_version, payload in sorted(boss_mapping_by_version.items()):
         mapping_rows = payload.get("boss_mapping", []) if isinstance(payload, dict) else []
         for mapping in mapping_rows:
             if not isinstance(mapping, dict):
                 continue
             canonical_name = str(mapping.get("boss_name_canonical") or "").strip()
+            if game_version in {"black", "white"} and canonical_name in striaton_names:
+                if not striaton_injected:
+                    for conditional_boss in STRIATON_CONDITIONAL_BOSSES:
+                        conditional_name = str(conditional_boss["boss_name"])
+                        conditional_game_version = str(conditional_boss["game_version"])
+                        conditional_gym_index = int(conditional_boss["gym_index"])
+                        rows.append(
+                            {
+                                "boss_id": boss_id(conditional_game_version, conditional_name),
+                                "game_version": conditional_game_version,
+                                "boss_name_canonical": conditional_name,
+                                "boss_name_kaggle": str(conditional_boss["boss_name_kaggle"]),
+                                "boss_name_aliases": [str(conditional_boss["boss_name_kaggle"]), conditional_name],
+                                "boss_role": "gym",
+                                "boss_order": conditional_gym_index,
+                                "boss_index": conditional_gym_index,
+                                "gym_index": conditional_gym_index,
+                                "starter_condition": str(conditional_boss["starter_condition"]),
+                                "is_simulatable": True,
+                            }
+                        )
+                    striaton_injected = True
+                continue
             role = "gym"
             order = int(mapping.get("boss_order") or 0)
             if "champion" in canonical_name.lower() or order == len(mapping_rows):
                 role = "champion"
             elif order > max(1, len(mapping_rows) - 4):
                 role = "elite_four"
+            dataset_candidates = [
+                str(candidate).strip()
+                for candidate in list(mapping.get("dataset_boss_candidates") or [canonical_name])
+                if str(candidate).strip()
+            ]
+            alias_candidates = list(dict.fromkeys([canonical_name, *dataset_candidates]))
             rows.append(
                 {
                     "boss_id": str(mapping.get("boss_id") or "").strip().lower(),
                     "game_version": str(game_version).strip().lower(),
                     "boss_name_canonical": canonical_name,
-                    "boss_name_kaggle": (mapping.get("dataset_boss_candidates") or [canonical_name])[0],
+                    "boss_name_kaggle": dataset_candidates[0] if dataset_candidates else canonical_name,
+                    "boss_name_aliases": alias_candidates,
                     "boss_role": role,
                     "boss_order": order,
+                    "boss_index": order,
+                    "gym_index": order,
+                    "starter_condition": None,
+                    "is_simulatable": canonical_name not in NON_SIMULATABLE_BOSSES_BY_GAME.get(str(game_version).strip().lower(), set()),
                 }
             )
     return rows

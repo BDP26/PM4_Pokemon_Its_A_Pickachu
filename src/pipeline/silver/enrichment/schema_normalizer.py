@@ -82,6 +82,9 @@ def normalize_boss_records(records: list[dict]) -> tuple[list[dict], dict[str, A
                     "pokemon": species,
                     "level_min": encounter.get("level_min"),
                     "level_max": encounter.get("level_max"),
+                    "encounter_chance_min": encounter.get("encounter_chance_min"),
+                    "encounter_chance_max": encounter.get("encounter_chance_max"),
+                    "capture_rate": encounter.get("capture_rate"),
                     "methods": encounter.get("encounter_methods", []),
                 }
                 encounters.append(normalized_encounter)
@@ -207,4 +210,3 @@ def analyze_schema_efficiency(records: list[dict]) -> dict[str, Any]:
         "num_encounters": len(encounters),
         "num_unique_pokemon": len(pokemon_ref),
     }
-
