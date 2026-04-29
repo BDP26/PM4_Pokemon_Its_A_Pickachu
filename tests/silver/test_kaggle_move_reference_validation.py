@@ -9,6 +9,7 @@ from src.pipeline.silver.inputs.reference_context import MoveReferenceContext, n
 from src.pipeline.silver.inputs.sources.boss_teams import _normalize_kaggle_row, load_kaggle_boss_rows_by_game
 from src.pipeline.silver.orchestration.build_silver import (
     _build_boss_compact_tables,
+    _dedupe_bootstrap_entries,
     _build_kaggle_bootstrap_entries,
     _canonicalize_boss_teams_to_references,
     _validate_boss_reference_coverage,
@@ -54,6 +55,49 @@ def test_alias_fla_normalizes_to_flail() -> None:
     assert normalize_move_name("Fla") == "flail"
     normalized_row = _normalize_kaggle_row({"Pokemon": "Gyarados", "Move 1": "Fla", "Move 2": ""})
     assert normalized_row["moves"] == ["flail"]
+
+
+def test_build_kaggle_bootstrap_entries_only_keeps_delta_rows() -> None:
+    kaggle_rows_by_game = {
+        "crystal": [
+            {"Pokemon": "Gyarados", "Level": 30, "Move 1": "Surf", "Move 2": "Flail", "Move 3": "", "Move 4": ""},
+            {"Pokemon": "Dragonair", "Level": 35, "Move 1": "Slam", "Move 2": "", "Move 3": "", "Move 4": ""},
+            {"Pokemon": "Lapras", "Level": 28, "Move 1": "Ice Beam", "Move 2": "", "Move 3": "", "Move 4": ""},
+        ]
+    }
+    learnable_moves_df = pd.DataFrame(
+        [
+            {"game_version": "crystal", "pokemon_species": "gyarados", "move_name": "surf", "learned_level": 1},
+            {"game_version": "crystal", "pokemon_species": "dragonair", "move_name": "slam", "learned_level": 1},
+        ]
+    )
+    move_reference_df = pd.DataFrame(
+        [
+            {"move_name": "surf"},
+            {"move_name": "flail"},
+        ]
+    )
+
+    entries = _build_kaggle_bootstrap_entries(
+        kaggle_rows_by_game,
+        learnable_moves_df=learnable_moves_df,
+        move_reference_df=move_reference_df,
+    )
+
+    assert ("gyarados", 30, "crystal", ["surf", "flail"]) not in entries
+    assert ("dragonair", 35, "crystal", ["slam"]) in entries
+    assert ("lapras", 28, "crystal", ["ice-beam"]) in entries
+
+
+def test_dedupe_bootstrap_entries_merges_move_hints_for_same_species_level_game() -> None:
+    deduped = _dedupe_bootstrap_entries(
+        [
+            ("alakazam", 50, "diamond", ["psychic"]),
+            ("alakazam", 50, "diamond", ["focus-blast"]),
+        ]
+    )
+
+    assert deduped == [("alakazam", 50, "diamond", ["psychic", "focus-blast"])]
 
 
 def test_build_member_moves_fails_fast_for_missing_provided_moves() -> None:
@@ -322,7 +366,7 @@ def test_kaggle_bootstrap_entries_use_full_kaggle_rows(tmp_path: Path) -> None:
     assert ("scyther", 17, "silver", ["quick-attack", "leer"]) in entries
 
 
-def test_boss_coverage_warns_on_missing_learnable_pair_only(tmp_path: Path) -> None:
+def test_boss_coverage_accepts_kaggle_defined_move_without_learnable_pair(tmp_path: Path) -> None:
     boss_teams = [
         {
             "team_id": "boss:silver:bugsy",
@@ -363,4 +407,6 @@ def test_boss_coverage_warns_on_missing_learnable_pair_only(tmp_path: Path) -> N
     )
 
     report = pd.read_csv(tmp_path / "boss_silver_reference_coverage.csv")
-    assert set(report["severity"].tolist()) == {"WARN"}
+    assert set(report["severity"].tolist()) == {"OK"}
+    assert set(report["reason"].tolist()) == {"complete"}
+    assert set(report["learnable_pair_present"].tolist()) == {False}

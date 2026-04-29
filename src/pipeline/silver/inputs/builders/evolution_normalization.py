@@ -21,6 +21,15 @@ _SPECIAL_TRIGGERS = {
     "held-item",
 }
 
+_NATIONAL_DEX_GENERATION_CUTOFFS: tuple[tuple[int, int], ...] = (
+    (151, 1),
+    (251, 2),
+    (386, 3),
+    (493, 4),
+    (649, 5),
+    (721, 6),
+)
+
 
 def _normalize_trigger(trigger: Any) -> str:
     value = str(trigger or "level-up").strip().lower().replace("_", "-")
@@ -35,6 +44,24 @@ def _parse_level(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _parse_species_id(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _introduced_generation_from_species_id(species_id: Any) -> int | None:
+    parsed_id = _parse_species_id(species_id)
+    if parsed_id is None:
+        return None
+    for max_species_id, generation in _NATIONAL_DEX_GENERATION_CUTOFFS:
+        if parsed_id <= max_species_id:
+            return generation
+    return _NATIONAL_DEX_GENERATION_CUTOFFS[-1][1] + 1
 
 
 def _rules_look_like_pokeapi_species_rules(rules: dict[str, Any]) -> bool:
@@ -60,6 +87,10 @@ def build_level_up_evolution_index_from_species_rules(
                 "species": species,
                 "min_level_from_previous": _parse_level(info.get("min_level_from_previous")),
                 "special_evolution_conditions": list(info.get("special_evolution_conditions") or []),
+                "introduced_generation": _introduced_generation_from_species_id(
+                    info.get("species_id") or info.get("pokeapi_id")
+                )
+                or _parse_level(info.get("introduced_generation")),
             }
         )
 
@@ -84,6 +115,7 @@ def build_level_up_evolution_index_from_species_rules(
                     "to_species": candidate.get("species"),
                     "trigger": trigger,
                     "min_level": candidate.get("min_level_from_previous"),
+                    "introduced_generation": candidate.get("introduced_generation"),
                 }
             )
     return transitions
@@ -100,6 +132,7 @@ def normalize_species_for_level(
     *,
     member_level: int,
     evolution_rules: dict[str, list[dict[str, Any]]] | None,
+    target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Normalize a species to the highest legal level-up evolution at the given level."""
@@ -127,6 +160,11 @@ def normalize_species_for_level(
                 continue
             target = normalize_key_part(option.get("to_species") or option.get("evolves_to") or option.get("species"))
             if not target:
+                continue
+            introduced_generation = _introduced_generation_from_species_id(
+                option.get("species_id") or option.get("pokeapi_id")
+            ) or _parse_level(option.get("introduced_generation"))
+            if target_generation is not None and introduced_generation is not None and introduced_generation > target_generation:
                 continue
             trigger = _normalize_trigger(option.get("trigger") or option.get("evolution_trigger"))
             if trigger in _SPECIAL_TRIGGERS and not (allow_trade_evolutions and trigger == "trade"):
@@ -165,6 +203,7 @@ def normalize_candidate_pool_for_level(
     member_level: int,
     evolution_rules: dict[str, list[dict[str, Any]]] | None,
     legal_species: set[str] | None,
+    target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
 ) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
     """Apply level-up normalization and deduplicate the candidate pool."""
@@ -178,6 +217,7 @@ def normalize_candidate_pool_for_level(
             species,
             member_level=effective_level,
             evolution_rules=evolution_rules,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         if applied:
@@ -215,6 +255,7 @@ def legal_species_pool_for_level(
     *,
     member_level: int,
     evolution_rules: dict[str, list[dict[str, Any]]] | None,
+    target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
 ) -> set[str]:
     """Return the species set that remains legal after forced evolutions at the given level."""
@@ -225,6 +266,7 @@ def legal_species_pool_for_level(
             species,
             member_level=effective_level,
             evolution_rules=evolution_rules,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         if normalized_species:

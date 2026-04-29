@@ -1388,18 +1388,45 @@ def _build_evolution_rules_by_game_from_encounters(
 def _dedupe_bootstrap_entries(
     entries: list[tuple[str, int, str, list[str]]],
 ) -> list[tuple[str, int, str, list[str]]]:
-    deduped: list[tuple[str, int, str, list[str]]] = []
-    seen: set[tuple[str, int, str]] = set()
+    merged: dict[tuple[str, int, str], list[str]] = {}
     for species, level, game_version, moves in entries:
         key = (normalize_species_slug(species), max(1, int(level)), str(game_version).strip().lower())
-        if not key[0] or not key[2] or key in seen:
+        if not key[0] or not key[2]:
             continue
-        seen.add(key)
-        deduped.append((key[0], key[1], key[2], [normalize_move_name(move) for move in moves if normalize_move_name(move)]))
-    return deduped
+        slot = merged.setdefault(key, [])
+        for move in moves:
+            normalized_move = normalize_move_name(move)
+            if normalized_move and normalized_move not in slot:
+                slot.append(normalized_move)
+
+    return [
+        (species, level, game_version, moves)
+        for (species, level, game_version), moves in merged.items()
+    ]
 
 
-def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str, Any]]]) -> list[tuple[str, int, str, list[str]]]:
+def _build_kaggle_bootstrap_entries(
+    kaggle_rows_by_game: dict[str, list[dict[str, Any]]],
+    learnable_moves_df: pd.DataFrame | None = None,
+    move_reference_df: pd.DataFrame | None = None,
+) -> list[tuple[str, int, str, list[str]]]:
+    existing_pairs: set[tuple[str, str]] = set()
+    existing_moves: set[str] = set()
+    if learnable_moves_df is not None and not learnable_moves_df.empty:
+        required_columns = {"game_version", "pokemon_species"}
+        if required_columns.issubset(learnable_moves_df.columns):
+            for row in learnable_moves_df.to_dict(orient="records"):
+                game_version = str(row.get("game_version") or "").strip().lower()
+                species = normalize_species_slug(row.get("pokemon_species"))
+                if game_version and species:
+                    existing_pairs.add((game_version, species))
+    if move_reference_df is not None and not move_reference_df.empty and "move_name" in move_reference_df.columns:
+        existing_moves = {
+            normalize_move_name(row.get("move_name"))
+            for row in move_reference_df.to_dict(orient="records")
+            if normalize_move_name(row.get("move_name"))
+        }
+
     entries: list[tuple[str, int, str, list[str]]] = []
     for game_key, rows in kaggle_rows_by_game.items():
         game_norm = str(game_key or "").strip().lower()
@@ -1419,7 +1446,10 @@ def _build_kaggle_bootstrap_entries(kaggle_rows_by_game: dict[str, list[dict[str
                 normalize_move_name(row.get("Move 3", "")),
                 normalize_move_name(row.get("Move 4", "")),
             ]
-            entries.append((species, max(level, 1), game_norm, [move for move in moves if move]))
+            normalized_moves = [move for move in moves if move]
+            if (game_norm, species) in existing_pairs and all(move in existing_moves for move in normalized_moves):
+                continue
+            entries.append((species, max(level, 1), game_norm, normalized_moves))
     return entries
 
 
@@ -1474,6 +1504,24 @@ def _validate_kaggle_moves_in_move_reference(
             f"first_20=[{preview}] "
             f"diagnostics={diagnostics_path}"
         )
+
+
+def _collect_missing_bootstrap_move_hints(
+    entries: list[tuple[str, int, str, list[str]]],
+    move_reference_df: pd.DataFrame,
+) -> set[str]:
+    present_moves = {
+        normalize_move_name(row.get("move_name"))
+        for row in move_reference_df.to_dict(orient="records")
+        if normalize_move_name(row.get("move_name"))
+    }
+    required_moves = {
+        normalize_move_name(move)
+        for _, _, _, moves in entries
+        for move in moves
+        if normalize_move_name(move)
+    }
+    return {move for move in required_moves if move not in present_moves}
 
 
 def _build_boss_compact_tables(
@@ -1669,9 +1717,6 @@ def _validate_boss_reference_coverage(
             if not damage_class or not move_type:
                 severity = "ERROR"
                 reason = "missing_move_metadata"
-            elif not learnable_present:
-                severity = "WARN"
-                reason = "missing_learnable_pair"
 
         coverage_rows.append(
             {
@@ -1886,18 +1931,30 @@ def build_silver_from_bronze(
 
     move_reference_path = references_dir / "move_reference.parquet"
     learnable_moves_path = references_dir / "learnable_moves.parquet"
+    existing_move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    existing_learnable_moves_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
     starter_chain_species_by_game = _collect_starter_chain_species_by_game(games_config)
     starter_chain_entries = _starter_chain_bootstrap_entries(starter_chain_species_by_game)
     universal_starter_entries = _all_starter_family_bootstrap_entries(games_config)
-    universal_starter_species_by_game = _species_by_game_from_bootstrap_entries(universal_starter_entries)
+    starter_bootstrap_entries = _dedupe_bootstrap_entries(starter_chain_entries + universal_starter_entries)
+    universal_starter_species_by_game = {game: set(species) for game, species in starter_chain_species_by_game.items()}
     base_bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
-    kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(kaggle_boss_rows_by_game)
-    bootstrap_entries = _dedupe_bootstrap_entries(
-        base_bootstrap_entries + starter_chain_entries + universal_starter_entries + kaggle_bootstrap_entries
+    kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(
+        kaggle_boss_rows_by_game,
+        learnable_moves_df=existing_learnable_moves_df,
+        move_reference_df=existing_move_reference_df,
     )
-    if not move_reference_path.exists() or not learnable_moves_path.exists():
+    bootstrap_entries = _dedupe_bootstrap_entries(
+        base_bootstrap_entries + starter_bootstrap_entries + kaggle_bootstrap_entries
+    )
+    missing_bootstrap_moves = _collect_missing_bootstrap_move_hints(bootstrap_entries, existing_move_reference_df)
+    if (not move_reference_path.exists() or not learnable_moves_path.exists()) or missing_bootstrap_moves:
         bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
-        logger.info("[silver] bootstrap move refs entries=%s", bootstrap_stats.get("entry_count", 0))
+        logger.info(
+            "[silver] bootstrap move refs entries=%s missing_move_hints=%s",
+            bootstrap_stats.get("entry_count", 0),
+            len(missing_bootstrap_moves),
+        )
     if bootstrap_entries:
         persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
@@ -1915,15 +1972,16 @@ def build_silver_from_bronze(
     pd.DataFrame(missing_universal_starter_pairs).to_csv(diagnostics_dir / "starter_family_move_gaps.csv", index=False)
     if missing_starter_pairs or missing_universal_starter_pairs:
         logger.info(
-            "[silver/moves] starter coverage gaps detected; refreshing move cache via API starter_chain_missing=%s starter_family_missing=%s",
+            "[silver/moves] starter coverage gaps detected; refreshing starter-only move cache via API starter_chain_missing=%s starter_family_missing=%s",
             len(missing_starter_pairs),
             len(missing_universal_starter_pairs),
         )
-        bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
+        bootstrap_stats = bootstrap_move_reference_cache(starter_bootstrap_entries, silver_dir=silver_dir)
         logger.info(
-            "[silver/moves] starter coverage refresh complete entries=%s target_pairs=%s learnable_rows=%s",
+            "[silver/moves] starter coverage refresh complete entries=%s target_pairs=%s missing_target_pairs=%s learnable_rows=%s",
             bootstrap_stats.get("entry_count", 0),
             bootstrap_stats.get("target_pairs", 0),
+            bootstrap_stats.get("missing_target_pairs", 0),
             bootstrap_stats.get("learnable_rows", 0),
         )
         persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
@@ -2035,13 +2093,13 @@ def build_silver_from_bronze(
             boss_teams_by_game[game_version].append(team)
 
     evolution_rules_by_game = _build_evolution_rules_by_game_from_encounters(encounters_reference_df)
-    progression_source_teams_all = build_progression_source_teams_from_encounters(
+    progression_source_teams_seed = build_progression_source_teams_from_encounters(
         encounters_df=encounters_reference_df,
         bosses_df=simulatable_bosses_reference_df,
         progression_depth_context=progression_depth_context,
         evolution_rules_by_game=evolution_rules_by_game,
     )
-    progression_bootstrap_entries = _build_progression_bootstrap_entries(progression_source_teams_all)
+    progression_bootstrap_entries = _build_progression_bootstrap_entries(progression_source_teams_seed)
     expanded_bootstrap_entries = _dedupe_bootstrap_entries(bootstrap_entries + progression_bootstrap_entries)
     if len(expanded_bootstrap_entries) > len(bootstrap_entries):
         logger.info(
@@ -2050,18 +2108,29 @@ def build_silver_from_bronze(
             len(expanded_bootstrap_entries),
         )
         bootstrap_entries = expanded_bootstrap_entries
-        bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
-        logger.info(
-            "[silver/moves] progression expansion refresh complete entries=%s target_pairs=%s learnable_rows=%s",
-            bootstrap_stats.get("entry_count", 0),
-            bootstrap_stats.get("target_pairs", 0),
-            bootstrap_stats.get("learnable_rows", 0),
-        )
+        current_move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+        missing_progression_moves = _collect_missing_bootstrap_move_hints(bootstrap_entries, current_move_reference_df)
+        if missing_progression_moves:
+            bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
+            logger.info(
+                "[silver/moves] progression expansion refresh complete entries=%s target_pairs=%s learnable_rows=%s missing_move_hints=%s",
+                bootstrap_stats.get("entry_count", 0),
+                bootstrap_stats.get("target_pairs", 0),
+                bootstrap_stats.get("learnable_rows", 0),
+                len(missing_progression_moves),
+            )
         persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
         _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
 
     reference_context = load_reference_context(silver_dir=silver_dir)
+    progression_source_teams_all = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_reference_df,
+        bosses_df=simulatable_bosses_reference_df,
+        progression_depth_context=progression_depth_context,
+        evolution_rules_by_game=evolution_rules_by_game,
+        reference_context=reference_context,
+    )
     player_move_gap_df = _diagnose_player_missing_damaging_moves(
         progression_source_teams_all,
         reference_context,

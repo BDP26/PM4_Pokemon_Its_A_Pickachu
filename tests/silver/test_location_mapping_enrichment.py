@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 
 from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     _pick_encounters_for_version,
     _pick_species_for_version,
+    get_location_area_and_pokemon_maps,
     enrich_records_with_location_pokemon,
 )
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
@@ -40,6 +42,8 @@ def test_grouped_version_matching_prefers_group_before_all() -> None:
 
     assert _pick_species_for_version(species, "red") == ["pikachu"]
     assert _pick_encounters_for_version(encounters, "blue") == [{"species": "pikachu"}]
+    assert _pick_species_for_version(species, "yellow") == []
+    assert _pick_encounters_for_version(encounters, "yellow") == []
 
 
 def test_mapper_handles_generic_heading_and_blacklist_edge_case() -> None:
@@ -130,3 +134,32 @@ def test_enrichment_is_deterministic() -> None:
     enrich_records_with_location_pokemon(r2, location_pokemon_map)
 
     assert r1 == r2
+    assert r1[0]["reachable_location_pokemon"]["kanto-route-2"] == []
+    assert r1[0]["reachable_location_encounters"]["kanto-route-2"] == []
+
+
+def test_placeholder_location_slugs_are_not_counted_as_missing(tmp_path) -> None:
+    bronze_dir = tmp_path / "bronze"
+    silver_dir = tmp_path / "silver"
+    snapshot_path = bronze_dir / "pokeapi" / "location_pokemon_snapshot.json"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(json.dumps({"location_pokemon_map": {}}), encoding="utf-8")
+
+    area_map, location_pokemon_map = get_location_area_and_pokemon_maps(
+        ["cave-1", "route-1"],
+        silver_dir=silver_dir,
+        bronze_dir=bronze_dir,
+    )
+
+    diagnostics = json.loads((silver_dir / "_state" / "location_enrichment_diagnostics.json").read_text(encoding="utf-8"))
+
+    assert area_map["cave-1"] == []
+    assert location_pokemon_map["cave-1"]["all"] == []
+    assert diagnostics["location_errors"] == [{"location_slug": "route-1", "reason": "missing_in_bronze_snapshot"}]
+    assert diagnostics["placeholder_locations"] == [
+        {
+            "location_slug": "cave-1",
+            "reason": "missing_in_bronze_snapshot",
+            "expected_placeholder_slug": True,
+        }
+    ]

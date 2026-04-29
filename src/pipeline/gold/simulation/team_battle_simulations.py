@@ -480,14 +480,29 @@ def _get_move_profile(move_name: str, warnings: WarningCollector) -> tuple[MoveP
     )
 
 
+def _as_sequence(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        converted = tolist()
+        if isinstance(converted, list):
+            return converted
+        if isinstance(converted, tuple):
+            return list(converted)
+    return []
+
+
 def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
-    pokemon_entries = team.get("pokemon", [])
-    level_entries = team.get("levels", [])
-    move_entries = team.get("moves", [])
-    instance_entries = team.get("pokemon_instance_ids", [])
+    pokemon_entries = _as_sequence(team.get("pokemon", []))
+    level_entries = _as_sequence(team.get("levels", []))
+    move_entries = _as_sequence(team.get("moves", []))
+    instance_entries = _as_sequence(team.get("pokemon_instance_ids", []))
 
     members: list[dict[str, Any]] = []
-    if not isinstance(pokemon_entries, list):
+    if not pokemon_entries:
         return members
 
     for slot_idx, entry in enumerate(pokemon_entries[:DEFAULT_TEAM_MEMBER_LIMIT]):
@@ -497,25 +512,24 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
 
         raw_level = (
             level_entries[slot_idx]
-            if isinstance(level_entries, list) and slot_idx < len(level_entries)
+            if slot_idx < len(level_entries)
             else team.get("avg_level", 20)
         )
-        raw_moves = move_entries[slot_idx] if isinstance(move_entries, list) and slot_idx < len(move_entries) else []
+        raw_moves = move_entries[slot_idx] if slot_idx < len(move_entries) else []
 
         filtered_placeholders = 0
         moves: list[str] = []
         seen_moves: set[str] = set()
 
-        if isinstance(raw_moves, list):
-            for move in raw_moves:
-                normalized_move = _normalize_move_name(move)
-                if not normalized_move:
-                    filtered_placeholders += 1
-                    continue
-                if normalized_move in seen_moves:
-                    continue
-                seen_moves.add(normalized_move)
-                moves.append(normalized_move)
+        for move in _as_sequence(raw_moves):
+            normalized_move = _normalize_move_name(move)
+            if not normalized_move:
+                filtered_placeholders += 1
+                continue
+            if normalized_move in seen_moves:
+                continue
+            seen_moves.add(normalized_move)
+            moves.append(normalized_move)
 
         if filtered_placeholders > 0:
             logger.info(
@@ -532,7 +546,7 @@ def _team_members(team: dict[str, Any]) -> list[dict[str, Any]]:
                 "moves": moves,
                 "pokemon_instance_id": (
                     instance_entries[slot_idx]
-                    if isinstance(instance_entries, list) and slot_idx < len(instance_entries)
+                    if slot_idx < len(instance_entries)
                     else None
                 ),
             }

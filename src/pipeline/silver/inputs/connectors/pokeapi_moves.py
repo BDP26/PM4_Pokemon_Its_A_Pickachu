@@ -10,9 +10,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pokebase as pb
 
-from src.pipeline.common.io import write_parquet
+from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.silver.config.team_config import (
     FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
@@ -281,16 +282,57 @@ def bootstrap_move_reference_cache(
             if normalized:
                 required_moves.add(normalized)
 
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+    learnable_path = references_dir / "learnable_moves.parquet"
+    move_reference_path = references_dir / "move_reference.parquet"
+
+    existing_learnable_df = read_parquet(learnable_path) if learnable_path.exists() else pd.DataFrame()
+    existing_move_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+
+    existing_pairs: set[tuple[str, str]] = set()
+    untouched_learnable_rows: list[dict[str, Any]] = []
+    existing_target_rows_by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    if not existing_learnable_df.empty and {"game_version", "pokemon_species"}.issubset(existing_learnable_df.columns):
+        learnable_records = existing_learnable_df.to_dict(orient="records")
+        for row in learnable_records:
+            pair = (
+                str(row.get("game_version") or "").strip().lower(),
+                normalize_species_slug(row.get("pokemon_species")),
+            )
+            if not pair[0] or not pair[1]:
+                continue
+            existing_pairs.add(pair)
+            if pair in target_pairs:
+                existing_target_rows_by_pair.setdefault(pair, []).append(row)
+            else:
+                untouched_learnable_rows.append(row)
+
+    existing_move_rows_by_name: dict[str, dict[str, Any]] = {}
+    if not existing_move_df.empty and "move_name" in existing_move_df.columns:
+        for row in existing_move_df.to_dict(orient="records"):
+            move_name = normalize_move_name(row.get("move_name"))
+            if move_name:
+                existing_move_rows_by_name[move_name] = row
+
+    missing_pairs = sorted(target_pairs - existing_pairs)
     logger.info(
-        "[silver/moves] bootstrap fetching species_count=%s required_move_hints=%s",
+        "[silver/moves] bootstrap fetching species_count=%s missing_species_count=%s required_move_hints=%s",
         len(target_pairs),
+        len(missing_pairs),
         len(required_moves),
     )
 
-    learnable_rows: list[dict[str, Any]] = []
-    all_referenced_moves: set[str] = set(required_moves)
+    learnable_rows: list[dict[str, Any]] = list(untouched_learnable_rows)
+    all_referenced_moves: set[str] = set(existing_move_rows_by_name)
+    for rows in existing_target_rows_by_pair.values():
+        for row in rows:
+            move_name = normalize_move_name(row.get("move_name"))
+            if move_name:
+                all_referenced_moves.add(move_name)
+        learnable_rows.extend(rows)
 
-    for game_version, species_slug in sorted(target_pairs):
+    for game_version, species_slug in missing_pairs:
         move_levels = _api_learnable_move_levels_for_species(species_slug, game_version)
         logger.info(
             "[silver/moves] bootstrap species game_version=%s species=%s move_count=%s",
@@ -313,23 +355,20 @@ def bootstrap_move_reference_cache(
                 }
             )
 
-    move_rows: list[dict[str, Any]] = []
+    all_referenced_moves.update(required_moves)
+    move_rows_by_name = dict(existing_move_rows_by_name)
     for move_name in sorted(all_referenced_moves):
-        move_rows.append(_build_move_row_from_profile(move_name, _api_move_profile(move_name)))
+        if move_name in move_rows_by_name:
+            continue
+        move_rows_by_name[move_name] = _build_move_row_from_profile(move_name, _api_move_profile(move_name))
 
+    move_rows = [move_rows_by_name[move_name] for move_name in sorted(move_rows_by_name)]
     _validate_move_reference_rows(move_rows)
 
-    references_dir = silver_dir / "references"
-    references_dir.mkdir(parents=True, exist_ok=True)
-
     if learnable_rows:
-        write_parquet(
-            references_dir / "learnable_moves.parquet",
-            learnable_rows,
-            partition_cols=["game_version", "pokemon_species"],
-        )
+        write_parquet(learnable_path, learnable_rows, partition_cols=["game_version", "pokemon_species"])
     if move_rows:
-        write_parquet(references_dir / "move_reference.parquet", move_rows)
+        write_parquet(move_reference_path, move_rows)
 
     logger.info(
         "[silver/moves] bootstrap parquet write summary learnable_rows=%s move_rows=%s learnable_games=%s learnable_species=%s",
@@ -344,6 +383,7 @@ def bootstrap_move_reference_cache(
     return {
         "entry_count": len(entries),
         "target_pairs": len(target_pairs),
+        "missing_target_pairs": len(missing_pairs),
         "learnable_rows": len(learnable_rows),
         "move_rows": len(move_rows),
     }

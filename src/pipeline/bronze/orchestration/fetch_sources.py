@@ -172,9 +172,38 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
                     by_version_species[version_name].add(species)
                     by_version_species["all"].add(species)
                     details = detail.get("encounter_details", []) or [{}]
-                    entry = by_version_encounters[version_name].setdefault(species, {"species": species, "pokemon_url": pokemon_url, "level_min": None, "level_max": None, "encounter_chance_min": None, "encounter_chance_max": None, "capture_rate": None})
-                    all_entry = by_version_encounters["all"].setdefault(species, {"species": species, "pokemon_url": pokemon_url, "level_min": None, "level_max": None, "encounter_chance_min": None, "encounter_chance_max": None, "capture_rate": None})
+                    entry = by_version_encounters[version_name].setdefault(
+                        species,
+                        {
+                            "species": species,
+                            "pokemon_url": pokemon_url,
+                            "level_min": None,
+                            "level_max": None,
+                            "encounter_chance_min": None,
+                            "encounter_chance_max": None,
+                            "capture_rate": None,
+                            "encounter_methods": set(),
+                            "encounter_method_urls": set(),
+                        },
+                    )
+                    all_entry = by_version_encounters["all"].setdefault(
+                        species,
+                        {
+                            "species": species,
+                            "pokemon_url": pokemon_url,
+                            "level_min": None,
+                            "level_max": None,
+                            "encounter_chance_min": None,
+                            "encounter_chance_max": None,
+                            "capture_rate": None,
+                            "encounter_methods": set(),
+                            "encounter_method_urls": set(),
+                        },
+                    )
                     for point in details:
+                        method = point.get("method") or {}
+                        method_name = str(method.get("name") or "").strip()
+                        method_url = str(method.get("url") or "").strip()
                         for target in (entry, all_entry):
                             for key in ("min_level", "max_level", "chance"):
                                 value = point.get(key)
@@ -187,6 +216,10 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
                                 elif key == "chance":
                                     target["encounter_chance_min"] = value if target["encounter_chance_min"] is None else min(int(target["encounter_chance_min"]), value)
                                     target["encounter_chance_max"] = value if target["encounter_chance_max"] is None else max(int(target["encounter_chance_max"]), value)
+                            if method_name:
+                                cast(set[str], target["encounter_methods"]).add(method_name)
+                            if method_url:
+                                cast(set[str], target["encounter_method_urls"]).add(method_url)
             for version_name, species_set in by_version_species.items():
                 version_species[version_name].update(species_set)
             for version_name, species_map in by_version_encounters.items():
@@ -195,8 +228,26 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
             area_details[area_name] = {
                 "by_version": {k: sorted(v) for k, v in by_version_species.items() if k != "all"},
                 "all": sorted(by_version_species.get("all", set())),
-                "by_version_encounters": {k: sorted(v.values(), key=lambda x: str(x.get("species") or "")) for k, v in by_version_encounters.items() if k != "all"},
-                "all_encounters": sorted(by_version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or "")),
+                "by_version_encounters": {
+                    k: [
+                        {
+                            **entry,
+                            "encounter_methods": sorted(cast(set[str], entry.get("encounter_methods", set()))),
+                            "encounter_method_urls": sorted(cast(set[str], entry.get("encounter_method_urls", set()))),
+                        }
+                        for entry in sorted(v.values(), key=lambda x: str(x.get("species") or ""))
+                    ]
+                    for k, v in by_version_encounters.items()
+                    if k != "all"
+                },
+                "all_encounters": [
+                    {
+                        **entry,
+                        "encounter_methods": sorted(cast(set[str], entry.get("encounter_methods", set()))),
+                        "encounter_method_urls": sorted(cast(set[str], entry.get("encounter_method_urls", set()))),
+                    }
+                    for entry in sorted(by_version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or ""))
+                ],
             }
 
         for species_map in version_encounters.values():
@@ -209,8 +260,26 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
         payload[slug] = {
             "all": sorted(version_species.get("all", set())),
             "by_version": {k: sorted(v) for k, v in version_species.items() if k != "all"},
-            "all_encounters": sorted(version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or "")),
-            "by_version_encounters": {k: sorted(v.values(), key=lambda x: str(x.get("species") or "")) for k, v in version_encounters.items() if k != "all"},
+            "all_encounters": [
+                {
+                    **entry,
+                    "encounter_methods": sorted(cast(set[str], entry.get("encounter_methods", set()))),
+                    "encounter_method_urls": sorted(cast(set[str], entry.get("encounter_method_urls", set()))),
+                }
+                for entry in sorted(version_encounters.get("all", {}).values(), key=lambda x: str(x.get("species") or ""))
+            ],
+            "by_version_encounters": {
+                k: [
+                    {
+                        **entry,
+                        "encounter_methods": sorted(cast(set[str], entry.get("encounter_methods", set()))),
+                        "encounter_method_urls": sorted(cast(set[str], entry.get("encounter_method_urls", set()))),
+                    }
+                    for entry in sorted(v.values(), key=lambda x: str(x.get("species") or ""))
+                ]
+                for k, v in version_encounters.items()
+                if k != "all"
+            },
             "areas": sorted(area_names),
             "areas_detail": {name: area_details[name] for name in sorted(area_details)},
         }

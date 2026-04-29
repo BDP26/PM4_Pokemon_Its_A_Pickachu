@@ -55,6 +55,21 @@ MAX_SOURCE_TEAM_SIZE = 5
 EARLY_GAME_LEVEL_OFFSET = 6
 LATE_GAME_LEVEL_OFFSET = 1
 INVALID_NULLABLE_KEY_TOKENS = {"", "nan", "none", "null", "<na>", "na"}
+GAME_VERSION_TO_GENERATION = {
+    "red": 1,
+    "blue": 1,
+    "gold": 2,
+    "silver": 2,
+    "ruby": 3,
+    "sapphire": 3,
+    "diamond": 4,
+    "pearl": 4,
+    "black": 5,
+    "white": 5,
+    "black-white": 5,
+    "x": 6,
+    "y": 6,
+}
 
 
 def _normalize_nullable_key_part(value: Any) -> str | None:
@@ -121,6 +136,11 @@ def _effective_member_level(*, level_cap: int, encounter_level_max: int) -> int:
     capped_level_cap = max(1, int(level_cap or DEFAULT_MEMBER_LEVEL))
     capped_encounter_level = max(1, int(encounter_level_max or capped_level_cap))
     return min(capped_level_cap, capped_encounter_level)
+
+
+def _generation_for_game_version(game_version: str) -> int | None:
+    normalized = normalize_key_part(game_version)
+    return GAME_VERSION_TO_GENERATION.get(normalized)
 
 
 def _legacy_progression_depth_context_from_boss_teams(
@@ -286,6 +306,28 @@ def _rank_candidate_pool(
     return constrained, diagnostics
 
 
+def _filter_candidates_with_damaging_moves(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    level_cap: int,
+    game_version: str,
+    reference_context: MoveReferenceContext | None,
+) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
+    if reference_context is None:
+        return candidates, {"removed_no_damaging_moves": 0}
+
+    filtered: list[tuple[str, int, int, int]] = []
+    removed = 0
+    for species, chance_max, level_max, capture_rate in candidates:
+        effective_level = _effective_member_level(level_cap=level_cap, encounter_level_max=level_max)
+        if reference_context.damaging_moves(species, effective_level, game_version):
+            filtered.append((species, chance_max, level_max, capture_rate))
+            continue
+        removed += 1
+
+    return filtered, {"removed_no_damaging_moves": removed}
+
+
 def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build cumulative boss pools with incremental deltas."""
     pools: list[dict[str, Any]] = []
@@ -418,6 +460,7 @@ def build_progression_source_teams(
     boss_teams: list[dict[str, Any]],
     catch_pool_size: int = DEFAULT_CATCH_POOL_SIZE,
     evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    reference_context: MoveReferenceContext | None = None,
     allow_trade_evolutions: bool = False,
 ) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
@@ -433,12 +476,14 @@ def build_progression_source_teams(
         game_version = pool["game_version"]
         boss_name = pool["boss_name"]
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
+        target_generation = _generation_for_game_version(game_version)
         raw_candidates = list(pool["pool_candidates"])
         evolution_rules = evolution_rules_by_game.get(game_version, {})
         legal_species = legal_species_pool_for_level(
             raw_candidates,
             member_level=boss_level,
             evolution_rules=evolution_rules,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
@@ -446,10 +491,18 @@ def build_progression_source_teams(
             member_level=boss_level,
             evolution_rules=evolution_rules,
             legal_species=legal_species if legal_species else None,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         if legal_species:
             validate_candidate_pool(normalized_candidates, legal_species=legal_species, game_version=game_version)
+
+        normalized_candidates, move_diag = _filter_candidates_with_damaging_moves(
+            normalized_candidates,
+            level_cap=boss_level,
+            game_version=game_version,
+            reference_context=reference_context,
+        )
 
         candidate_pool, rank_diag = _rank_candidate_pool(
             normalized_candidates,
@@ -457,7 +510,7 @@ def build_progression_source_teams(
             pool_size=candidate_pool_size,
         )
         logger.debug(
-            "[silver/teams] candidate pool diagnostics game=%s boss=%s raw=%s game_filtered_removed=%s progression_filtered_removed=%s evolved=%s post_validation_removed=%s final=%s rank_pruned=%s",
+            "[silver/teams] candidate pool diagnostics game=%s boss=%s raw=%s game_filtered_removed=%s progression_filtered_removed=%s evolved=%s post_validation_removed=%s no_damage_removed=%s final=%s rank_pruned=%s",
             game_version,
             boss_name,
             len(raw_candidates),
@@ -465,6 +518,7 @@ def build_progression_source_teams(
             0,
             normalization_diag.get("transformed", 0),
             normalization_diag.get("removed_after_validation", 0),
+            move_diag.get("removed_no_damaging_moves", 0),
             len(candidate_pool),
             rank_diag.get("pruned", 0),
         )
@@ -529,6 +583,7 @@ def build_progression_source_teams_from_encounters(
     progression_depth_context: ProgressionDepthContext | None = None,
     catch_pool_size: int = DEFAULT_CATCH_POOL_SIZE,
     evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    reference_context: MoveReferenceContext | None = None,
     allow_trade_evolutions: bool = False,
 ) -> list[dict[str, Any]]:
     """Build player source teams using persisted Silver references only."""
@@ -686,10 +741,12 @@ def build_progression_source_teams_from_encounters(
         )
 
         evolution_rules = evolution_rules_by_game.get(game_version, {})
+        target_generation = _generation_for_game_version(game_version)
         legal_species = legal_species_pool_for_level(
             raw_candidates,
             member_level=player_level_cap,
             evolution_rules=evolution_rules,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
@@ -697,9 +754,17 @@ def build_progression_source_teams_from_encounters(
             member_level=player_level_cap,
             evolution_rules=evolution_rules,
             legal_species=legal_species if legal_species else None,
+            target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
         )
         validate_candidate_pool(normalized_candidates, legal_species=legal_species or raw_species, game_version=game_version)
+
+        normalized_candidates, move_diag = _filter_candidates_with_damaging_moves(
+            normalized_candidates,
+            level_cap=player_level_cap,
+            game_version=game_version,
+            reference_context=reference_context,
+        )
 
         candidate_pool, rank_diag = _rank_candidate_pool(
             normalized_candidates,
@@ -707,7 +772,7 @@ def build_progression_source_teams_from_encounters(
             pool_size=candidate_pool_size,
         )
         logger.debug(
-            "[silver/teams] per-boss final candidate count game=%s boss_id=%s boss_name=%s raw=%s final=%s evolved=%s removed=%s pruned=%s progression_depth=%.4f level_cap=%s offset=%s ace_level=%s",
+            "[silver/teams] per-boss final candidate count game=%s boss_id=%s boss_name=%s raw=%s final=%s evolved=%s removed=%s no_damage_removed=%s pruned=%s progression_depth=%.4f level_cap=%s offset=%s ace_level=%s",
             game_version,
             boss_id,
             boss_name,
@@ -715,6 +780,7 @@ def build_progression_source_teams_from_encounters(
             len(candidate_pool),
             normalization_diag.get("transformed", 0),
             normalization_diag.get("removed_after_validation", 0),
+            move_diag.get("removed_no_damaging_moves", 0),
             rank_diag.get("pruned", 0),
             progression.progression_depth,
             player_level_cap,

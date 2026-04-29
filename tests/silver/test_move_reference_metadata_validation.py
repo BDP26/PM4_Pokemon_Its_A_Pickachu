@@ -84,3 +84,78 @@ def test_move_reference_validation_rejects_incomplete_rows() -> None:
         assert "kings-shield" in message
     else:
         raise AssertionError("Expected ValueError for invalid move reference rows")
+
+
+def test_bootstrap_move_reference_preserves_existing_non_target_rows(tmp_path: Path, monkeypatch) -> None:
+    silver_dir = tmp_path / "silver"
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+
+    write_parquet(
+        references_dir / "move_reference.parquet",
+        [
+            {
+                "move_name": "thunder-shock",
+                "power": 40,
+                "raw_power": 40,
+                "damage_class": "special",
+                "type": "electric",
+                "accuracy": 100,
+                "pp": 30,
+                "effective_power": 40.0,
+                "power_handling": "direct_power",
+                "is_status_move": False,
+                "is_damage_move": True,
+                "is_null_power": False,
+            }
+        ],
+    )
+    write_parquet(
+        references_dir / "learnable_moves.parquet",
+        [
+            {
+                "game_version": "red",
+                "pokemon_species": "pikachu",
+                "move_name": "thunder-shock",
+                "learned_level": 1,
+                "learn_method": "level-up",
+            }
+        ],
+        partition_cols=["game_version", "pokemon_species"],
+    )
+
+    monkeypatch.setattr(
+        pokeapi_moves,
+        "_api_learnable_move_levels_for_species",
+        lambda species, game_version: {"vine-whip": 1} if (species, game_version) == ("bulbasaur", "red") else {},
+    )
+    monkeypatch.setattr(
+        pokeapi_moves,
+        "_api_move_profile",
+        lambda move_name: {
+            "move_name": move_name,
+            "power": 45,
+            "raw_power": 45,
+            "damage_class": "physical",
+            "type": "grass",
+            "accuracy": 100,
+            "pp": 25,
+            "effective_power": 45.0,
+            "power_handling": "direct_power",
+            "is_status_move": False,
+            "is_damage_move": True,
+            "is_null_power": False,
+        },
+    )
+
+    pokeapi_moves._clear_loaded_caches()
+    pokeapi_moves.bootstrap_move_reference_cache(
+        [("bulbasaur", 5, "red", [])],
+        silver_dir=silver_dir,
+    )
+
+    learnable_df = read_parquet(references_dir / "learnable_moves.parquet")
+    move_reference_df = read_parquet(references_dir / "move_reference.parquet")
+
+    assert set(learnable_df["pokemon_species"].tolist()) == {"pikachu", "bulbasaur"}
+    assert set(move_reference_df["move_name"].tolist()) == {"thunder-shock", "vine-whip"}

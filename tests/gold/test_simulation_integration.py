@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from src.pipeline.common.io import read_parquet, write_parquet
+from src.pipeline.gold.simulation import team_battle_simulations as sim_module
 from src.pipeline.gold.simulation.battle_seeds import build_battle_seeds
 from src.pipeline.gold.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 
@@ -73,3 +76,27 @@ def test_monte_carlo_consumes_gold_simulation_rows(tmp_path: Path) -> None:
     assert count == 1
     results = read_parquet(gold_sim / "monte_carlo_results.parquet")
     assert len(results) == 1
+
+
+def test_team_members_accept_numpy_array_columns() -> None:
+    team = {
+        "team_id": "player-team",
+        "avg_level": 10,
+        "pokemon": np.array(["squirtle", "pidgey"], dtype=object),
+        "levels": np.array([9, 8]),
+        "moves": np.array(
+            [
+                np.array(["bubble", "tackle"], dtype=object),
+                np.array(["gust"], dtype=object),
+            ],
+            dtype=object,
+        ),
+        "pokemon_instance_ids": np.array(["m1", "m2"], dtype=object),
+    }
+
+    members = sim_module._team_members(team)
+
+    assert len(members) == 2
+    assert members[0]["species"] == "squirtle"
+    assert members[0]["moves"] == ["bubble", "tackle"]
+    assert members[1]["pokemon_instance_id"] == "m2"

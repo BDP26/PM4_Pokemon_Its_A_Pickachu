@@ -121,6 +121,38 @@ def test_pokeapi_species_rules_can_be_used_directly_for_normalization() -> None:
     assert normalize_species_for_level("geodude", member_level=50, evolution_rules=pokeapi_species_rules)[0] == "graveler"
 
 
+def test_generation_aware_normalization_blocks_future_evolution_forms() -> None:
+    pokeapi_species_rules = {
+        "mr-mime": {
+            "species_name": "mr-mime",
+            "base_species": "mr-mime",
+            "evolution_stage": 1,
+            "species_id": 122,
+            "min_valid_level": None,
+            "min_level_from_previous": None,
+            "special_evolution_conditions": [],
+        },
+        "mr-rime": {
+            "species_name": "mr-rime",
+            "base_species": "mr-mime",
+            "evolution_stage": 2,
+            "species_id": 866,
+            "min_valid_level": 42,
+            "min_level_from_previous": 42,
+            "special_evolution_conditions": [],
+        },
+    }
+
+    normalized_species, _ = normalize_species_for_level(
+        "mr-mime",
+        member_level=50,
+        evolution_rules=pokeapi_species_rules,
+        target_generation=1,
+    )
+
+    assert normalized_species == "mr-mime"
+
+
 def _reference_context() -> MoveReferenceContext:
     return MoveReferenceContext(
         move_profiles={
@@ -395,3 +427,86 @@ def test_build_progression_source_teams_from_encounters_defaults_missing_ranking
 
     assert source_teams
     assert "missing optional ranking columns" in caplog.text
+
+
+def test_build_progression_source_teams_filters_species_without_damaging_moves_before_combo_generation() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "location": "route-1", "pokemon": "magikarp", "level_min": 5, "level_max": 10, "encounter_chance_max": 70, "capture_rate": 255, "methods": [], "game": "red"},
+            {"boss_id": "red-brock", "location": "route-1", "pokemon": "pidgey", "level_min": 4, "level_max": 8, "encounter_chance_max": 30, "capture_rate": 255, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "game_version": "red", "boss_name_canonical": "Brock", "boss_order": 1},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "brock", "avg_level": 12}]
+    reference_context = MoveReferenceContext(
+        move_profiles={
+            "splash": {"effective_power": 0, "damage_class": "status"},
+            "tackle": {"effective_power": 40, "damage_class": "physical"},
+        },
+        learnable_by_game_species={
+            ("red", "magikarp"): {"splash": 1},
+            ("red", "pidgey"): {"tackle": 1},
+        },
+    )
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+        reference_context=reference_context,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"pidgey"}
+
+
+def test_build_progression_source_teams_blocks_cross_generation_future_species() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-blaine", "location": "pokemon-mansion", "pokemon": "mr-mime", "level_min": 42, "level_max": 45, "encounter_chance_max": 100, "capture_rate": 45, "methods": [], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-blaine", "game_version": "red", "boss_name_canonical": "Blaine", "boss_order": 7},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "blaine", "avg_level": 47}]
+    evolution_rules_by_game = {
+        "red": {
+            "mr-mime": {
+                "species_name": "mr-mime",
+                "base_species": "mr-mime",
+                "evolution_stage": 1,
+                "species_id": 122,
+                "min_valid_level": None,
+                "min_level_from_previous": None,
+                "special_evolution_conditions": [],
+            },
+            "mr-rime": {
+                "species_name": "mr-rime",
+                "base_species": "mr-mime",
+                "evolution_stage": 2,
+                "species_id": 866,
+                "min_valid_level": 42,
+                "min_level_from_previous": 42,
+                "special_evolution_conditions": [],
+            },
+        }
+    }
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=1,
+        evolution_rules_by_game=evolution_rules_by_game,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"mr-mime"}

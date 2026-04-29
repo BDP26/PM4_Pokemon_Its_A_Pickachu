@@ -6,9 +6,7 @@ from typing import Any, NoReturn, cast
 
 import pandas as pd
 
-from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
-from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
-from src.pipeline.gold.simulation.progression_balancing import dynamic_level_gap_limits
+from src.pipeline.common.io import read_json, read_parquet, write_json, write_parquet
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
 from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.settings import (
@@ -21,9 +19,8 @@ from src.pipeline.settings import (
 
 logger = logging.getLogger(__name__)
 
-# Keep recommendations plausible relative to the current boss level.
-MAX_PLAYER_OVERLEVEL_GAP = 2
-MAX_PLAYER_UNDERLEVEL_GAP = 10
+_NON_YELLOW_EXCLUDED_VERSIONS = {"yellow"}
+_PLAUSIBILITY_GROUP_COLS = ["effective_game_version", "effective_boss_name", "starter_base"]
 
 
 class GoldContractError(ValueError):
@@ -36,11 +33,6 @@ _REQUIRED_MANIFEST_DATASET_FILES = (
     "simulation_inputs_teams",
     "source_team_members",
     "member_moveset_combos",
-)
-_OPTIONAL_MANIFEST_DATASET_FILES = (
-    "pokemon_reference",
-    "snapshot_available_pokemon",
-    "encounters",
 )
 _STRICT_SHARDED_DATASET_KEYS = {
     "simulation_inputs_teams",
@@ -62,32 +54,239 @@ def _raise_contract_error(code: str, message: str, *, dataset: str | None = None
 def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    required = {"player_avg_level", "boss_avg_level"}
+    required = {"player_avg_level", "boss_ace_level", "level_cap_offset"}
     if not required.issubset(df.columns):
         return df
 
-    player_depth = df["player_progression_depth"] if "player_progression_depth" in df.columns else pd.Series(0.0, index=df.index)
-    boss_depth = df["boss_progression_depth"] if "boss_progression_depth" in df.columns else pd.Series(0.0, index=df.index)
-    effective_depth = player_depth.fillna(boss_depth).fillna(0.0)
-    gap_limits = effective_depth.map(
-        lambda depth: dynamic_level_gap_limits(
-            depth,
-            base_max_overlevel=MAX_PLAYER_OVERLEVEL_GAP,
-            base_max_underlevel=MAX_PLAYER_UNDERLEVEL_GAP,
-        )
-    )
-    max_overlevels = gap_limits.map(lambda item: item[0])
-    max_underlevels = gap_limits.map(lambda item: item[1])
+    player_avg_level = pd.to_numeric(df["player_avg_level"], errors="coerce")
+    boss_ace_level = pd.to_numeric(df["boss_ace_level"], errors="coerce")
+    level_cap_offset = pd.to_numeric(df["level_cap_offset"], errors="coerce")
+    player_level_cap = boss_ace_level - level_cap_offset
 
-    level_mask = (
-        df["player_avg_level"].notna()
-        & df["boss_avg_level"].notna()
-        & (df["player_avg_level"] <= (df["boss_avg_level"] + max_overlevels))
-        & (df["player_avg_level"] >= (df["boss_avg_level"] - max_underlevels))
-    )
+    # Silver generates teams using a boss ace-level cap. Teams can be legally
+    # underleveled, so Gold should only reject rows that exceed that cap.
+    level_mask = player_avg_level.notna() & player_level_cap.notna() & (player_avg_level <= player_level_cap)
     filtered = df[level_mask].copy()
     # Fallback to the original frame if constraints remove all rows.
     return filtered if not filtered.empty else df
+
+
+def _supported_non_yellow_boss_starter_groups() -> pd.DataFrame:
+    records: list[dict[str, str]] = []
+    for game in get_games_config():
+        version = str(game.get("game_key") or "").strip().lower()
+        if not version or version in _NON_YELLOW_EXCLUDED_VERSIONS:
+            continue
+        starters = [str(starter).strip().lower() for starter in game.get("starter_choices", []) if str(starter).strip()]
+        bosses = [str(boss).strip().lower() for boss in game.get("bosses", []) if str(boss).strip()]
+        for boss_name in bosses:
+            for starter_base in starters:
+                records.append(
+                    {
+                        "game_version": version,
+                        "boss_name": boss_name,
+                        "starter_base": starter_base,
+                    }
+                )
+    return pd.DataFrame.from_records(records).drop_duplicates(ignore_index=True)
+
+
+def _build_plausibility_filter_diagnostics(
+    *,
+    joined_before_filter: pd.DataFrame,
+    joined_after_filter: pd.DataFrame,
+) -> pd.DataFrame:
+    expected = _supported_non_yellow_boss_starter_groups()
+    if expected.empty:
+        return pd.DataFrame(
+            columns=[
+                "game_version",
+                "boss_name",
+                "starter_base",
+                "rows_before_plausibility_filter",
+                "rows_after_plausibility_filter",
+                "rows_removed",
+                "rows_exceeding_level_cap",
+                "rows_missing_level_cap_metadata",
+                "status",
+                "removal_reason",
+            ]
+        )
+
+    before = joined_before_filter.copy()
+    after = joined_after_filter.copy()
+    for frame in (before, after):
+        if frame.empty:
+            continue
+        frame["effective_game_version"] = frame["effective_game_version"].astype(str).str.strip().str.lower()
+        frame["effective_boss_name"] = frame["effective_boss_name"].astype(str).str.strip().str.lower()
+        frame["starter_base"] = frame["starter_base"].astype(str).str.strip().str.lower()
+
+    before_counts = (
+        before.groupby(_PLAUSIBILITY_GROUP_COLS, as_index=False)
+        .size()
+        .rename(columns={"size": "rows_before_plausibility_filter"})
+    )
+    after_counts = (
+        after.groupby(_PLAUSIBILITY_GROUP_COLS, as_index=False)
+        .size()
+        .rename(columns={"size": "rows_after_plausibility_filter"})
+    )
+
+    exceed_counts = pd.DataFrame(columns=[*_PLAUSIBILITY_GROUP_COLS, "rows_exceeding_level_cap"])
+    missing_cap_counts = pd.DataFrame(columns=[*_PLAUSIBILITY_GROUP_COLS, "rows_missing_level_cap_metadata"])
+    if not before.empty:
+        player_avg_level = pd.to_numeric(before.get("player_avg_level"), errors="coerce")
+        boss_ace_level = pd.to_numeric(before.get("boss_ace_level"), errors="coerce")
+        level_cap_offset = pd.to_numeric(before.get("level_cap_offset"), errors="coerce")
+        player_level_cap = boss_ace_level - level_cap_offset
+        exceed_mask = player_avg_level.notna() & player_level_cap.notna() & (player_avg_level > player_level_cap)
+        missing_cap_mask = player_avg_level.notna() & player_level_cap.isna()
+        if bool(exceed_mask.any()):
+            exceed_counts = (
+                before.loc[exceed_mask]
+                .groupby(_PLAUSIBILITY_GROUP_COLS, as_index=False)
+                .size()
+                .rename(columns={"size": "rows_exceeding_level_cap"})
+            )
+        if bool(missing_cap_mask.any()):
+            missing_cap_counts = (
+                before.loc[missing_cap_mask]
+                .groupby(_PLAUSIBILITY_GROUP_COLS, as_index=False)
+                .size()
+                .rename(columns={"size": "rows_missing_level_cap_metadata"})
+            )
+
+    diagnostics = expected.rename(
+        columns={"game_version": "effective_game_version", "boss_name": "effective_boss_name"}
+    )
+    diagnostics = diagnostics.merge(before_counts, on=_PLAUSIBILITY_GROUP_COLS, how="left")
+    diagnostics = diagnostics.merge(after_counts, on=_PLAUSIBILITY_GROUP_COLS, how="left")
+    diagnostics = diagnostics.merge(exceed_counts, on=_PLAUSIBILITY_GROUP_COLS, how="left")
+    diagnostics = diagnostics.merge(missing_cap_counts, on=_PLAUSIBILITY_GROUP_COLS, how="left")
+
+    count_columns = [
+        "rows_before_plausibility_filter",
+        "rows_after_plausibility_filter",
+        "rows_exceeding_level_cap",
+        "rows_missing_level_cap_metadata",
+    ]
+    for column in count_columns:
+        diagnostics[column] = pd.to_numeric(diagnostics[column], errors="coerce").fillna(0).astype(int)
+    diagnostics["rows_removed"] = (
+        diagnostics["rows_before_plausibility_filter"] - diagnostics["rows_after_plausibility_filter"]
+    ).clip(lower=0)
+
+    diagnostics["status"] = "ok"
+    diagnostics.loc[diagnostics["rows_before_plausibility_filter"] == 0, "status"] = "no_valid_team_generated"
+    diagnostics.loc[
+        (diagnostics["rows_before_plausibility_filter"] > 0)
+        & (diagnostics["rows_after_plausibility_filter"] == 0),
+        "status",
+    ] = "all_rows_removed_by_level_cap"
+    diagnostics.loc[
+        (diagnostics["rows_after_plausibility_filter"] > 0) & (diagnostics["rows_removed"] > 0),
+        "status",
+    ] = "rows_removed_by_level_cap"
+
+    diagnostics["removal_reason"] = ""
+    diagnostics.loc[
+        diagnostics["status"] == "no_valid_team_generated",
+        "removal_reason",
+    ] = "no_valid_team_generated"
+    diagnostics.loc[
+        diagnostics["status"] == "all_rows_removed_by_level_cap",
+        "removal_reason",
+    ] = "all_rows_exceeded_silver_level_cap"
+    diagnostics.loc[
+        diagnostics["status"] == "rows_removed_by_level_cap",
+        "removal_reason",
+    ] = "some_rows_exceeded_silver_level_cap"
+    diagnostics.loc[
+        (diagnostics["rows_missing_level_cap_metadata"] > 0) & diagnostics["removal_reason"].eq(""),
+        "removal_reason",
+    ] = "missing_level_cap_metadata"
+
+    diagnostics = diagnostics.rename(
+        columns={"effective_game_version": "game_version", "effective_boss_name": "boss_name"}
+    ).sort_values(["game_version", "boss_name", "starter_base"]).reset_index(drop=True)
+    return diagnostics
+
+
+def _write_plausibility_filter_diagnostics(gold_dir: Path, diagnostics_df: pd.DataFrame) -> str:
+    debug_dir = gold_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    filename = "ranking_plausibility_filter_diagnostics.parquet"
+    write_parquet(debug_dir / filename, diagnostics_df)
+    return str(Path("debug") / filename)
+
+
+def _validate_non_yellow_starter_boss_coverage(
+    *,
+    boss_rank: pd.DataFrame,
+    diagnostics_df: pd.DataFrame,
+) -> None:
+    expected = _supported_non_yellow_boss_starter_groups()
+    if expected.empty:
+        return
+
+    if boss_rank.empty:
+        missing = expected.copy()
+    else:
+        actual = (
+            boss_rank[["effective_game_version", "effective_boss_name", "starter_base"]]
+            .drop_duplicates()
+            .rename(columns={"effective_game_version": "game_version", "effective_boss_name": "boss_name"})
+        )
+        actual["game_version"] = actual["game_version"].astype(str).str.strip().str.lower()
+        actual["boss_name"] = actual["boss_name"].astype(str).str.strip().str.lower()
+        actual["starter_base"] = actual["starter_base"].astype(str).str.strip().str.lower()
+        missing = expected.merge(actual, on=["game_version", "boss_name", "starter_base"], how="left", indicator=True)
+        missing = missing[missing["_merge"] == "left_only"].drop(columns="_merge")
+
+    if missing.empty:
+        return
+
+    diagnostic_subset = diagnostics_df[
+        [
+            "game_version",
+            "boss_name",
+            "starter_base",
+            "rows_before_plausibility_filter",
+            "rows_after_plausibility_filter",
+            "rows_removed",
+            "status",
+            "removal_reason",
+        ]
+    ]
+    missing = missing.merge(diagnostic_subset, on=["game_version", "boss_name", "starter_base"], how="left")
+    tolerated_statuses = {"no_valid_team_generated"}
+    tolerated_missing = missing[missing["status"].isin(tolerated_statuses)].copy()
+    blocking_missing = missing[~missing["status"].isin(tolerated_statuses)].copy()
+
+    if blocking_missing.empty:
+        logger.warning(
+            "[gold] starter/boss ranking coverage incomplete but tolerated missing_groups=%s statuses=%s",
+            len(tolerated_missing),
+            ",".join(sorted(set(tolerated_missing["status"].dropna().astype(str)))) or "unknown",
+        )
+        return
+
+    sample = ", ".join(
+        (
+            f"{row.game_version}/{row.boss_name}/{row.starter_base}"
+            f":status={row.status or 'unknown'}"
+            f":before={int(row.rows_before_plausibility_filter or 0)}"
+            f":after={int(row.rows_after_plausibility_filter or 0)}"
+        )
+        for row in blocking_missing.head(12).itertuples(index=False)
+    )
+    raise ValueError(
+        "[gold] non-Yellow starter/boss ranking coverage failed "
+        f"missing_groups={len(blocking_missing)}"
+        f" tolerated_missing_groups={len(tolerated_missing)}"
+        f" sample=[{sample}]"
+    )
 
 
 def _load_silver_manifest(silver_dir: Path) -> dict[str, Any]:
@@ -155,25 +354,9 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
                     )
                 resolved_files.append(candidate)
             return sorted(set(resolved_files))
-        rel_path = dataset_entry.get("file")
-        if isinstance(rel_path, str) and rel_path.strip():
-            path = silver_dir / cast(str, rel_path)
-            if not path.exists():
-                _raise_contract_error(
-                    "missing_dataset_file",
-                    "Regenerate Silver outputs so all strict contract files exist.",
-                    dataset=dataset_key,
-                    path=path,
-                )
-            logger.warning(
-                "[gold.contract] legacy_single_file_contract dataset=%s path=%s action=\"Prefer files[] sharded inputs in silver/manifest.json when rebuilding Silver outputs.\"",
-                dataset_key,
-                path,
-            )
-            return path
         _raise_contract_error(
             "missing_dataset_files",
-            f"Set datasets.{dataset_key}.files (preferred) or datasets.{dataset_key}.file in silver/manifest.json.",
+            f"Set datasets.{dataset_key}.files in silver/manifest.json.",
             dataset=dataset_key,
         )
 
@@ -215,105 +398,21 @@ def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], 
     return path
 
 
-def _resolve_snapshot_files_from_manifest(silver_dir: Path, manifest: dict[str, Any]) -> list[Path]:
-    datasets = _manifest_datasets(manifest)
-    boss_records = datasets.get("boss_records")
-    if not isinstance(boss_records, dict):
-        _raise_contract_error(
-            "missing_dataset_entry",
-            "Add datasets.boss_records with files[] in silver/manifest.json.",
-            dataset="boss_records",
-        )
-    files = boss_records.get("files")
-    if not isinstance(files, list) or not files:
-        _raise_contract_error(
-            "missing_snapshot_files",
-            "Populate datasets.boss_records.files with snapshot JSONL inputs.",
-            dataset="boss_records",
-        )
-
-    resolved: list[Path] = []
-    files_list = cast(list[Any], files)
-    for index, rel in enumerate(files_list):
-        if not isinstance(rel, str) or not rel.strip():
-            _raise_contract_error(
-                "invalid_snapshot_entry",
-                f"datasets.boss_records.files[{index}] must be a non-empty string path.",
-                dataset="boss_records",
-            )
-        path = silver_dir / rel
-        if not path.exists() or not path.is_file():
-            _raise_contract_error(
-                "missing_snapshot_file",
-                "Regenerate Silver snapshots and refresh manifest entries.",
-                dataset="boss_records",
-                path=path,
-            )
-        resolved.append(path)
-    snapshot_files = sorted(set(resolved))
-    if not snapshot_files:
-        _raise_contract_error(
-            "missing_snapshot_files",
-            "No valid snapshot files resolved from datasets.boss_records.files.",
-            dataset="boss_records",
-        )
-    return snapshot_files
-
-
 def _load_and_validate_gold_contract(silver_dir: Path) -> dict[str, Any]:
     manifest = _load_silver_manifest(silver_dir)
-    snapshot_files = _resolve_snapshot_files_from_manifest(silver_dir, manifest)
 
     required_files: dict[str, Path | list[Path]] = {}
     for dataset_key in _REQUIRED_MANIFEST_DATASET_FILES:
         required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
 
-    datasets = _manifest_datasets(manifest)
-    for dataset_key in _OPTIONAL_MANIFEST_DATASET_FILES:
-        if dataset_key not in datasets:
-            logger.warning(
-                "[gold.contract] optional_dataset_missing dataset=%s action=\"Rebuild Silver to include this dataset if required by downstream analyses.\"",
-                dataset_key,
-            )
-            continue
-        try:
-            required_files[dataset_key] = _resolve_required_manifest_file(silver_dir, manifest, dataset_key)
-        except GoldContractError as exc:
-            logger.warning("%s", str(exc))
-            continue
-
     logger.info(
-        "[gold.contract] validated snapshots=%s required_datasets=%s",
-        len(snapshot_files),
+        "[gold.contract] validated required_datasets=%s",
         ",".join(sorted(required_files.keys())),
     )
     return {
         "manifest": manifest,
-        "snapshot_files": snapshot_files,
         "required_files": required_files,
     }
-
-
-def _normalize_game_key_to_game_version(dataframe: pd.DataFrame, *, source_name: str) -> pd.DataFrame:
-    frame = dataframe.copy()
-    if "game_version" not in frame.columns and "game" in frame.columns:
-        frame = frame.rename(columns={"game": "game_version"})
-    if "game_version" not in frame.columns:
-        _raise_contract_error(
-            "missing_game_version_column",
-            f"{source_name} must contain a game_version (or legacy game) column.",
-            dataset="boss_records",
-        )
-
-    frame["game_version"] = frame["game_version"].astype(str).str.strip().str.lower()
-    empty_mask = frame["game_version"].eq("")
-    if bool(empty_mask.any()):
-        _raise_contract_error(
-            "invalid_game_version_values",
-            f"{source_name} contains empty game_version rows.",
-            dataset="boss_records",
-        )
-    return frame
 
 
 def _boss_order_lookup() -> dict[tuple[str, str], tuple[int, int]]:
@@ -369,9 +468,22 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         return []
     if "progression_depth" not in teams_df.columns:
         teams_df["progression_depth"] = None
+    if "boss_ace_level" not in teams_df.columns:
+        teams_df["boss_ace_level"] = None
+    if "level_cap_offset" not in teams_df.columns:
+        teams_df["level_cap_offset"] = None
 
     player_context = teams_df[
-        ["team_id", "game_version", "starter_base", "starter_evolved_species", "avg_level", "progression_depth"]
+        [
+            "team_id",
+            "game_version",
+            "starter_base",
+            "starter_evolved_species",
+            "avg_level",
+            "progression_depth",
+            "boss_ace_level",
+            "level_cap_offset",
+        ]
     ].rename(
         columns={"team_id": "player_team_id", "game_version": "player_game_version"}
     )
@@ -403,11 +515,39 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
 
     joined["boss_stage"] = joined.apply(_resolve_stage, axis=1)
     joined = joined[joined["starter_base"].notna() & joined["effective_game_version"].notna()].copy()
-    joined = _apply_level_plausibility_filter(joined)
-    if joined.empty:
-        return []
-
     outputs: list[str] = []
+    filtered_joined = _apply_level_plausibility_filter(joined)
+    diagnostics_df = _build_plausibility_filter_diagnostics(
+        joined_before_filter=joined,
+        joined_after_filter=filtered_joined,
+    )
+    outputs.append(_write_plausibility_filter_diagnostics(gold_dir, diagnostics_df))
+
+    joined = filtered_joined
+    if joined.empty:
+        return outputs
+
+    spark_joined = joined[
+        [
+            "scenario_id",
+            "player_team_id",
+            "boss_team_id",
+            "starter_base",
+            "starter_evolved_species",
+            "player_avg_level",
+            "boss_avg_level",
+            "effective_game_version",
+            "effective_boss_name",
+            "boss_stage",
+            "mc_win_rate",
+            "wins",
+            "losses",
+            "n_trials",
+            "degraded_data",
+            *([ "boss_sequence_id" ] if "boss_sequence_id" in joined.columns else []),
+            *([ "sequence_position" ] if "sequence_position" in joined.columns else []),
+        ]
+    ].copy()
 
     try:
         pyspark_sql = importlib.import_module("pyspark.sql")
@@ -429,7 +569,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         )
         spark.sparkContext.setLogLevel("WARN")
         try:
-            sdf = spark.createDataFrame(joined)
+            sdf = spark.createDataFrame(spark_joined)
 
             boss_rank = (
                 sdf.groupBy(*_STARTER_BOSS_GROUP_COLS)
@@ -450,6 +590,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             )
             boss_rank = boss_rank.withColumn("rank_in_boss_starter", F.row_number().over(boss_window))
             boss_rank_pdf = boss_rank.toPandas()
+            _validate_non_yellow_starter_boss_coverage(boss_rank=boss_rank_pdf, diagnostics_df=diagnostics_df)
             outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank_pdf))
 
             if "boss_sequence_id" in sdf.columns:
@@ -524,6 +665,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         )
     )
     boss_rank["rank_in_boss_starter"] = boss_rank.groupby(["effective_game_version", "effective_boss_name", "starter_base"]).cumcount() + 1
+    _validate_non_yellow_starter_boss_coverage(boss_rank=boss_rank, diagnostics_df=diagnostics_df)
     outputs.extend(_write_starter_boss_outputs(gold_dir, boss_rank))
 
     if "boss_sequence_id" in joined.columns and joined["boss_sequence_id"].notna().any():
@@ -577,82 +719,6 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         outputs.extend(_write_starter_sequence_outputs(gold_dir, sequence_rank))
 
     return outputs
-
-
-def _build_core_aggregations_with_spark(
-    silver_df: pd.DataFrame,
-    gold_dir: Path,
-) -> bool:
-    """Compute core gold aggregations with PySpark if available."""
-    try:
-        pyspark_sql = importlib.import_module("pyspark.sql")
-        pyspark_functions = importlib.import_module("pyspark.sql.functions")
-    except Exception:
-        logger.warning("[gold] pyspark not available; core aggregations will use pandas fallback")
-        return False
-
-    SparkSession = getattr(pyspark_sql, "SparkSession")
-    F = pyspark_functions
-
-    spark = None
-    try:
-        spark = (
-            SparkSession.builder
-            .appName("pokemon-gold-aggregations")
-            .master("local[*]")
-            .config("spark.driver.host", "127.0.0.1")
-            .config("spark.driver.bindAddress", "127.0.0.1")
-            .config("spark.ui.enabled", "false")
-            .getOrCreate()
-        )
-        spark.sparkContext.setLogLevel("WARN")
-
-        spark_df = spark.createDataFrame(silver_df)
-
-        progression_df = (
-            spark_df.orderBy("game_version", "part")
-            .groupBy("game_version")
-            .agg(
-                F.count("boss_name").alias("boss_steps"),
-                F.max("reachable_location_count").alias("max_reachable_locations"),
-                F.max(F.struct(F.col("part"), F.col("reachable_location_count"))).alias("_last_reachable"),
-            )
-            .select(
-                "game_version",
-                "boss_steps",
-                F.col("_last_reachable.reachable_location_count").alias("final_reachable_locations"),
-                "max_reachable_locations",
-            )
-            .orderBy(F.col("final_reachable_locations").desc())
-        )
-        progression_pdf = progression_df.toPandas().rename(columns={"game_version": "game"})
-        progression_pdf.to_csv(gold_dir / "game_progression_summary.csv", index=False)
-        logger.info("[gold] wrote game_progression_summary.csv rows=%s (spark)", len(progression_pdf))
-
-        location_popularity_df = (
-            spark_df.select("game_version", F.explode_outer("reachable_locations").alias("location_slug"))
-            .where(F.col("location_slug").isNotNull())
-            .groupBy("location_slug")
-            .agg(
-                F.countDistinct("game_version").alias("game_count"),
-                F.count("game_version").alias("total_mentions"),
-            )
-            .orderBy(F.col("game_count").desc(), F.col("total_mentions").desc())
-        )
-        write_parquet(gold_dir / "location_popularity.parquet", location_popularity_df.toPandas())
-        logger.info(
-            "[gold] wrote location_popularity.parquet rows=%s (spark)",
-            location_popularity_df.count(),
-        )
-        return True
-    except Exception as exc:
-        logger.warning("[gold] pyspark aggregation failed; using pandas fallback: %s", exc)
-        return False
-    finally:
-        if spark is not None:
-            spark.stop()
-
-
 def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_DIR) -> None:
     ensure_medallion_dirs()
     logger.info("[gold] build start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
@@ -662,9 +728,7 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     gold_simulation_dir.mkdir(parents=True, exist_ok=True)
 
     contract = _load_and_validate_gold_contract(silver_dir)
-    manifest_snapshot_files = contract["snapshot_files"]
     required_files: dict[str, Path | list[Path]] = contract["required_files"]
-    logger.info("[gold] using strict manifest snapshot inputs count=%s", len(manifest_snapshot_files))
 
     simulation_kwargs: dict[str, Any] = {
         "silver_dir": silver_dir,
@@ -677,47 +741,8 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     }
     run_gold_simulation_from_silver(**simulation_kwargs)
 
-    game_files = manifest_snapshot_files
+    gold_outputs: list[str] = []
 
-    logger.info("[gold] loading %s silver snapshot files", len(game_files))
-
-    frames: list[pd.DataFrame] = []
-    for file_path in game_files:
-        logger.info("[gold] reading %s", file_path.name)
-        frames.append(read_jsonl(file_path))
-
-    silver_df = pd.concat(frames, ignore_index=True)
-    silver_df = _normalize_game_key_to_game_version(silver_df, source_name="silver boss snapshots")
-    logger.info("[gold] loaded silver rows=%s", len(silver_df))
-
-    used_spark_for_core = _build_core_aggregations_with_spark(silver_df=silver_df, gold_dir=gold_dir)
-    if not used_spark_for_core:
-        progression = (
-            silver_df.sort_values(["game_version", "part"])
-            .groupby("game_version", as_index=False)
-            .agg(
-                boss_steps=("boss_name", "count"),
-                final_reachable_locations=("reachable_location_count", "last"),
-                max_reachable_locations=("reachable_location_count", "max"),
-            )
-            .sort_values("final_reachable_locations", ascending=False)
-        )
-        progression = progression.rename(columns={"game_version": "game"})
-        progression.to_csv(gold_dir / "game_progression_summary.csv", index=False)
-        logger.info("[gold] wrote game_progression_summary.csv rows=%s (pandas fallback)", len(progression))
-
-        exploded = silver_df[["game_version", "reachable_locations"]].explode("reachable_locations")
-        exploded = exploded.rename(columns={"reachable_locations": "location_slug"}).dropna()
-
-        location_popularity = (
-            exploded.groupby("location_slug", as_index=False)
-            .agg(game_count=("game_version", "nunique"), total_mentions=("game_version", "count"))
-            .sort_values(["game_count", "total_mentions"], ascending=False)
-        )
-        write_parquet(gold_dir / "location_popularity.parquet", location_popularity)
-        logger.info("[gold] wrote location_popularity.parquet rows=%s (pandas fallback)", len(location_popularity))
-
-    gold_outputs = ["game_progression_summary.csv", "location_popularity.parquet"]
     simulation_outputs = [
         "teams.parquet",
         "team_battle_simulations.parquet",
@@ -733,7 +758,12 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
         if not monte_carlo_df.empty:
             teams_path = gold_simulation_dir / "teams.parquet"
             if teams_path.exists():
-                teams_df = read_parquet(teams_path)[["team_id", "game_version", "avg_level"]]
+                teams_df = read_parquet(teams_path)
+                if "boss_ace_level" not in teams_df.columns:
+                    teams_df["boss_ace_level"] = None
+                if "level_cap_offset" not in teams_df.columns:
+                    teams_df["level_cap_offset"] = None
+                teams_df = teams_df[["team_id", "game_version", "avg_level", "boss_ace_level", "level_cap_offset"]]
                 player_teams_df = teams_df.rename(
                     columns={
                         "team_id": "player_team_id",
@@ -839,20 +869,14 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
     else:
         logger.warning("[gold] monte_carlo_results.parquet missing; skipping recommendation outputs")
 
-    web_payload_path = build_walkthrough_best_teams_payload(silver_dir=silver_dir, gold_dir=gold_dir)
-    if web_payload_path is not None:
-        gold_outputs.append(web_payload_path.name)
-
     manifest = {
-        "silver_game_files": [path.name for path in game_files],
-        "silver_records": int(len(silver_df)),
         "silver_manifest_used": True,
         "gold_simulation_dir": str(gold_simulation_dir.relative_to(gold_dir)),
         "gold_outputs": gold_outputs,
     }
     write_json(gold_dir / "manifest.json", manifest)
 
-    logger.info("[gold] wrote %s datasets from %s silver files", len(gold_outputs), len(game_files))
+    logger.info("[gold] wrote %s gold outputs", len(gold_outputs))
 
 if __name__ == "__main__":
     build_gold_from_silver()

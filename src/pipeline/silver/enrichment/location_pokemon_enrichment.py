@@ -8,6 +8,12 @@ from src.pipeline.common.io import read_json, write_json
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR
 
 
+_EXPECTED_PLACEHOLDER_LOCATION_SLUGS = {
+    "fork-in-the-road",
+    "roadblock",
+}
+
+
 def _normalize_version_key(version_name: str) -> str:
     return str(version_name or "").strip().lower()
 
@@ -15,8 +21,8 @@ def _normalize_version_key(version_name: str) -> str:
 def _version_candidates(game_version: str) -> list[str]:
     game = _normalize_version_key(game_version)
     if not game:
-        return ["all"]
-    return [game, "all"]
+        return []
+    return [game]
 
 
 def _version_matches(version_name: str, game_version: str) -> bool:
@@ -27,6 +33,17 @@ def _version_matches(version_name: str, game_version: str) -> bool:
     if key == game:
         return True
     if "-" in key and game in key.split("-"):
+        return True
+    return False
+
+
+def _is_expected_placeholder_slug(location_slug: str) -> bool:
+    slug = _normalize_version_key(location_slug)
+    if not slug:
+        return False
+    if slug in _EXPECTED_PLACEHOLDER_LOCATION_SLUGS:
+        return True
+    if slug.startswith("cave-") and slug.split("-")[-1].isdigit():
         return True
     return False
 
@@ -159,7 +176,7 @@ def _pick_species_for_version(version_to_species: dict[str, list[str]], game_ver
         if game_key in candidate_key.split("-") and version_to_species.get(candidate_key):
             return version_to_species[candidate_key]
 
-    return version_to_species.get("all", [])
+    return []
 
 
 def _pick_encounters_for_version(
@@ -177,7 +194,7 @@ def _pick_encounters_for_version(
         if game_key in candidate_key.split("-") and version_to_encounters.get(candidate_key):
             return version_to_encounters[candidate_key]
 
-    return version_to_encounters.get("all", [])
+    return []
 
 
 def _load_location_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
@@ -218,6 +235,7 @@ def get_location_area_and_pokemon_maps(
         "resolver": "location_pokemon_enrichment_v2",
         "locations_total": 0,
         "location_errors": [],
+        "placeholder_locations": [],
         "area_errors": [],
         "capture_rate_errors": [],
     }
@@ -227,7 +245,16 @@ def get_location_area_and_pokemon_maps(
     for slug in tqdm(unique_locations, desc="[silver] mapping locations + pokemon"):
         slug_payload = snapshot_map.get(slug)
         if not isinstance(slug_payload, dict):
-            diagnostics["location_errors"].append({"location_slug": slug, "reason": "missing_in_bronze_snapshot"})
+            if _is_expected_placeholder_slug(slug):
+                diagnostics["placeholder_locations"].append(
+                    {
+                        "location_slug": slug,
+                        "reason": "missing_in_bronze_snapshot",
+                        "expected_placeholder_slug": True,
+                    }
+                )
+            else:
+                diagnostics["location_errors"].append({"location_slug": slug, "reason": "missing_in_bronze_snapshot"})
             area_map[slug] = []
             location_pokemon_map[slug] = {"all": [], "by_version": {}, "all_encounters": [], "by_version_encounters": {}, "areas": [], "areas_detail": {}}
             continue
@@ -286,6 +313,7 @@ def enrich_records_with_location_pokemon(
         "resolver": "location_record_enrichment_v2",
         "records": len(records),
         "location_misses": [],
+        "placeholder_location_misses": [],
         "version_fallbacks": [],
     }
     for record in records:
@@ -298,40 +326,25 @@ def enrich_records_with_location_pokemon(
         for slug in record.get("reachable_locations", []):
             slug_payload = location_pokemon_map.get(slug, {})
             if not slug_payload:
-                diagnostics["location_misses"].append(
-                    {
-                        "boss_id": record.get("boss_id"),
-                        "version": version,
-                        "location_slug": slug,
-                        "reason": "missing_slug_payload",
-                    }
-                )
+                diagnostic_row = {
+                    "boss_id": record.get("boss_id"),
+                    "version": version,
+                    "location_slug": slug,
+                    "reason": "missing_slug_payload",
+                }
+                if _is_expected_placeholder_slug(str(slug)):
+                    diagnostics["placeholder_location_misses"].append(
+                        {
+                            **diagnostic_row,
+                            "expected_placeholder_slug": True,
+                        }
+                    )
+                else:
+                    diagnostics["location_misses"].append(diagnostic_row)
             version_to_species = slug_payload.get("by_version", {})
             species = _pick_species_for_version(version_to_species, version)
-            if not species:
-                species = slug_payload.get("all", [])
-                diagnostics["version_fallbacks"].append(
-                    {
-                        "boss_id": record.get("boss_id"),
-                        "version": version,
-                        "location_slug": slug,
-                        "kind": "species",
-                        "fallback": "all",
-                    }
-                )
             version_to_encounters = slug_payload.get("by_version_encounters", {})
             encounters = _pick_encounters_for_version(version_to_encounters, version)
-            if not encounters:
-                encounters = slug_payload.get("all_encounters", [])
-                diagnostics["version_fallbacks"].append(
-                    {
-                        "boss_id": record.get("boss_id"),
-                        "version": version,
-                        "location_slug": slug,
-                        "kind": "encounters",
-                        "fallback": "all_encounters",
-                    }
-                )
             area_details = slug_payload.get("areas_detail", {})
             area_encounters_for_record: dict[str, list[dict[str, Any]]] = {}
             if isinstance(area_details, dict):
@@ -339,8 +352,6 @@ def enrich_records_with_location_pokemon(
                     payload = area_details.get(area_slug, {})
                     by_ver = payload.get("by_version_encounters", {}) if isinstance(payload, dict) else {}
                     area_specific = _pick_encounters_for_version(by_ver, version)
-                    if not area_specific and isinstance(payload, dict):
-                        area_specific = payload.get("all_encounters", [])
                     if area_specific:
                         area_encounters_for_record[area_slug] = area_specific
             location_to_species[slug] = species
