@@ -394,6 +394,9 @@ def _load_boss_team_variants(
 ) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
     boss_teams_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "boss_teams")
     frame = read_parquet(boss_teams_path)
+    for column in ("team_variant", "variant_dimension", "starter_type", "harmonization_status", "gym_or_stage", "ability", "item"):
+        if column not in frame.columns:
+            frame[column] = None
     variants: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     grouped = frame.sort_values(["game_version", "boss_name", "boss_role", "team_variant", "pokemon_slot"]).groupby(
         ["game_version", "boss_name", "boss_role", "team_variant"],
@@ -432,20 +435,36 @@ def _load_boss_team_variants(
     return variants
 
 
+def _encounter_boss_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("boss:"):
+        raw = raw[5:]
+    parts = [part for part in raw.split(":") if part]
+    if len(parts) >= 3:
+        return ":".join(parts[:-1])
+    return raw
+
+
 def _load_encounter_maps(
     silver_dir: Path,
     silver_manifest: dict[str, Any],
-) -> dict[tuple[str, str], dict[str, Any]]:
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
     encounters_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "encounters")
-    frame = read_parquet(encounters_path)
+    if encounters_path.suffix == ".jsonl":
+        frame = read_jsonl(encounters_path)
+    else:
+        frame = read_parquet(encounters_path)
     if frame.empty:
-        return {}
+        return {}, {}
 
     encounter_maps: dict[tuple[str, str], dict[str, Any]] = {}
+    encounter_maps_by_name: dict[tuple[str, str], dict[str, Any]] = {}
     grouped = frame.groupby(["game", "boss_id"], dropna=False)
     for (game_version, boss_id), group in grouped:
         version = str(game_version or "").strip().lower()
-        boss_key = str(boss_id or "").strip().lower()
+        boss_key = _encounter_boss_key(boss_id)
         if not version or not boss_key:
             continue
         location_to_species: dict[str, set[str]] = {}
@@ -479,7 +498,10 @@ def _load_encounter_maps(
             "location_count": len(location_map),
             "reachable_pokemon_count": len(_invert_location_species_map(location_map)),
         }
-    return encounter_maps
+        boss_name_key = _norm_name(boss_key.split(":", 1)[1] if ":" in boss_key else boss_key)
+        if boss_name_key and (version, boss_name_key) not in encounter_maps_by_name:
+            encounter_maps_by_name[(version, boss_name_key)] = encounter_maps[(version, boss_key)]
+    return encounter_maps, encounter_maps_by_name
 
 
 def _team_combo_key(team_payload: dict[str, Any]) -> str:
@@ -745,50 +767,6 @@ def _dataset_path_from_manifest(silver_dir: Path, silver_manifest: dict[str, Any
     return path
 
 
-def _snapshot_files_from_manifest(silver_dir: Path, silver_manifest: dict[str, Any]) -> list[Path]:
-    datasets = silver_manifest.get("datasets")
-    if not isinstance(datasets, dict):
-        _raise_web_contract_error(
-            "missing_manifest_datasets",
-            "manifest.json requires a top-level datasets object.",
-            dataset="boss_records",
-        )
-    boss_records = datasets.get("boss_records")
-    if not isinstance(boss_records, dict):
-        _raise_web_contract_error(
-            "missing_dataset_entry",
-            "Add datasets.boss_records with files[] in silver/manifest.json.",
-            dataset="boss_records",
-        )
-    files = boss_records.get("files")
-    if not isinstance(files, list) or not files:
-        _raise_web_contract_error(
-            "missing_snapshot_files",
-            "Populate datasets.boss_records.files with snapshot JSONL inputs.",
-            dataset="boss_records",
-        )
-
-    resolved: list[Path] = []
-    files_list = cast(list[Any], files)
-    for index, rel_path in enumerate(files_list):
-        if not isinstance(rel_path, str) or not rel_path.strip():
-            _raise_web_contract_error(
-                "invalid_snapshot_entry",
-                f"datasets.boss_records.files[{index}] must be a non-empty string path.",
-                dataset="boss_records",
-            )
-        path = silver_dir / rel_path
-        if not path.exists() or not path.is_file():
-            _raise_web_contract_error(
-                "missing_snapshot_file",
-                "Regenerate Silver snapshots and refresh manifest entries.",
-                dataset="boss_records",
-                path=path,
-            )
-        resolved.append(path)
-    return sorted(set(resolved))
-
-
 def build_walkthrough_best_teams_payload(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
@@ -801,11 +779,6 @@ def build_walkthrough_best_teams_payload(
         return None
 
     silver_manifest = _load_silver_manifest(silver_dir)
-    try:
-        snapshot_paths = _snapshot_files_from_manifest(silver_dir, silver_manifest)
-    except GoldWebContractError as exc:
-        logger.warning("%s", str(exc))
-        return None
 
     best_df = read_parquet(best_by_boss_file)
     teams_df = pd.DataFrame(load_reconstructed_teams_from_silver(silver_dir=silver_dir))
@@ -967,114 +940,113 @@ def build_walkthrough_best_teams_payload(
     boss_metadata = _load_boss_metadata(silver_dir, silver_manifest)
     boss_team_payloads = _load_boss_team_payloads(silver_dir, silver_manifest, pokemon_reference)
     boss_team_variants = _load_boss_team_variants(silver_dir, silver_manifest, pokemon_reference)
-    encounter_maps = _load_encounter_maps(silver_dir, silver_manifest)
+    encounter_maps, encounter_maps_by_name = _load_encounter_maps(silver_dir, silver_manifest)
+
+    bosses_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "bosses")
+    bosses_df = read_parquet(bosses_path)
+    if bosses_df.empty:
+        return None
+    if "is_simulatable" in bosses_df.columns:
+        bosses_df = bosses_df[bosses_df["is_simulatable"].fillna(False).astype(bool)].copy()
+    if bosses_df.empty:
+        return None
 
     walkthroughs: dict[str, list[dict[str, Any]]] = {}
-
-    for snapshot_path in snapshot_paths:
-        version = snapshot_path.stem.replace("_boss_snapshots", "")
-        snapshot_df = read_jsonl(snapshot_path)
-        if snapshot_df.empty:
+    rows_by_version: dict[str, list[dict[str, Any]]] = {}
+    for boss_row in bosses_df.to_dict(orient="records"):
+        version = str(boss_row.get("game_version") or "").strip().lower()
+        boss_name = str(boss_row.get("boss_name_canonical") or boss_row.get("boss_name") or "").strip()
+        if not version or not boss_name:
             continue
 
-        rows_by_key: dict[str, dict[str, Any]] = {}
-        for snap in snapshot_df.sort_values(["boss_order", "part"]).to_dict(orient="records"):
-            boss_name = snap.get("boss_name")
-            if not isinstance(boss_name, str):
-                continue
+        boss_name_key = _norm_name(boss_name)
+        boss_meta = boss_metadata.get((version, boss_name_key), {})
+        encounter_payload = encounter_maps.get(
+            (version, _encounter_boss_key(boss_row.get("boss_id"))),
+            encounter_maps_by_name.get((version, boss_name_key), {}),
+        )
+        best = best_by_key.get((version, boss_name_key))
+        recommended_team = _team_payload_from_row(best) if best is not None else None
+        boss_team = _boss_team_payload_from_row(best) if best is not None else None
 
-            boss_order = snap.get("boss_order")
-            boss_key = f"{version}:{boss_order}:{_norm_name(boss_name)}"
+        top_rankings = rankings_by_key.get((version, boss_name_key), [])
+        all_ranked_teams: list[dict[str, Any]] = []
+        for ranking_row in top_rankings:
+            payload = _team_payload_from_row(ranking_row)
+            if payload is not None:
+                all_ranked_teams.append(payload)
+        all_ranked_teams = _dedupe_team_payloads(all_ranked_teams)
+        if all_ranked_teams:
+            recommended_team = all_ranked_teams[0]
 
-            best = best_by_key.get((version, _norm_name(boss_name)))
-            boss_meta = boss_metadata.get((version, _norm_name(boss_name)), {})
-            encounter_payload = encounter_maps.get((version, str(snap.get("boss_id") or "").strip().lower()), {})
-            recommended_team = None
-            if best is not None:
-                recommended_team = _team_payload_from_row(best)
-            boss_team = _boss_team_payload_from_row(best) if best is not None else None
+        variant_key = (version, boss_name_key, str(boss_meta.get("boss_role") or "").strip().lower())
+        variants = boss_team_variants.get(variant_key, [])
+        if boss_team is None and variants:
+            boss_team = variants[0]
 
-            top_rankings = rankings_by_key.get((version, _norm_name(boss_name)), [])
-            all_ranked_teams: list[dict[str, Any]] = []
-            for ranking_row in top_rankings:
-                payload = _team_payload_from_row(ranking_row)
-                if payload is not None:
-                    all_ranked_teams.append(payload)
-
-            all_ranked_teams = _dedupe_team_payloads(all_ranked_teams)
-            if all_ranked_teams:
-                recommended_team = all_ranked_teams[0]
-
-            top_teams_by_starter: dict[str, list[dict[str, Any]]] = {}
-            for starter in starter_choices_by_version.get(version, []):
-                starter_rank_rows = starter_rankings_by_key.get((version, _norm_name(boss_name), starter), [])
-                starter_teams: list[dict[str, Any]] = []
-                if starter_rank_rows:
-                    for starter_row in starter_rank_rows:
-                        payload = _team_payload_from_row(_to_common_starter_ranking_row(starter_row))
-                        if payload is not None:
-                            starter_teams.append(payload)
-                else:
-                    starter_family_norm = {_norm_name(member) for member in get_starter_family_members(starter)}
-                    starter_teams = [
-                        team_payload
-                        for team_payload in all_ranked_teams
-                        if any(
-                            _norm_name(str(member.get("name", ""))) in starter_family_norm
-                            for member in team_payload.get("pokemon", [])
-                            if isinstance(member, dict)
-                        )
-                    ]
-                top_teams_by_starter[starter] = _dedupe_team_payloads(starter_teams)[:5]
-
-            row = {
-                "boss_key": boss_key,
-                "boss_id": snap.get("boss_id"),
-                "boss_slug": snap.get("boss_slug"),
-                "boss_order": boss_order,
-                "part": snap.get("part"),
-                "boss_name": boss_name,
-                "heading": snap.get("heading"),
-                "location_count": encounter_payload.get("location_count", snap.get("reachable_location_count")),
-                "reachable_locations": snap.get("reachable_locations") if isinstance(snap.get("reachable_locations"), list) else [],
-                "reachable_pokemon_count": encounter_payload.get("reachable_pokemon_count", snap.get("reachable_pokemon_count")),
-                "reachable_location_pokemon": _coerce_location_pokemon_map(
-                    encounter_payload.get("reachable_location_pokemon", snap.get("reachable_location_pokemon"))
-                ),
-                "reachable_location_encounters": _coerce_location_encounters_map(
-                    encounter_payload.get("reachable_location_encounters", snap.get("reachable_location_encounters"))
-                ),
-                "catchable_locations_by_pokemon": encounter_payload.get("catchable_locations_by_pokemon", {}),
-                "encounter_summary": _build_encounter_summary(
-                    _coerce_location_encounters_map(
-                        encounter_payload.get("reachable_location_encounters", snap.get("reachable_location_encounters"))
+        top_teams_by_starter: dict[str, list[dict[str, Any]]] = {}
+        for starter in starter_choices_by_version.get(version, []):
+            starter_rank_rows = starter_rankings_by_key.get((version, boss_name_key, starter), [])
+            starter_teams: list[dict[str, Any]] = []
+            if starter_rank_rows:
+                for starter_row in starter_rank_rows:
+                    payload = _team_payload_from_row(_to_common_starter_ranking_row(starter_row))
+                    if payload is not None:
+                        starter_teams.append(payload)
+            else:
+                starter_family_norm = {_norm_name(member) for member in get_starter_family_members(starter)}
+                starter_teams = [
+                    team_payload
+                    for team_payload in all_ranked_teams
+                    if any(
+                        _norm_name(str(member.get("name", ""))) in starter_family_norm
+                        for member in team_payload.get("pokemon", [])
+                        if isinstance(member, dict)
                     )
-                ),
-                "boss_metadata": {
-                    **boss_meta,
-                    "special_tags": _boss_special_tags(boss_meta),
-                },
-                "boss_team": boss_team,
-                "boss_team_variants": boss_team_variants.get((version, _norm_name(boss_name), str(boss_meta.get("boss_role") or "").strip().lower()), []),
-                "recommended_team": recommended_team,
-                "top_teams": all_ranked_teams[:5],
-                "top_teams_by_starter": top_teams_by_starter,
-            }
+                ]
+            top_teams_by_starter[starter] = _dedupe_team_payloads(starter_teams)[:5]
 
-            location_map = row.get("reachable_location_pokemon")
-            if not row["catchable_locations_by_pokemon"]:
-                row["catchable_locations_by_pokemon"] = _invert_location_species_map(location_map if isinstance(location_map, dict) else {})
+        reachable_location_pokemon = _coerce_location_pokemon_map(encounter_payload.get("reachable_location_pokemon"))
+        reachable_location_encounters = _coerce_location_encounters_map(encounter_payload.get("reachable_location_encounters"))
+        row = {
+            "boss_key": str(boss_row.get("boss_id") or f"{version}:{boss_name_key}"),
+            "boss_id": _encounter_boss_key(boss_row.get("boss_id")) or str(boss_row.get("boss_id") or ""),
+            "boss_slug": _species_slug(boss_name),
+            "boss_order": boss_meta.get("boss_order") or boss_meta.get("progression_order") or boss_row.get("boss_order") or boss_row.get("progression_order"),
+            "part": 0,
+            "boss_name": boss_name,
+            "heading": boss_meta.get("location_name") or boss_row.get("location_name"),
+            "location_count": encounter_payload.get("location_count", len(reachable_location_pokemon)),
+            "reachable_locations": sorted(reachable_location_pokemon.keys()),
+            "reachable_pokemon_count": encounter_payload.get("reachable_pokemon_count"),
+            "reachable_location_pokemon": reachable_location_pokemon,
+            "reachable_location_encounters": reachable_location_encounters,
+            "catchable_locations_by_pokemon": encounter_payload.get("catchable_locations_by_pokemon", {}),
+            "encounter_summary": _build_encounter_summary(reachable_location_encounters),
+            "boss_metadata": {
+                **boss_meta,
+                "special_tags": _boss_special_tags(boss_meta),
+            },
+            "boss_team": boss_team,
+            "boss_team_variants": variants,
+            "recommended_team": recommended_team,
+            "top_teams": all_ranked_teams[:5],
+            "top_teams_by_starter": top_teams_by_starter,
+        }
+        if not row["reachable_pokemon_count"]:
+            row["reachable_pokemon_count"] = len(_invert_location_species_map(reachable_location_pokemon))
+        if not row["catchable_locations_by_pokemon"]:
+            row["catchable_locations_by_pokemon"] = _invert_location_species_map(reachable_location_pokemon)
+        rows_by_version.setdefault(version, []).append(row)
 
-            existing = rows_by_key.get(boss_key)
-            if existing is None or (row.get("part") or 0) < (existing.get("part") or 0):
-                rows_by_key[boss_key] = row
-
+    for version, rows in rows_by_version.items():
         walkthroughs[version] = sorted(
-            rows_by_key.values(),
+            rows,
             key=lambda item: (
                 item.get("boss_order") or 0,
-                item.get("part") or 0,
+                str((item.get("boss_metadata") or {}).get("boss_role") or ""),
                 str(item.get("boss_name") or ""),
+                str(item.get("boss_key") or ""),
             ),
         )
 

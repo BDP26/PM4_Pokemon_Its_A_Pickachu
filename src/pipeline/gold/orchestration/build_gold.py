@@ -7,6 +7,7 @@ from typing import Any, NoReturn, cast
 import pandas as pd
 
 from src.pipeline.common.io import read_json, read_parquet, write_json, write_parquet
+from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
 from src.pipeline.silver.config.game_config import get_games_config
 from src.pipeline.settings import (
@@ -868,6 +869,10 @@ def build_gold_from_silver(silver_dir: Path = SILVER_DIR, gold_dir: Path = GOLD_
             logger.warning("[gold] monte_carlo_results.parquet is empty; skipping recommendation outputs")
     else:
         logger.warning("[gold] monte_carlo_results.parquet missing; skipping recommendation outputs")
+
+    web_payload_path = build_walkthrough_best_teams_payload(silver_dir=silver_dir, gold_dir=gold_dir)
+    if web_payload_path is not None:
+        gold_outputs.append(web_payload_path.name)
 
     manifest = {
         "silver_manifest_used": True,
