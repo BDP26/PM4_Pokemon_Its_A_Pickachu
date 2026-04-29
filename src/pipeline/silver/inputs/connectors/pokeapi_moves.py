@@ -8,6 +8,7 @@ Design:
 
 import logging
 from pathlib import Path
+import shelve
 from typing import Any
 
 import pandas as pd
@@ -30,6 +31,65 @@ _MOVE_PROFILE_CACHE: dict[str, dict[str, Any]] = {}
 _LEARNABLE_BY_GAME_SPECIES: dict[tuple[str, str], dict[str, int]] = {}
 _LEARNABLE_CACHE: dict[tuple[str, int, str], tuple[str, ...]] = {}
 _CACHE_SILVER_DIR: str | None = None
+_OFFLINE_MOVE_PROFILE_SEED: dict[str, dict[str, Any]] = {
+    # These Gen 6 Kaggle boss moves are required by the active repo build
+    # targets and are missing from the persisted move_reference parquet.
+    "boomburst": {
+        "move_name": "boomburst",
+        "power": 140,
+        "raw_power": 140,
+        "damage_class": "special",
+        "type": "normal",
+        "accuracy": 100,
+        "pp": 10,
+    },
+    "bullet-punch": {
+        "move_name": "bullet-punch",
+        "power": 40,
+        "raw_power": 40,
+        "damage_class": "physical",
+        "type": "steel",
+        "accuracy": 100,
+        "pp": 30,
+    },
+    "dazzling-gleam": {
+        "move_name": "dazzling-gleam",
+        "power": 80,
+        "raw_power": 80,
+        "damage_class": "special",
+        "type": "fairy",
+        "accuracy": 100,
+        "pp": 10,
+    },
+    "electric-terrain": {
+        "move_name": "electric-terrain",
+        "power": None,
+        "raw_power": None,
+        "damage_class": "status",
+        "type": "electric",
+        "accuracy": None,
+        "pp": 10,
+    },
+    "frost-breath": {
+        "move_name": "frost-breath",
+        "power": 60,
+        "raw_power": 60,
+        "damage_class": "special",
+        "type": "ice",
+        "accuracy": 90,
+        "pp": 10,
+    },
+    "infestation": {
+        "move_name": "infestation",
+        "power": 20,
+        "raw_power": 20,
+        "damage_class": "special",
+        "type": "bug",
+        "accuracy": 100,
+        "pp": 20,
+    },
+}
+_POKEBASE_CACHE_PATH = Path.home() / ".cache" / "pokebase" / "api.cache"
 
 
 def _normalize_learned_level(raw_level: Any) -> int:
@@ -190,8 +250,100 @@ def _build_move_row_from_profile(move_name: str, profile: dict[str, Any]) -> dic
     return row
 
 
+def _offline_move_profile(move_name: str) -> dict[str, Any] | None:
+    normalized = normalize_move_name(move_name)
+    profile = _OFFLINE_MOVE_PROFILE_SEED.get(normalized)
+    if profile is None:
+        return None
+
+    damage_class = str(profile.get("damage_class") or "").strip().lower()
+    raw_power = profile.get("raw_power", profile.get("power"))
+    effective_power, power_handling = resolve_effective_power(
+        move_name=normalized,
+        power=raw_power,
+        damage_class=damage_class,
+    )
+    return {
+        "move_name": normalized,
+        "power": profile.get("power"),
+        "raw_power": raw_power,
+        "damage_class": damage_class,
+        "type": str(profile.get("type") or "").strip().lower() or None,
+        "accuracy": profile.get("accuracy"),
+        "pp": profile.get("pp"),
+        "effective_power": effective_power,
+        "power_handling": power_handling,
+        "is_status_move": damage_class == "status",
+        "is_damage_move": effective_power > 0,
+        "is_null_power": raw_power is None,
+    }
+
+
+def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any] | None:
+    cache_candidates = [_POKEBASE_CACHE_PATH, *_POKEBASE_CACHE_PATH.parent.glob(f"{_POKEBASE_CACHE_PATH.name}*")]
+    if not any(path.exists() for path in cache_candidates):
+        return None
+
+    uri = f"{endpoint.strip('/')}/"
+    if resource_name_or_id is not None:
+        if isinstance(resource_name_or_id, str):
+            listing = _cached_pokebase_payload(endpoint)
+            results = listing.get("results", []) if isinstance(listing, dict) else []
+            resource_id = None
+            for row in results:
+                if str(row.get("name") or "").strip().lower() == resource_name_or_id.strip().lower():
+                    url = str(row.get("url") or "")
+                    parts = [part for part in url.split("/") if part]
+                    if parts:
+                        try:
+                            resource_id = int(parts[-1])
+                        except ValueError:
+                            resource_id = None
+                    break
+            if resource_id is None:
+                return None
+        else:
+            resource_id = int(resource_name_or_id)
+        uri = f"{endpoint.strip('/')}/{resource_id}/"
+
+    try:
+        with shelve.open(str(_POKEBASE_CACHE_PATH), flag="r") as cache:
+            payload = cache.get(uri)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _api_move_profile(move_name: str) -> dict[str, Any]:
     normalized = normalize_move_name(move_name)
+    offline_profile = _offline_move_profile(normalized)
+    if offline_profile is not None:
+        return offline_profile
+    cached_move = _cached_pokebase_payload("move", normalized)
+    if cached_move is not None:
+        raw_power = cached_move.get("power")
+        damage_class = str(((cached_move.get("damage_class") or {}) if isinstance(cached_move.get("damage_class"), dict) else {}).get("name") or "").strip().lower()
+        move_type = str(((cached_move.get("type") or {}) if isinstance(cached_move.get("type"), dict) else {}).get("name") or "").strip().lower()
+        if damage_class and move_type:
+            effective_power, power_handling = resolve_effective_power(
+                move_name=normalized,
+                power=raw_power,
+                damage_class=damage_class,
+            )
+            return {
+                "move_name": normalized,
+                "power": raw_power,
+                "raw_power": raw_power,
+                "damage_class": damage_class,
+                "type": move_type,
+                "accuracy": cached_move.get("accuracy"),
+                "pp": cached_move.get("pp"),
+                "effective_power": effective_power,
+                "power_handling": power_handling,
+                "is_status_move": damage_class == "status",
+                "is_damage_move": effective_power > 0,
+                "is_null_power": raw_power is None,
+            }
     try:
         move = pb.move(normalized)
     except Exception as exc:  # noqa: BLE001
@@ -231,30 +383,48 @@ def _api_learnable_move_levels_for_species(species: str, game_version: str) -> d
     species_slug = normalize_species_slug(species)
     version_group = GAME_TO_VERSION_GROUP.get(game_version, game_version)
 
-    resolved_poke = None
+    resolved_payload = None
     for candidate in _species_lookup_candidates(species_slug):
+        cached_payload = _cached_pokebase_payload("pokemon", candidate)
+        if cached_payload is not None:
+            resolved_payload = cached_payload
+            break
         try:
-            resolved_poke = pb.pokemon(candidate)
+            resolved_payload = pb.pokemon(candidate)
             break
         except Exception:
             continue
 
-    if resolved_poke is None:
+    if resolved_payload is None:
         return {}
 
     discovered: dict[str, int] = {}
-    for move_slot in getattr(resolved_poke, "moves", []):
-        move_name = normalize_move_name(getattr(getattr(move_slot, "move", None), "name", "") or "")
+    move_slots = getattr(resolved_payload, "moves", None)
+    if move_slots is None and isinstance(resolved_payload, dict):
+        move_slots = resolved_payload.get("moves", [])
+    for move_slot in move_slots or []:
+        if isinstance(move_slot, dict):
+            move_name = normalize_move_name(((move_slot.get("move") or {}) if isinstance(move_slot.get("move"), dict) else {}).get("name") or "")
+            details_iter = move_slot.get("version_group_details", [])
+        else:
+            move_name = normalize_move_name(getattr(getattr(move_slot, "move", None), "name", "") or "")
+            details_iter = getattr(move_slot, "version_group_details", [])
         if not move_name:
             continue
-        for detail in getattr(move_slot, "version_group_details", []):
-            detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "").strip().lower()
+        for detail in details_iter:
+            if isinstance(detail, dict):
+                detail_group = str(((detail.get("version_group") or {}) if isinstance(detail.get("version_group"), dict) else {}).get("name") or "").strip().lower()
+                learn_method = str(((detail.get("move_learn_method") or {}) if isinstance(detail.get("move_learn_method"), dict) else {}).get("name") or "").strip().lower()
+                learned_at_raw = detail.get("level_learned_at")
+            else:
+                detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "").strip().lower()
+                learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "").strip().lower()
+                learned_at_raw = getattr(detail, "level_learned_at", None)
             if detail_group != version_group:
                 continue
-            learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "").strip().lower()
             if learn_method != "level-up":
                 continue
-            learned_at = _normalize_learned_level(getattr(detail, "level_learned_at", None))
+            learned_at = _normalize_learned_level(learned_at_raw)
             discovered[move_name] = min(discovered.get(move_name, learned_at), learned_at)
 
     return discovered
@@ -458,6 +628,8 @@ def persist_move_reference_cache(
 ) -> dict[str, int]:
     """Persist from already-materialized parquet caches only."""
     _ensure_parquet_cache_loaded(silver_dir=silver_dir)
+    references_dir = silver_dir / "references"
+    move_reference_path = references_dir / "move_reference.parquet"
 
     target_pairs: set[tuple[str, str]] = set()
     required_moves: set[str] = set()
@@ -506,14 +678,23 @@ def persist_move_reference_cache(
                 }
             )
 
-    move_rows: list[dict[str, Any]] = []
+    existing_move_rows_by_name: dict[str, dict[str, Any]] = {}
+    existing_move_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    if not existing_move_df.empty and "move_name" in existing_move_df.columns:
+        for row in existing_move_df.to_dict(orient="records"):
+            move_name = normalize_move_name(row.get("move_name"))
+            if move_name:
+                existing_move_rows_by_name[move_name] = row
+
+    move_rows_by_name = dict(existing_move_rows_by_name)
     for move_name in sorted(all_referenced_moves):
         profile = _move_profile(move_name, silver_dir=silver_dir)
-        move_rows.append(_build_move_row_from_profile(move_name, profile))
+        move_rows_by_name[move_name] = _build_move_row_from_profile(move_name, profile)
+
+    move_rows = [move_rows_by_name[move_name] for move_name in sorted(move_rows_by_name)]
 
     _validate_move_reference_rows(move_rows)
 
-    references_dir = silver_dir / "references"
     references_dir.mkdir(parents=True, exist_ok=True)
 
     if learnable_rows:

@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src.pipeline.silver.orchestration import build_silver
 from src.pipeline.silver.orchestration.build_silver import (
     _build_enriched_pokemon_profiles,
     _build_evolution_rules_by_game_from_encounters,
@@ -165,6 +166,38 @@ def test_enriched_profiles_ignore_nan_required_species(tmp_path: Path) -> None:
 
     assert set(profiles_df["pokemon_species"].tolist()) == {"snivy"}
     assert diagnostics == []
+
+
+def test_enriched_profiles_use_cached_pokebase_payloads_before_http(tmp_path: Path, monkeypatch) -> None:
+    def _cached_resource(endpoint: str, resource_name_or_id=None):
+        if endpoint == "pokemon" and resource_name_or_id == "snivy":
+            return _fake_payload("snivy", 495, species="snivy", is_default=True)
+        if endpoint == "pokemon-species" and resource_name_or_id == "snivy":
+            return {
+                "name": "snivy",
+                "is_legendary": False,
+                "is_mythical": False,
+                "varieties": [{"is_default": True, "pokemon": {"name": "snivy"}}],
+            }
+        return None
+
+    monkeypatch.setattr(build_silver, "_cached_pokebase_resource", _cached_resource)
+
+    def _fail_http_session():
+        raise AssertionError("HTTP session should not be constructed when cached Pokebase payloads exist")
+
+    monkeypatch.setattr(build_silver, "build_session", _fail_http_session)
+
+    profiles_df, diagnostics = _build_enriched_pokemon_profiles(
+        {"snivy": {"name": "snivy"}},
+        {"snivy"},
+        silver_dir=tmp_path,
+    )
+
+    assert diagnostics == []
+    profile = profiles_df.iloc[0].to_dict()
+    assert profile["pokemon_species"] == "snivy"
+    assert profile["resolved_pokeapi_id"] == 495
 
 
 def test_progression_source_team_boss_target_validation_rejects_unknown_boss_ids() -> None:
@@ -381,6 +414,23 @@ def test_enriched_profiles_prefer_cached_parquet_without_http(monkeypatch, tmp_p
     assert row["pokemon_species"] == "aegislash"
     assert row["requested_pokemon_name"] == "aegislash"
     assert row["resolved_pokemon_name"] == "aegislash-shield"
+
+
+def test_enriched_profiles_use_offline_seed_for_missing_default_form_species(tmp_path: Path) -> None:
+    profiles_df, diagnostics = _build_enriched_pokemon_profiles(
+        all_pokemon_references={},
+        required_species={"aegislash", "gourgeist", "jellicent", "meowstic", "pyroar"},
+        silver_dir=tmp_path,
+    )
+
+    assert diagnostics == []
+    assert set(profiles_df["pokemon_species"]) == {"aegislash", "gourgeist", "jellicent", "meowstic", "pyroar"}
+    rows = {row["pokemon_species"]: row for row in profiles_df.to_dict(orient="records")}
+    assert rows["aegislash"]["resolved_pokemon_name"] == "aegislash-shield"
+    assert rows["gourgeist"]["resolved_pokemon_name"] == "gourgeist-average"
+    assert rows["jellicent"]["resolved_pokemon_name"] == "jellicent"
+    assert rows["meowstic"]["resolved_pokemon_name"] == "meowstic-male"
+    assert rows["pyroar"]["resolved_pokemon_name"] == "pyroar-male"
 
 
 def test_build_evolution_rules_by_game_from_encounters_collects_species_rules(monkeypatch) -> None:

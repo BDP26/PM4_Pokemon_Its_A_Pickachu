@@ -78,6 +78,68 @@ def test_monte_carlo_consumes_gold_simulation_rows(tmp_path: Path) -> None:
     assert len(results) == 1
 
 
+def test_gold_simulation_scenario_ids_distinguish_boss_and_gauntlet_rows(tmp_path: Path) -> None:
+    gold_sim = tmp_path / "gold" / "simulation"
+    silver_sim = tmp_path / "silver" / "simulation"
+    gold_sim.mkdir(parents=True, exist_ok=True)
+    silver_sim.mkdir(parents=True, exist_ok=True)
+
+    write_parquet(
+        gold_sim / "teams.parquet",
+        [
+            {"team_id": "player_team", "boss_name": None, "game_version": "black", "avg_level": 50},
+            {"team_id": "boss_team", "boss_name": "Shauntal", "game_version": "black", "avg_level": 48},
+        ],
+    )
+    write_parquet(
+        gold_sim / "team_battle_simulations.parquet",
+        [
+            {
+                "team_id_attacker": "player_team",
+                "team_id_defender": "boss_team",
+                "attacker_win": True,
+                "predicted_player_win_chance": 0.8,
+                "simulation_score": 1.1,
+                "attacker_wins": 8,
+                "attacker_losses": 2,
+                "n_trials": 10,
+                "simulation_mode": "boss",
+                "boss_sequence_id": None,
+                "sequence_position": None,
+                "degraded_data": False,
+            },
+            {
+                "team_id_attacker": "player_team",
+                "team_id_defender": "boss_team",
+                "attacker_win": False,
+                "predicted_player_win_chance": 0.1,
+                "simulation_score": -0.4,
+                "attacker_wins": 1,
+                "attacker_losses": 9,
+                "n_trials": 10,
+                "simulation_mode": "gauntlet",
+                "boss_sequence_id": "black:elite_four_champion",
+                "sequence_position": 1,
+                "gauntlet_success": False,
+                "gauntlet_success_rate": 0.0,
+                "degraded_data": False,
+            },
+        ],
+    )
+
+    build_battle_seeds(gold_dir=tmp_path / "gold", silver_dir=tmp_path / "silver")
+    seeds = read_parquet(gold_sim / "battle_seeds.parquet")
+    assert len(seeds) == 2
+    assert seeds["scenario_id"].nunique() == 2
+
+    count = run_monte_carlo_team_optimizer(gold_dir=tmp_path / "gold", silver_dir=tmp_path / "silver", n_trials=20, rng_seed=5)
+    assert count == 2
+
+    results = read_parquet(gold_sim / "monte_carlo_results.parquet").sort_values(["simulation_mode", "scenario_id"]).reset_index(drop=True)
+    assert results["simulation_mode"].tolist() == ["boss", "gauntlet"]
+    assert results["scenario_id"].nunique() == 2
+
+
 def test_team_members_accept_numpy_array_columns() -> None:
     team = {
         "team_id": "player-team",

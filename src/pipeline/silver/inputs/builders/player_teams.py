@@ -129,13 +129,12 @@ def _progression_level_offset(progression_depth: float) -> int:
 
 def _level_cap_from_progression(*, boss_ace_level: int, progression_depth: float) -> int:
     ace_level = max(1, int(boss_ace_level or DEFAULT_MEMBER_LEVEL))
-    return max(1, ace_level - _progression_level_offset(progression_depth))
+    return ace_level
 
 
 def _effective_member_level(*, level_cap: int, encounter_level_max: int) -> int:
     capped_level_cap = max(1, int(level_cap or DEFAULT_MEMBER_LEVEL))
-    capped_encounter_level = max(1, int(encounter_level_max or capped_level_cap))
-    return min(capped_level_cap, capped_encounter_level)
+    return capped_level_cap
 
 
 def _generation_for_game_version(game_version: str) -> int | None:
@@ -561,6 +560,7 @@ def build_progression_source_teams(
                     "boss_name": boss_name,
                     "gym": str(boss_name).strip() or None,
                     "avg_level": boss_level,
+                    "player_max_level": boss_level,
                     "pokemon": selected_species,
                     "levels": [level_by_species.get(species, boss_level) for species in selected_species],
                     "progression_pool_id": pool["progression_pool_id"],
@@ -844,6 +844,7 @@ def build_progression_source_teams_from_encounters(
                     "starter_condition": starter_condition,
                     "starter_type": starter_condition,
                     "avg_level": player_level_cap,
+                    "player_max_level": progression.boss_ace_level,
                     "pokemon": selected_species,
                     "levels": [level_by_species.get(species, player_level_cap) for species in selected_species],
                     "progression_pool_id": f"pool:{game_version}:{boss_id}",
@@ -937,6 +938,7 @@ def build_player_team_compact_tables(
                     "progression_source_team_id": progression_team.get("team_id"),
                     "progression_pool_id": progression_team.get("progression_pool_id"),
                     "avg_level": avg_level,
+                    "player_max_level": progression_team.get("player_max_level", avg_level),
                     "member_count": len(logical_species),
                     "boss_index": progression_team.get("boss_index"),
                     "max_boss_index": progression_team.get("max_boss_index"),
@@ -1121,6 +1123,7 @@ def build_player_teams_from_progression_context(
             "starter_condition": row.get("starter_condition"),
             "starter_type": row.get("starter_type"),
             "avg_level": row.get("avg_level"),
+            "player_max_level": row.get("player_max_level"),
             "starter_base": row.get("starter_base"),
             "starter_evolved_species": row.get("starter_evolved_species"),
             "team_role": "player",

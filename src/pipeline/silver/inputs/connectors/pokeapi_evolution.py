@@ -4,18 +4,60 @@ from __future__ import annotations
 
 from collections import deque
 from functools import lru_cache
+import logging
+from pathlib import Path
+import shelve
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 POKEAPI = "https://pokeapi.co/api/v2"
+logger = logging.getLogger(__name__)
+_SESSION = requests.Session()
+_SESSION.mount("https://", HTTPAdapter(max_retries=0))
+_SESSION.mount("http://", HTTPAdapter(max_retries=0))
+_POKEBASE_CACHE_PATH = Path.home() / ".cache" / "pokebase" / "api.cache"
+
+
+def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any]:
+    cache_candidates = [_POKEBASE_CACHE_PATH, *_POKEBASE_CACHE_PATH.parent.glob(f"{_POKEBASE_CACHE_PATH.name}*")]
+    if not any(path.exists() for path in cache_candidates):
+        return {}
+
+    endpoint_key = str(endpoint or "").strip().strip("/").lower()
+    resource_key = str(resource_name_or_id or "").strip().strip("/").lower()
+
+    try:
+        with shelve.open(str(_POKEBASE_CACHE_PATH), flag="r") as cache:
+            if resource_key:
+                return dict(cache.get(f"{endpoint_key}/{resource_key}/") or {})
+            return dict(cache.get(f"{endpoint_key}/") or {})
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @lru_cache(maxsize=512)
 def _get_json(url: str) -> dict[str, Any]:
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    payload = response.json()
+    normalized_url = str(url or "").strip().rstrip("/")
+    if normalized_url.startswith(f"{POKEAPI}/"):
+        endpoint_resource = normalized_url.removeprefix(f"{POKEAPI}/")
+        parts = [part for part in endpoint_resource.split("/") if part]
+        if parts:
+            endpoint = parts[0]
+            resource_name_or_id = parts[1] if len(parts) > 1 else None
+            cached_payload = _cached_pokebase_payload(endpoint, resource_name_or_id)
+            if cached_payload:
+                return cached_payload
+            logger.warning("[silver/evolution] missing cached evolution payload url=%s", url)
+            return {}
+    try:
+        response = _SESSION.get(url, timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        logger.warning("[silver/evolution] unable to fetch evolution payload url=%s error=%s", url, exc)
+        return {}
     return payload if isinstance(payload, dict) else {}
 
 

@@ -96,6 +96,7 @@ class TeamBattleResult(TypedDict):
     sequence_position: int | None
     remaining_team_state: list[dict[str, Any]]
     gauntlet_success: bool
+    gauntlet_success_rate: float | None
     simulation_mode: str
 
 
@@ -1793,6 +1794,16 @@ def _log_team_role_diagnostics(teams_with_id: list[dict[str, Any]]) -> None:
 
 
 def _is_intended_boss_matchup(attacker_team: dict[str, Any], defender_team: dict[str, Any]) -> bool:
+    attacker_boss_id = _safe_string(attacker_team.get("boss_id"))
+    defender_boss_id = _safe_string(defender_team.get("boss_id"))
+    if attacker_boss_id and defender_boss_id and attacker_boss_id == defender_boss_id:
+        variant_dimension = _normalized_text(defender_team.get("variant_dimension"))
+        if variant_dimension == "starter_type":
+            attacker_starter_type = _resolve_starter_type(attacker_team.get("starter_type"), attacker_team.get("starter_base"))
+            defender_starter_type = _resolve_starter_type(defender_team.get("starter_type"), defender_team.get("starter_condition"))
+            return attacker_starter_type == defender_starter_type
+        return True
+
     attacker_target = _target_key_for_attacker(attacker_team)
     defender_target = _target_key_for_defender(defender_team)
 
@@ -1965,6 +1976,7 @@ def _simulate_team_battle_once_from_profiles(
         "sequence_position": None,
         "remaining_team_state": _serialize_team_state(attacker_profiles),
         "gauntlet_success": attacker_win,
+        "gauntlet_success_rate": None,
         "simulation_mode": "gym",
     }
 
@@ -2006,6 +2018,7 @@ def _filtered_result(
         "sequence_position": None,
         "remaining_team_state": [],
         "gauntlet_success": False,
+        "gauntlet_success_rate": None,
         "simulation_mode": "gym",
     }
 
@@ -2111,6 +2124,7 @@ def simulate_team_battle(
         "sequence_position": None,
         "remaining_team_state": cast(list[dict[str, Any]], representative_result.get("remaining_team_state", [])),
         "gauntlet_success": attacker_win,
+        "gauntlet_success_rate": None,
         "simulation_mode": "gym",
     }
 
@@ -2163,6 +2177,7 @@ def _gauntlet_placeholder_result(
         "sequence_position": sequence_position,
         "remaining_team_state": remaining_team_state,
         "gauntlet_success": False,
+        "gauntlet_success_rate": 0.0,
         "simulation_mode": "gauntlet",
     }
 
@@ -2249,6 +2264,7 @@ def simulate_gauntlet(
         per_trial_rows.append(trial_rows)
 
     aggregated_rows: list[TeamBattleResult] = []
+    gauntlet_success_rate = round(gauntlet_successes / max(1, n_trials), 4)
     for position in range(len(boss_teams)):
         position_rows = [trial_rows[position] for trial_rows in per_trial_rows]
         wins = sum(1 for row in position_rows if bool(row["attacker_win"]))
@@ -2293,6 +2309,7 @@ def simulate_gauntlet(
                 "sequence_position": position + 1,
                 "remaining_team_state": cast(list[dict[str, Any]], representative_result.get("remaining_team_state", [])),
                 "gauntlet_success": position == len(boss_teams) - 1 and gauntlet_successes > (n_trials - gauntlet_successes),
+                "gauntlet_success_rate": gauntlet_success_rate,
                 "simulation_mode": "gauntlet",
             }
         )
@@ -2316,10 +2333,10 @@ def _run_local_simulations(
     _log_team_role_diagnostics(teams_with_id)
 
     attackers = [team for team in teams_with_id if _is_player_candidate_team(team)]
-    gym_attackers = [
+    single_attackers = [
         team
         for team in attackers
-        if _normalized_text(team.get("target_boss_role")) == "gym"
+        if _normalized_text(team.get("target_boss_role")) in {"gym", "elite_four", "champion"}
         and not _is_truthy_flag(team.get("target_is_optional"))
     ]
     gauntlet_attackers = [
@@ -2328,19 +2345,19 @@ def _run_local_simulations(
         if _normalized_text(team.get("target_boss_role")) in {"elite_four", "champion"}
         and not _is_truthy_flag(team.get("target_is_optional"))
     ]
-    gym_defenders = [
+    single_defenders = [
         team
         for team in teams_with_id
         if _is_boss_team(team)
-        and _normalized_text(team.get("boss_role")) == "gym"
+        and _normalized_text(team.get("boss_role")) in {"gym", "elite_four", "champion"}
         and not _is_truthy_flag(team.get("is_optional"))
     ]
     gauntlet_sequences = _gauntlet_sequences_by_version(teams_with_id)
 
     total_work_items = sum(
         1
-        for attacker_team in gym_attackers
-        for defender_team in gym_defenders
+        for attacker_team in single_attackers
+        for defender_team in single_defenders
         if _is_intended_boss_matchup(attacker_team, defender_team)
         and _is_version_compatible(
             cast(str | None, attacker_team.get("game_version")),
@@ -2350,10 +2367,10 @@ def _run_local_simulations(
     ) + len(gauntlet_attackers)
 
     logger.info(
-        "[type_matchups] local engine start teams=%s gym_attackers=%s gym_defenders=%s gauntlet_attackers=%s work_items=%s",
+        "[type_matchups] local engine start teams=%s single_attackers=%s single_defenders=%s gauntlet_attackers=%s work_items=%s",
         len(teams_with_id),
-        len(gym_attackers),
-        len(gym_defenders),
+        len(single_attackers),
+        len(single_defenders),
         len(gauntlet_attackers),
         total_work_items,
     )
@@ -2366,8 +2383,10 @@ def _run_local_simulations(
     items_done = 0
     progress_interval = max(1, total_work_items // 20)
 
-    for attacker_team in gym_attackers:
-        for defender_team in gym_defenders:
+    for attacker_team in single_attackers:
+        target_role = _normalized_text(attacker_team.get("target_boss_role")) or "gym"
+        pair_mode = "gym" if target_role == "gym" else "boss"
+        for defender_team in single_defenders:
             if not _is_intended_boss_matchup(attacker_team, defender_team):
                 continue
 
@@ -2391,6 +2410,7 @@ def _run_local_simulations(
                 ),
                 config=config,
             )
+            result["simulation_mode"] = pair_mode
             simulations.append(result)
 
             items_done += 1
@@ -2489,6 +2509,7 @@ def _result_schema(T: Any) -> Any:
             T.StructField("sequence_position", T.IntegerType(), True),
             T.StructField("remaining_team_state", T.ArrayType(T.MapType(T.StringType(), T.StringType(), valueContainsNull=False), containsNull=False), False),
             T.StructField("gauntlet_success", T.BooleanType(), False),
+            T.StructField("gauntlet_success_rate", T.DoubleType(), True),
             T.StructField("simulation_mode", T.StringType(), False),
         ]
     )
@@ -2585,6 +2606,7 @@ def _normalize_result_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "sequence_position": int(_safe_float(row.get("sequence_position"), default=-1)) if row.get("sequence_position") is not None else None,
         "remaining_team_state": _normalize_summary_entries(row.get("remaining_team_state", [])),
         "gauntlet_success": _safe_bool(row.get("gauntlet_success")),
+        "gauntlet_success_rate": _safe_float(row.get("gauntlet_success_rate"), default=0.0) if row.get("gauntlet_success_rate") is not None else None,
         "simulation_mode": _safe_string(row.get("simulation_mode")) or "gym",
     }
 
@@ -2677,8 +2699,11 @@ def _run_spark_simulations(
                 "target_is_optional": bool(_is_truthy_flag(team.get("target_is_optional"))),
                 "attacker_target": _target_key_for_attacker(team),
                 "defender_target": _target_key_for_defender(team),
+                "target_boss_id": _safe_string(team.get("boss_id")),
+                "boss_id": _safe_string(team.get("boss_id")),
                 "target_boss_role": _normalized_text(team.get("target_boss_role")) or None,
                 "boss_role": _normalized_text(team.get("boss_role")) or None,
+                "variant_dimension": _normalized_text(team.get("variant_dimension")) or None,
                 "team_role": _normalized_text(team.get("team_role")) or None,
                 "origin": _normalized_text(team.get("origin")) or None,
             }
@@ -2696,8 +2721,11 @@ def _run_spark_simulations(
                 T.StructField("target_is_optional", T.BooleanType(), False),
                 T.StructField("attacker_target", T.StringType(), True),
                 T.StructField("defender_target", T.StringType(), True),
+                T.StructField("target_boss_id", T.StringType(), True),
+                T.StructField("boss_id", T.StringType(), True),
                 T.StructField("target_boss_role", T.StringType(), True),
                 T.StructField("boss_role", T.StringType(), True),
+                T.StructField("variant_dimension", T.StringType(), True),
                 T.StructField("team_role", T.StringType(), True),
                 T.StructField("origin", T.StringType(), True),
             ]
@@ -2711,6 +2739,7 @@ def _run_spark_simulations(
             F.col("starter_type").alias("starter_type"),
             F.col("target_is_optional").alias("target_is_optional"),
             F.col("attacker_target").alias("target"),
+            F.col("target_boss_id").alias("target_boss_id"),
             F.col("target_boss_role").alias("target_boss_role"),
         )
 
@@ -2719,21 +2748,37 @@ def _run_spark_simulations(
             F.col("game_version").alias("game_version"),
             F.col("is_optional").alias("is_optional"),
             F.col("defender_target").alias("target"),
+            F.col("boss_id").alias("target_boss_id"),
             F.col("boss_role").alias("boss_role"),
+            F.col("variant_dimension").alias("variant_dimension"),
+            F.col("starter_type").alias("defender_starter_type"),
         )
 
-        gym_pairs_df = attackers_df.where(
-            (F.col("target_boss_role") == F.lit("gym"))
+        single_pairs_df = attackers_df.where(
+            F.col("target_boss_role").isin(["gym", "elite_four", "champion"])
             & (F.col("target_is_optional") == F.lit(False))
         ).join(
-            defenders_df.where((F.col("boss_role") == F.lit("gym")) & (F.col("is_optional") == F.lit(False))),
-            on=["game_version", "target"],
+            defenders_df.where(
+                F.col("boss_role").isin(["gym", "elite_four", "champion"])
+                & (F.col("is_optional") == F.lit(False))
+            ),
+            on=["game_version", "target_boss_id"],
             how="inner",
         )
+        single_pairs_df = single_pairs_df.where(
+            (
+                F.col("variant_dimension").isNull()
+                | (F.col("variant_dimension") != F.lit("starter_type"))
+                | (F.col("starter_type") == F.col("defender_starter_type"))
+            )
+        ).withColumn(
+            "simulation_mode",
+            F.when(F.col("target_boss_role") == F.lit("gym"), F.lit("gym")).otherwise(F.lit("boss")),
+        )
 
-        gym_pairs_df = gym_pairs_df.where(
+        single_pairs_df = single_pairs_df.where(
             F.col("game_version").isNotNull()
-            & F.col("target").isNotNull()
+            & F.col("target_boss_id").isNotNull()
             & F.col("attacker_id").isNotNull()
             & F.col("defender_id").isNotNull()
         )
@@ -2771,26 +2816,26 @@ def _run_spark_simulations(
         else:
             gauntlet_attackers_df = gauntlet_attackers_df.limit(0)
 
-        gym_pairs_df = gym_pairs_df.persist()
+        single_pairs_df = single_pairs_df.persist()
         gauntlet_attackers_df = gauntlet_attackers_df.persist()
-        total_pairs = int(gym_pairs_df.count())
+        total_pairs = int(single_pairs_df.count())
         total_gauntlet_attackers = int(gauntlet_attackers_df.count())
 
         if total_pairs == 0 and total_gauntlet_attackers == 0:
-            gym_pairs_df.unpersist()
+            single_pairs_df.unpersist()
             gauntlet_attackers_df.unpersist()
             return []
 
-        group_counts_df = gym_pairs_df.groupBy("game_version", "target").count()
+        group_counts_df = single_pairs_df.groupBy("game_version", "target_boss_id").count()
         group_count = int(group_counts_df.count()) if total_pairs > 0 else 0
 
         top_groups = [
             (
                 str(row["game_version"] or ""),
-                str(row["target"] or ""),
+                str(row["target_boss_id"] or ""),
                 int(row["count"] or 0),
             )
-            for row in group_counts_df.orderBy(F.desc("count"), F.asc("game_version"), F.asc("target"))
+            for row in group_counts_df.orderBy(F.desc("count"), F.asc("game_version"), F.asc("target_boss_id"))
             .limit(5)
             .toLocalIterator()
         ] if total_pairs > 0 else []
@@ -2798,12 +2843,12 @@ def _run_spark_simulations(
         gym_partitions = max(4, min(128, total_pairs // 1000 + 1)) if total_pairs > 0 else 1
         gauntlet_partitions = max(4, min(128, total_gauntlet_attackers // 250 + 1)) if total_gauntlet_attackers > 0 else 1
         if total_pairs > 0:
-            gym_pairs_df = gym_pairs_df.repartition(gym_partitions, "game_version", "target")
+            single_pairs_df = single_pairs_df.repartition(gym_partitions, "game_version", "target_boss_id")
         if total_gauntlet_attackers > 0:
             gauntlet_attackers_df = gauntlet_attackers_df.repartition(gauntlet_partitions, "game_version")
 
         logger.info(
-            "[type_matchups] spark groups game_boss_groups=%s eligible_gym_pairs=%s gauntlet_attackers=%s gym_partitions=%s gauntlet_partitions=%s attackers=%s defenders=%s",
+            "[type_matchups] spark groups game_boss_groups=%s eligible_single_pairs=%s gauntlet_attackers=%s single_partitions=%s gauntlet_partitions=%s attackers=%s defenders=%s",
             group_count,
             total_pairs,
             total_gauntlet_attackers,
@@ -2831,7 +2876,7 @@ def _run_spark_simulations(
             }
         )
 
-        def _simulate_gym_partition(rows: Any) -> Any:
+        def _simulate_single_partition(rows: Any) -> Any:
             local_teams = cast(dict[str, dict[str, Any]], team_lookup_bc.value)
             local_pokemon_profiles = cast(dict[str, dict[str, Any]], pokemon_profiles_bc.value)
             local_move_profiles = cast(dict[str, MoveProfile], move_profiles_bc.value)
@@ -2862,6 +2907,7 @@ def _run_spark_simulations(
 
                 normalized = _normalize_result_row(result)
                 if normalized is not None:
+                    normalized["simulation_mode"] = str(row.simulation_mode or "gym")
                     yield normalized
 
         def _simulate_gauntlet_partition(rows: Any) -> Any:
@@ -2906,12 +2952,12 @@ def _run_spark_simulations(
                     if normalized is not None:
                         yield normalized
 
-        gym_rows = [row for row in gym_pairs_df.rdd.mapPartitions(_simulate_gym_partition).collect() if row] if total_pairs > 0 else []
+        gym_rows = [row for row in single_pairs_df.rdd.mapPartitions(_simulate_single_partition).collect() if row] if total_pairs > 0 else []
         gauntlet_rows = [
             row for row in gauntlet_attackers_df.rdd.mapPartitions(_simulate_gauntlet_partition).collect() if row
         ] if total_gauntlet_attackers > 0 else []
         result_rows = gym_rows + gauntlet_rows
-        gym_pairs_df.unpersist()
+        single_pairs_df.unpersist()
         gauntlet_attackers_df.unpersist()
 
         if not result_rows:

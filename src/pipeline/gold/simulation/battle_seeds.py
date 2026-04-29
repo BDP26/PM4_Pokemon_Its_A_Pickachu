@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from src.pipeline.common.io import read_many_parquet, read_parquet, write_parquet
-from src.pipeline.silver.simulation.schema_contract import canonical_scenario_id
+from src.pipeline.silver.simulation.schema_contract import canonical_scenario_context_id
 from src.pipeline.settings import GOLD_DIR, GOLD_SIMULATION_DIRNAME, SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,13 @@ def build_battle_seeds(
 
             scenarios.append(
                 {
-                    "scenario_id": canonical_scenario_id(player_id, boss_id),
+                    "scenario_id": canonical_scenario_context_id(
+                        player_id,
+                        boss_id,
+                        simulation_mode=player_match.get("simulation_mode"),
+                        boss_sequence_id=player_match.get("boss_sequence_id"),
+                        sequence_position=player_match.get("sequence_position"),
+                    ),
                     "player_team_id": player_id,
                     "boss_team_id": boss_id,
                     "boss_name": boss_name,
@@ -115,6 +121,7 @@ def build_battle_seeds(
                     "sequence_position": player_match.get("sequence_position"),
                     "remaining_team_state": player_match.get("remaining_team_state", []),
                     "gauntlet_success": bool(player_match.get("gauntlet_success", False)),
+                    "gauntlet_success_rate": player_match.get("gauntlet_success_rate"),
                     "simulation_mode": player_match.get("simulation_mode") or "gym",
                 }
             )

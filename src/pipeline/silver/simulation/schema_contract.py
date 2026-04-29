@@ -29,6 +29,43 @@ def canonical_scenario_id(player_team_id: Any, boss_team_id: Any) -> str:
     return f"{player}_vs_{boss}"
 
 
+def _normalized_optional_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if value != value:
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.lower() in {"", "none", "nan", "<na>"}:
+        return ""
+    return text
+
+
+def canonical_scenario_context_id(
+    player_team_id: Any,
+    boss_team_id: Any,
+    *,
+    simulation_mode: Any = None,
+    boss_sequence_id: Any = None,
+    sequence_position: Any = None,
+) -> str:
+    scenario_id = canonical_scenario_id(player_team_id, boss_team_id)
+    mode = _normalized_optional_value(simulation_mode).lower()
+    if mode in {"", "gym"}:
+        return scenario_id
+
+    parts = [f"mode={mode}"]
+    sequence_id = _normalized_optional_value(boss_sequence_id)
+    if sequence_id:
+        parts.append(f"sequence={sequence_id}")
+    position = _normalized_optional_value(sequence_position)
+    if position:
+        parts.append(f"position={position}")
+    return f"{scenario_id}__{'|'.join(parts)}"
+
+
 def row_player_boss_ids(row: dict[str, Any]) -> tuple[str, str]:
     """Extract canonical player/boss ids from either canonical or legacy matchup keys."""
     player_team_id = str(
@@ -42,4 +79,3 @@ def row_player_boss_ids(row: dict[str, Any]) -> tuple[str, str]:
         or ""
     ).strip()
     return player_team_id, boss_team_id
-

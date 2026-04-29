@@ -8,7 +8,7 @@ import random
 from typing import Any
 
 from src.pipeline.common.io import read_parquet, write_parquet
-from src.pipeline.silver.simulation.schema_contract import canonical_scenario_id, row_player_boss_ids
+from src.pipeline.silver.simulation.schema_contract import canonical_scenario_context_id, canonical_scenario_id, row_player_boss_ids
 from src.pipeline.settings import GOLD_DIR, GOLD_SIMULATION_DIRNAME, SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ def run_monte_carlo_team_optimizer(
     if missing:
         raise ValueError(f"team_battle_simulations.parquet missing required columns: {sorted(missing)}")
 
+    seed_by_scenario: dict[str, dict[str, Any]] = {}
     seed_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
     if seeds_path.exists():
         seeds_df = read_parquet(seeds_path)
@@ -72,6 +73,14 @@ def run_monte_carlo_team_optimizer(
             player_team_id, boss_team_id = row_player_boss_ids(row)
             if not player_team_id or not boss_team_id:
                 continue
+            scenario_id = canonical_scenario_context_id(
+                player_team_id,
+                boss_team_id,
+                simulation_mode=row.get("simulation_mode"),
+                boss_sequence_id=row.get("boss_sequence_id"),
+                sequence_position=row.get("sequence_position"),
+            )
+            seed_by_scenario[scenario_id] = row
             seed_by_pair[(player_team_id, boss_team_id)] = row
 
     result_df = simulations_df.copy()
@@ -118,8 +127,15 @@ def run_monte_carlo_team_optimizer(
     records: list[dict[str, Any]] = []
     for row in result_df.to_dict(orient="records"):
         player_team_id, boss_team_id = row_player_boss_ids(row)
-        seed_row = seed_by_pair.get((player_team_id, boss_team_id), {})
-        scenario_id = str(seed_row.get("scenario_id") or canonical_scenario_id(player_team_id, boss_team_id)).strip()
+        scenario_id = canonical_scenario_context_id(
+            player_team_id,
+            boss_team_id,
+            simulation_mode=row.get("simulation_mode"),
+            boss_sequence_id=row.get("boss_sequence_id"),
+            sequence_position=row.get("sequence_position"),
+        )
+        seed_row = seed_by_scenario.get(scenario_id) or seed_by_pair.get((player_team_id, boss_team_id), {})
+        scenario_id = str(seed_row.get("scenario_id") or scenario_id or canonical_scenario_id(player_team_id, boss_team_id)).strip()
         mc_win_rate = round(float(row.get("empirical_win_rate") or 0.0), 6)
 
         records.append(
@@ -143,11 +159,12 @@ def run_monte_carlo_team_optimizer(
                 "win_rate_ci95_high": float(row.get("win_rate_ci95_high") or 0.0),
                 "mc_resamples": int(row.get("mc_resamples") or n_trials),
                 "interval_method": row.get("interval_method") or "beta_posterior_mc_95",
-                "boss_sequence_id": seed_row.get("boss_sequence_id"),
-                "sequence_position": seed_row.get("sequence_position"),
-                "remaining_team_state": seed_row.get("remaining_team_state", []),
-                "gauntlet_success": bool(seed_row.get("gauntlet_success", False)),
-                "simulation_mode": seed_row.get("simulation_mode") or row.get("simulation_mode") or "gym",
+                "boss_sequence_id": row.get("boss_sequence_id") if row.get("boss_sequence_id") is not None else seed_row.get("boss_sequence_id"),
+                "sequence_position": row.get("sequence_position") if row.get("sequence_position") is not None else seed_row.get("sequence_position"),
+                "remaining_team_state": row.get("remaining_team_state", seed_row.get("remaining_team_state", [])),
+                "gauntlet_success": bool(row.get("gauntlet_success", seed_row.get("gauntlet_success", False))),
+                "gauntlet_success_rate": row.get("gauntlet_success_rate") if row.get("gauntlet_success_rate") is not None else seed_row.get("gauntlet_success_rate"),
+                "simulation_mode": row.get("simulation_mode") or seed_row.get("simulation_mode") or "gym",
             }
         )
 
