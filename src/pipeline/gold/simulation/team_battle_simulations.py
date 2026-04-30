@@ -12,7 +12,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+from src.pipeline.common.cast import is_nullish, to_bool, to_float, to_int, to_list
 from src.pipeline.common.io import read_json, read_parquet, write_parquet
+from src.pipeline.common.normalize import normalize_optional_text, normalize_text
 from src.pipeline.settings import (
     BRONZE_DIR,
     GOLD_DIR,
@@ -177,14 +179,7 @@ def _allow_simulation_fallbacks() -> bool:
 
 
 def _safe_int(value: Any, default: int) -> int:
-    if value is None:
-        return default
-    if isinstance(value, float) and math.isnan(value):
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
+    return int(to_int(value, default=default) or default)
 
 
 def _install_reference_profiles(
@@ -198,11 +193,7 @@ def _install_reference_profiles(
 
 
 def _is_nullish(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, float) and math.isnan(value):
-        return True
-    return False
+    return is_nullish(value, include_pandas_na=False)
 
 
 def _normalize_profile_key(value: Any) -> str:
@@ -212,11 +203,7 @@ def _normalize_profile_key(value: Any) -> str:
 
 
 def _normalized_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and math.isnan(value):
-        return ""
-    return str(value).strip().lower()
+    return normalize_text(value)
 
 
 def _is_truthy_flag(value: Any) -> bool:
@@ -1248,14 +1235,15 @@ def _apply_level_plausibility_filter(
         base_max_overlevel=config.max_overlevel,
         base_max_underlevel=config.max_underlevel,
     )
-    return player_avg <= boss_avg + max_overlevel and player_avg >= boss_avg - max_underlevel
+    boss_upper_reference = _boss_level_cap(defender_team)
+    boss_upper_level = float(boss_upper_reference) if isinstance(boss_upper_reference, int) else float(boss_avg)
+    return player_avg <= boss_upper_level + max_overlevel and player_avg >= boss_avg - max_underlevel
 
 
 def _normalized_game_version(value: str | None) -> str | None:
     if not isinstance(value, str):
         return None
-    normalized = value.strip().lower()
-    return normalized or None
+    return normalize_optional_text(value)
 
 
 def _normalized_boss_label(value: Any) -> str | None:
@@ -1266,18 +1254,7 @@ def _normalized_boss_label(value: Any) -> str | None:
 
 
 def _coerce_boss_alias_values(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return list(value)
-    if hasattr(value, "tolist"):
-        converted = value.tolist()
-        if isinstance(converted, list):
-            return converted
-        if converted is None:
-            return []
-        return [converted]
-    return [value]
+    return to_list(value)
 
 
 def _normalized_starter_type(value: Any) -> str | None:
@@ -2516,19 +2493,11 @@ def _result_schema(T: Any) -> Any:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        parsed = float(value)
-        if math.isnan(parsed):
-            return default
-        return parsed
-    except (TypeError, ValueError):
-        return default
+    return float(to_float(value, default=default, finite_only=True) or default)
 
 
 def _safe_bool(value: Any) -> bool:
-    return bool(value)
+    return to_bool(value, default=False)
 
 
 def _safe_string(value: Any) -> str | None:
@@ -2558,6 +2527,26 @@ def _normalize_summary_entries(value: Any) -> list[dict[str, str]]:
             normalized.append(normalized_entry)
 
     return normalized
+
+
+def _classify_outcome_cause(row: dict[str, Any]) -> str:
+    mode = (_safe_string(row.get("simulation_mode")) or "gym").strip().lower()
+    warnings = {
+        str(item).strip().lower()
+        for item in cast(list[Any], row.get("warnings", []))
+        if item is not None and str(item).strip()
+    }
+    predicted_win = _safe_float(row.get("predicted_player_win_chance"), default=0.0)
+
+    if predicted_win > 0.0:
+        return "simulated_win"
+    if "incompatible_game_versions" in warnings:
+        return "version_filter"
+    if "level_plausibility_filter_failed" in warnings:
+        return "level_filter"
+    if mode == "gauntlet" and "gauntlet_ended_before_sequence_position" in warnings:
+        return "gauntlet_placeholder"
+    return "simulated_loss"
 
 
 def _normalize_result_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -2608,6 +2597,7 @@ def _normalize_result_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "gauntlet_success": _safe_bool(row.get("gauntlet_success")),
         "gauntlet_success_rate": _safe_float(row.get("gauntlet_success_rate"), default=0.0) if row.get("gauntlet_success_rate") is not None else None,
         "simulation_mode": _safe_string(row.get("simulation_mode")) or "gym",
+        "outcome_cause": _safe_string(row.get("outcome_cause")) or _classify_outcome_cause(row),
     }
 
 
@@ -3042,6 +3032,7 @@ def build_team_battle_simulations(
     diagnostic_rows: list[dict[str, Any]] = []
 
     for row in simulations:
+        outcome_cause = _classify_outcome_cause(row)
         aggregate_rows.append(
             {
                 key: value
@@ -3054,6 +3045,7 @@ def build_team_battle_simulations(
                 }
             }
         )
+        aggregate_rows[-1]["outcome_cause"] = outcome_cause
         diagnostic_rows.append(
             {
                 "team_id_attacker": row.get("team_id_attacker"),
@@ -3063,6 +3055,7 @@ def build_team_battle_simulations(
                 "remaining_team_state": row.get("remaining_team_state", []),
                 "gauntlet_success": row.get("gauntlet_success"),
                 "simulation_mode": row.get("simulation_mode"),
+                "outcome_cause": outcome_cause,
                 "representative_simulation_score": row.get("representative_simulation_score"),
                 "representative_duel_summaries": row.get("representative_duel_summaries", []),
                 "representative_warnings": row.get("representative_warnings", []),

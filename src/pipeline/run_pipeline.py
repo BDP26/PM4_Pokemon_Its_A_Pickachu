@@ -1,5 +1,6 @@
 import argparse
 import logging
+import subprocess
 import sys
 import warnings
 
@@ -17,6 +18,16 @@ logging.basicConfig(
     format="%(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _run_silver_with_contract_gate(*, hard_cleanup: bool) -> None:
+    build_silver_from_bronze(hard_cleanup=hard_cleanup)
+    result = subprocess.run(
+        [sys.executable, "scripts/validate_silver_contract.py", "--fail-on-error"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +69,7 @@ def main() -> None:
 
     layer_runners = {
         "bronze": fetch_bronze_sources,
-        "silver": lambda: build_silver_from_bronze(
+        "silver": lambda: _run_silver_with_contract_gate(
             hard_cleanup=bool(getattr(args, "hard_cleanup", False))
         ),
         "gold": build_gold_from_silver,

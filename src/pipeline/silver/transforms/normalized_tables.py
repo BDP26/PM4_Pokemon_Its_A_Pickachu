@@ -153,23 +153,9 @@ def build_locations_table(
                 "mapping_status": "mapped" if mapped_area else "unmapped",
             }
 
-    for miss in misses:
-        raw_title = str(miss.get("raw_title") or "").strip()
-        tried_slug = str(miss.get("tried_slug") or "").strip().lower()
-        if not tried_slug:
-            continue
-        location_id = f"unknown:{tried_slug}"
-        rows_by_id.setdefault(
-            location_id,
-            {
-                "location_id": location_id,
-                "game_version": "unknown",
-                "walkthrough_location_name": raw_title or tried_slug,
-                "normalized_location_name": tried_slug,
-                "pokeapi_area_slug": None,
-                "mapping_status": "unmapped",
-            },
-        )
+    # Keep unmapped misses in diagnostics artifacts only. Including synthetic
+    # "unknown:*" rows here pollutes reference FKs with non-game versions.
+    _ = misses
 
     return sorted(rows_by_id.values(), key=lambda row: (row["game_version"], row["location_id"]))
 

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pandas as pd
 
-from src.pipeline.common.io import write_parquet
+from src.pipeline.common.io import read_parquet, write_json, write_parquet
 from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
-from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
+from src.pipeline.gold.inputs.team_tables import (
+    load_reconstructed_teams_from_silver,
+    validate_reconstructed_teams_for_simulation,
+)
 from src.pipeline.settings import (
     BRONZE_DIR,
     GOLD_DIR,
@@ -24,6 +31,13 @@ from src.pipeline.gold.simulation.team_battle_simulations import BattleSimulatio
 
 logger = logging.getLogger(__name__)
 _INVALID_MOVE_VALUES = {"", "nan", "none", "null", "<na>", "na"}
+_SIMULATION_PARQUETS = (
+    "teams.parquet",
+    "team_battle_simulations.parquet",
+    "battle_seeds.parquet",
+    "monte_carlo_results.parquet",
+    "team_battle_simulation_diagnostics.parquet",
+)
 
 
 def _is_invalid_move_value(value: Any) -> bool:
@@ -57,6 +71,7 @@ def _run_gold_team_battle_simulations(
     silver_dir: Path,
     gold_dir: Path,
     bronze_dir: Path,
+    simulation_dirname: str,
     runtime_config: BattleSimulationConfig,
 ) -> None:
     build_team_battle_simulations(
@@ -64,28 +79,61 @@ def _run_gold_team_battle_simulations(
         silver_dir=silver_dir,
         output_dir=gold_dir,
         bronze_dir=bronze_dir,
-        simulation_dirname=GOLD_SIMULATION_DIRNAME,
+        simulation_dirname=simulation_dirname,
         force_spark=None,
         runtime_config=runtime_config,
     )
 
 
-def _build_gold_battle_seeds(*, gold_dir: Path, silver_dir: Path) -> None:
+def _build_gold_battle_seeds(*, gold_dir: Path, simulation_dirname: str, silver_dir: Path) -> None:
     build_battle_seeds(
         gold_dir=gold_dir,
-        simulation_dirname=GOLD_SIMULATION_DIRNAME,
+        simulation_dirname=simulation_dirname,
         silver_dir=silver_dir,
     )
 
 
-def _run_gold_monte_carlo_optimizer(*, gold_dir: Path, silver_dir: Path, n_trials: int, rng_seed: int) -> None:
+def _run_gold_monte_carlo_optimizer(
+    *,
+    gold_dir: Path,
+    simulation_dirname: str,
+    silver_dir: Path,
+    n_trials: int,
+    rng_seed: int,
+) -> None:
     run_monte_carlo_team_optimizer(
         gold_dir=gold_dir,
-        simulation_dirname=GOLD_SIMULATION_DIRNAME,
+        simulation_dirname=simulation_dirname,
         silver_dir=silver_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
+
+
+def _fingerprint_payload(value: Any) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+
+def _stamp_simulation_run(simulation_dir: Path, *, run_id: str, input_fingerprint: str) -> None:
+    stamped_files: list[str] = []
+    for filename in _SIMULATION_PARQUETS:
+        path = simulation_dir / filename
+        if not path.exists():
+            continue
+        frame = read_parquet(path)
+        frame["simulation_run_id"] = run_id
+        frame["simulation_input_fingerprint"] = input_fingerprint
+        write_parquet(path, frame)
+        stamped_files.append(filename)
+
+    metadata = {
+        "run_id": run_id,
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "input_fingerprint": input_fingerprint,
+        "stamped_files": stamped_files,
+        "simulation_dir": simulation_dir.name,
+    }
+    write_json(simulation_dir / "simulation_run_metadata.json", metadata)
 
 
 def run_gold_simulation_from_silver(
@@ -97,8 +145,13 @@ def run_gold_simulation_from_silver(
     rng_seed: int = 42,
 ) -> None:
     started_at = time.perf_counter()
+    run_id = uuid4().hex[:12]
+    temp_simulation_dirname = f"{GOLD_SIMULATION_DIRNAME}__tmp__{run_id}"
     gold_simulation_dir = gold_dir / GOLD_SIMULATION_DIRNAME
-    gold_simulation_dir.mkdir(parents=True, exist_ok=True)
+    temp_simulation_dir = gold_dir / temp_simulation_dirname
+    if temp_simulation_dir.exists():
+        shutil.rmtree(temp_simulation_dir)
+    temp_simulation_dir.mkdir(parents=True, exist_ok=True)
     logger.info("[gold/simulation] start silver_dir=%s gold_dir=%s", silver_dir, gold_dir)
 
     teams_path = required_input_files.get("teams") if required_input_files else None
@@ -122,10 +175,25 @@ def run_gold_simulation_from_silver(
         return
 
     teams_data = cast(list[dict[str, Any]], teams_df.to_dict(orient="records"))
+    integrity_issues = validate_reconstructed_teams_for_simulation(teams_data)
+    if integrity_issues:
+        preview = "; ".join(integrity_issues[:8])
+        suffix = "" if len(integrity_issues) <= 8 else f"; ... total_issues={len(integrity_issues)}"
+        raise ValueError(f"Gold simulation input integrity gate failed: {preview}{suffix}")
     _assert_no_invalid_team_moves(teams_data)
-    write_parquet(gold_simulation_dir / "teams.parquet", teams_data)
-    logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
     runtime_policy = load_runtime_battle_policy_config()
+    input_fingerprint = _fingerprint_payload(
+        {
+            "team_rows": len(teams_data),
+            "trials": int(n_trials),
+            "rng_seed": int(rng_seed),
+            "silver_dir": str(silver_dir),
+            "policy_profile": runtime_policy.profile,
+        }
+    )
+    write_parquet(temp_simulation_dir / "teams.parquet", teams_data)
+    logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
+    logger.info("[gold/simulation] runtime policy profile=%s", runtime_policy.profile)
     base_config = BattleSimulationConfig()
     runtime_config = BattleSimulationConfig(
         max_overlevel=base_config.max_overlevel,
@@ -147,22 +215,28 @@ def run_gold_simulation_from_silver(
         silver_dir=silver_dir,
         gold_dir=gold_dir,
         bronze_dir=bronze_dir,
+        simulation_dirname=temp_simulation_dirname,
         runtime_config=runtime_config,
     )
     logger.info("[gold/simulation] team battle simulations done elapsed_s=%.2f", time.perf_counter() - sims_started_at)
 
     seeds_started_at = time.perf_counter()
     logger.info("[gold/simulation] building battle seeds")
-    _build_gold_battle_seeds(gold_dir=gold_dir, silver_dir=silver_dir)
+    _build_gold_battle_seeds(gold_dir=gold_dir, simulation_dirname=temp_simulation_dirname, silver_dir=silver_dir)
     logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
     mc_started_at = time.perf_counter()
     logger.info("[gold/simulation] summarizing simulation results trials=%s seed=%s", n_trials, rng_seed)
     _run_gold_monte_carlo_optimizer(
         gold_dir=gold_dir,
+        simulation_dirname=temp_simulation_dirname,
         silver_dir=silver_dir,
         n_trials=n_trials,
         rng_seed=rng_seed,
     )
+    _stamp_simulation_run(temp_simulation_dir, run_id=run_id, input_fingerprint=input_fingerprint)
+    if gold_simulation_dir.exists():
+        shutil.rmtree(gold_simulation_dir)
+    temp_simulation_dir.rename(gold_simulation_dir)
     logger.info("[gold/simulation] simulation summary done elapsed_s=%.2f", time.perf_counter() - mc_started_at)
     logger.info("[gold/simulation] finished elapsed_s=%.2f", time.perf_counter() - started_at)

@@ -8,6 +8,7 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
+from src.pipeline.common.io import read_json
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
 
@@ -21,6 +22,7 @@ def _read_parquet(path: Path) -> list[dict[str, Any]]:
 def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
     issues: list[str] = []
     simulation_dir = silver_dir / SILVER_SIMULATION_DIRNAME
+    metadata_path = simulation_dir / "simulation_run_metadata.json"
 
     teams_path = simulation_dir / "teams.parquet"
     team_battles_path = simulation_dir / "team_battle_simulations.parquet"
@@ -31,8 +33,20 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
     for file_path in required_files:
         if not file_path.exists():
             issues.append(f"Missing file: {file_path}")
+    if not metadata_path.exists():
+        issues.append(f"Missing file: {metadata_path}")
 
     if issues:
+        return issues
+
+    metadata_payload = read_json(metadata_path)
+    if not isinstance(metadata_payload, dict):
+        issues.append(f"Invalid metadata format: {metadata_path}")
+        return issues
+
+    expected_run_id = str(metadata_payload.get("run_id") or "").strip()
+    if not expected_run_id:
+        issues.append(f"Invalid metadata run_id in {metadata_path}")
         return issues
 
     teams = _read_parquet(teams_path)
@@ -48,6 +62,30 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
         issues.append("battle_seeds.parquet is empty")
     if not monte_carlo:
         issues.append("monte_carlo_results.parquet is empty")
+
+    def _validate_run_id(records: list[dict[str, Any]], dataset_name: str) -> None:
+        run_ids = {
+            str(row.get("simulation_run_id") or "").strip()
+            for row in records
+            if isinstance(row, dict)
+        }
+        run_ids.discard("")
+        if not run_ids:
+            issues.append(f"{dataset_name}: missing simulation_run_id values")
+            return
+        if len(run_ids) != 1:
+            issues.append(f"{dataset_name}: multiple simulation_run_id values found: {sorted(run_ids)}")
+            return
+        run_id = next(iter(run_ids))
+        if run_id != expected_run_id:
+            issues.append(
+                f"{dataset_name}: simulation_run_id mismatch expected={expected_run_id} actual={run_id}"
+            )
+
+    _validate_run_id(teams, "teams.parquet")
+    _validate_run_id(team_battles, "team_battle_simulations.parquet")
+    _validate_run_id(seeds, "battle_seeds.parquet")
+    _validate_run_id(monte_carlo, "monte_carlo_results.parquet")
 
     team_ids: set[str] = set()
 
@@ -118,7 +156,20 @@ def validate_simulation_artifacts(silver_dir: Path = SILVER_DIR) -> list[str]:
         if not _is_numeric(battle_turns):
             issues.append(f"team_battle_simulations.parquet row {idx}: battle_turns must be numeric")
         elif simulation_mode == "gym" and int(cast(int | float, battle_turns)) <= 0:
-            issues.append(f"team_battle_simulations.parquet row {idx}: battle_turns must be > 0")
+            warnings_field = matchup.get("warnings")
+            warning_values: list[str] = []
+            if _is_sequence_like(warnings_field):
+                warning_values = [str(value).strip().lower() for value in cast(list[Any] | tuple[Any, ...] | np.ndarray, warnings_field)]
+            elif warnings_field is not None:
+                warning_values = [str(warnings_field).strip().lower()]
+
+            allowed_zero_turn_warnings = {
+                "level_plausibility_filter_failed",
+                "incompatible_game_versions",
+            }
+            has_allowed_zero_turn_warning = any(value in allowed_zero_turn_warnings for value in warning_values)
+            if not has_allowed_zero_turn_warning:
+                issues.append(f"team_battle_simulations.parquet row {idx}: battle_turns must be > 0")
         elif simulation_mode == "gauntlet" and float(cast(int | float, battle_turns)) < 0:
             issues.append(f"team_battle_simulations.parquet row {idx}: gauntlet battle_turns must be >= 0")
         if not isinstance(simulation_score, (int, float)):
@@ -267,8 +318,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
 
 
 

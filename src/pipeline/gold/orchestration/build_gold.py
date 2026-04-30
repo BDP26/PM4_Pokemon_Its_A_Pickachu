@@ -4,7 +4,13 @@ from typing import Any, NoReturn, cast
 
 import pandas as pd
 
-from src.pipeline.common.io import read_json, read_parquet, write_json, write_parquet
+from src.pipeline.common.contracts import format_contract_error
+from src.pipeline.common.io import read_parquet, write_json, write_parquet
+from src.pipeline.common.manifest import (
+    ManifestResolutionError,
+    load_manifest,
+    resolve_manifest_dataset_path,
+)
 from src.pipeline.gold.reporting.build_walkthrough_web import build_walkthrough_best_teams_payload
 from src.pipeline.gold.simulation.run_gold_simulation import run_gold_simulation_from_silver
 from src.pipeline.silver.config.game_config import get_games_config
@@ -20,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 _NON_YELLOW_EXCLUDED_VERSIONS = {"yellow"}
 _PLAUSIBILITY_GROUP_COLS = ["effective_game_version", "effective_boss_name", "starter_base"]
+_GS_POSTGAME_EXCLUDED_BOSSES = {"lt. surge", "sabrina", "misty", "erika", "janine", "brock", "blaine", "blue"}
+_STRIATON_REQUIRED_STARTER_BY_BOSS = {"chili": "snivy", "cilan": "oshawott", "cress": "tepig"}
 
 
 class GoldContractError(ValueError):
@@ -41,13 +49,15 @@ _STRICT_SHARDED_DATASET_KEYS = {
 
 
 def _raise_contract_error(code: str, message: str, *, dataset: str | None = None, path: Path | None = None) -> NoReturn:
-    details: list[str] = [f"[gold.contract] {code}"]
-    if dataset:
-        details.append(f"dataset={dataset}")
-    if path is not None:
-        details.append(f"path={path}")
-    details.append(f"action=\"{message}\"")
-    raise GoldContractError(" ".join(details))
+    raise GoldContractError(
+        format_contract_error(
+            prefix="gold.contract",
+            code=code,
+            message=message,
+            dataset=dataset,
+            path=path,
+        )
+    )
 
 
 def _apply_level_plausibility_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -81,7 +91,14 @@ def _supported_non_yellow_boss_starter_groups() -> pd.DataFrame:
         starters = [str(starter).strip().lower() for starter in game.get("starter_choices", []) if str(starter).strip()]
         bosses = [str(boss).strip().lower() for boss in game.get("bosses", []) if str(boss).strip()]
         for boss_name in bosses:
-            for starter_base in starters:
+            if version in {"gold", "silver"} and boss_name in _GS_POSTGAME_EXCLUDED_BOSSES:
+                continue
+
+            expected_starters = starters
+            if version in {"black", "white"} and boss_name in _STRIATON_REQUIRED_STARTER_BY_BOSS:
+                expected_starters = [_STRIATON_REQUIRED_STARTER_BY_BOSS[boss_name]]
+
+            for starter_base in expected_starters:
                 records.append(
                     {
                         "game_version": version,
@@ -248,6 +265,86 @@ def _write_plausibility_filter_diagnostics(gold_dir: Path, diagnostics_df: pd.Da
     return str(Path("debug") / filename)
 
 
+def _build_mode_coverage_diagnostics(
+    *,
+    joined_before_filter: pd.DataFrame,
+    joined_after_filter: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = [
+        "game_version",
+        "boss_name",
+        "simulation_mode",
+        "rows_before_filter",
+        "rows_after_filter",
+        "distinct_player_teams_after_filter",
+        "max_mc_win_rate_after_filter",
+        "mean_mc_win_rate_after_filter",
+        "has_positive_win_rate_after_filter",
+    ]
+    if joined_before_filter.empty and joined_after_filter.empty:
+        return pd.DataFrame(columns=columns)
+
+    before = joined_before_filter.copy()
+    before["game_version"] = before["effective_game_version"].astype(str).str.strip().str.lower()
+    before["boss_name"] = before["effective_boss_name"].astype(str).str.strip().str.lower()
+    before["simulation_mode"] = before["simulation_mode"].fillna("gym").astype(str).str.strip().str.lower()
+
+    group_cols = ["game_version", "boss_name", "simulation_mode"]
+    before_counts = (
+        before.groupby(group_cols, as_index=False)
+        .size()
+        .rename(columns={"size": "rows_before_filter"})
+    )
+
+    if joined_after_filter.empty:
+        diagnostics = before_counts.copy()
+        diagnostics["rows_after_filter"] = 0
+        diagnostics["distinct_player_teams_after_filter"] = 0
+        diagnostics["max_mc_win_rate_after_filter"] = 0.0
+        diagnostics["mean_mc_win_rate_after_filter"] = 0.0
+        diagnostics["has_positive_win_rate_after_filter"] = False
+        return diagnostics[columns].sort_values(group_cols).reset_index(drop=True)
+
+    after = joined_after_filter.copy()
+    after["game_version"] = after["effective_game_version"].astype(str).str.strip().str.lower()
+    after["boss_name"] = after["effective_boss_name"].astype(str).str.strip().str.lower()
+    after["simulation_mode"] = after["simulation_mode"].fillna("gym").astype(str).str.strip().str.lower()
+    after["mc_win_rate"] = pd.to_numeric(after["mc_win_rate"], errors="coerce").fillna(0.0)
+
+    after_metrics = (
+        after.groupby(group_cols, as_index=False)
+        .agg(
+            rows_after_filter=("scenario_id", "count"),
+            distinct_player_teams_after_filter=("player_team_id", "nunique"),
+            max_mc_win_rate_after_filter=("mc_win_rate", "max"),
+            mean_mc_win_rate_after_filter=("mc_win_rate", "mean"),
+        )
+    )
+    after_metrics["has_positive_win_rate_after_filter"] = after_metrics["max_mc_win_rate_after_filter"] > 0
+
+    diagnostics = before_counts.merge(after_metrics, on=group_cols, how="left")
+    diagnostics["rows_after_filter"] = pd.to_numeric(diagnostics["rows_after_filter"], errors="coerce").fillna(0).astype(int)
+    diagnostics["distinct_player_teams_after_filter"] = (
+        pd.to_numeric(diagnostics["distinct_player_teams_after_filter"], errors="coerce").fillna(0).astype(int)
+    )
+    diagnostics["max_mc_win_rate_after_filter"] = pd.to_numeric(
+        diagnostics["max_mc_win_rate_after_filter"], errors="coerce"
+    ).fillna(0.0)
+    diagnostics["mean_mc_win_rate_after_filter"] = pd.to_numeric(
+        diagnostics["mean_mc_win_rate_after_filter"], errors="coerce"
+    ).fillna(0.0)
+    diagnostics["has_positive_win_rate_after_filter"] = diagnostics["has_positive_win_rate_after_filter"].fillna(False).astype(bool)
+    return diagnostics[columns].sort_values(group_cols).reset_index(drop=True)
+
+
+def _write_mode_coverage_diagnostics(gold_dir: Path, diagnostics_df: pd.DataFrame) -> str:
+    debug_dir = gold_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    filename = "ranking_mode_coverage_diagnostics.parquet"
+    write_parquet(debug_dir / filename, diagnostics_df)
+    return str(Path("debug") / filename)
+
+
 def _validate_non_yellow_starter_boss_coverage(
     *,
     boss_rank: pd.DataFrame,
@@ -335,111 +432,62 @@ def _validate_non_yellow_starter_boss_coverage(
 
 def _load_silver_manifest(silver_dir: Path) -> dict[str, Any]:
     manifest_path = silver_dir / "manifest.json"
-    if not manifest_path.exists():
+    try:
+        return load_manifest(manifest_path)
+    except FileNotFoundError:
         _raise_contract_error(
             "missing_manifest",
             "Run Silver first to generate manifest.json.",
             path=manifest_path,
         )
-    try:
-        payload = read_json(manifest_path)
     except Exception as exc:
         _raise_contract_error(
             "invalid_manifest_json",
             f"manifest.json is unreadable ({exc}). Rebuild Silver outputs.",
             path=manifest_path,
         )
-    if not isinstance(payload, dict):
-        _raise_contract_error(
-            "invalid_manifest_shape",
-            "manifest.json must be a JSON object.",
-            path=manifest_path,
-        )
-    return cast(dict[str, Any], payload)
-
-
-def _manifest_datasets(manifest: dict[str, Any]) -> dict[str, Any]:
-    datasets = manifest.get("datasets")
-    if not isinstance(datasets, dict):
-        _raise_contract_error(
-            "missing_manifest_datasets",
-            "manifest.json requires a top-level datasets object.",
-        )
-    return cast(dict[str, Any], datasets)
 
 
 def _resolve_required_manifest_file(silver_dir: Path, manifest: dict[str, Any], dataset_key: str) -> Path | list[Path]:
-    datasets = _manifest_datasets(manifest)
-    dataset_entry = datasets.get(dataset_key)
-    if not isinstance(dataset_entry, dict):
-        _raise_contract_error(
-            "missing_dataset_entry",
-            f"Add datasets.{dataset_key} to silver/manifest.json.",
-            dataset=dataset_key,
+    try:
+        return resolve_manifest_dataset_path(
+            base_dir=silver_dir,
+            manifest=manifest,
+            dataset_key=dataset_key,
+            strict_sharded=dataset_key in _STRICT_SHARDED_DATASET_KEYS,
         )
-    files_entry = dataset_entry.get("files")
-    if dataset_key in _STRICT_SHARDED_DATASET_KEYS:
-        if isinstance(files_entry, list) and files_entry:
-            resolved_files: list[Path] = []
-            for index, rel in enumerate(cast(list[Any], files_entry)):
-                if not isinstance(rel, str) or not rel.strip():
-                    _raise_contract_error(
-                        "invalid_dataset_files_entry",
-                        f"datasets.{dataset_key}.files[{index}] must be a non-empty string path.",
-                        dataset=dataset_key,
-                    )
-                candidate = silver_dir / rel
-                if not candidate.exists() or not candidate.is_file():
-                    _raise_contract_error(
-                        "missing_dataset_file",
-                        "Regenerate Silver outputs so all strict contract files exist.",
-                        dataset=dataset_key,
-                        path=candidate,
-                    )
-                resolved_files.append(candidate)
-            return sorted(set(resolved_files))
+    except ManifestResolutionError as exc:
+        if exc.code == "missing_dataset_entry":
+            _raise_contract_error(
+                exc.code,
+                f"Add datasets.{dataset_key} to silver/manifest.json.",
+                dataset=dataset_key,
+            )
+        if exc.code == "invalid_dataset_files_entry":
+            _raise_contract_error(
+                exc.code,
+                f"datasets.{dataset_key}.files entry must be a non-empty string path.",
+                dataset=dataset_key,
+                path=exc.path,
+            )
+        if exc.code == "missing_dataset_files":
+            _raise_contract_error(
+                exc.code,
+                f"Set datasets.{dataset_key}.files in silver/manifest.json.",
+                dataset=dataset_key,
+            )
+        if exc.code == "missing_dataset_file_path":
+            _raise_contract_error(
+                exc.code,
+                f"Set datasets.{dataset_key}.file or datasets.{dataset_key}.files in silver/manifest.json.",
+                dataset=dataset_key,
+            )
         _raise_contract_error(
-            "missing_dataset_files",
-            f"Set datasets.{dataset_key}.files in silver/manifest.json.",
-            dataset=dataset_key,
-        )
-
-    if isinstance(files_entry, list) and files_entry:
-        resolved_files: list[Path] = []
-        for index, rel in enumerate(cast(list[Any], files_entry)):
-            if not isinstance(rel, str) or not rel.strip():
-                _raise_contract_error(
-                    "invalid_dataset_files_entry",
-                    f"datasets.{dataset_key}.files[{index}] must be a non-empty string path.",
-                    dataset=dataset_key,
-                )
-            candidate = silver_dir / rel
-            if not candidate.exists():
-                _raise_contract_error(
-                    "missing_dataset_file",
-                    "Regenerate Silver outputs so all contract files or partition folders exist.",
-                    dataset=dataset_key,
-                    path=candidate,
-                )
-            resolved_files.append(candidate)
-        return sorted(set(resolved_files))
-
-    rel_path = dataset_entry.get("file")
-    if not isinstance(rel_path, str) or not rel_path.strip():
-        _raise_contract_error(
-            "missing_dataset_file_path",
-            f"Set datasets.{dataset_key}.file or datasets.{dataset_key}.files in silver/manifest.json.",
-            dataset=dataset_key,
-        )
-    path = silver_dir / cast(str, rel_path)
-    if not path.exists():
-        _raise_contract_error(
-            "missing_dataset_file",
+            exc.code,
             "Regenerate Silver outputs so all contract files or partition folders exist.",
             dataset=dataset_key,
-            path=path,
+            path=exc.path,
         )
-    return path
 
 
 def _load_and_validate_gold_contract(silver_dir: Path) -> dict[str, Any]:
@@ -726,6 +774,11 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
         joined_after_filter=filtered_joined,
     )
     outputs.append(_write_plausibility_filter_diagnostics(gold_dir, diagnostics_df))
+    mode_diagnostics_df = _build_mode_coverage_diagnostics(
+        joined_before_filter=joined,
+        joined_after_filter=filtered_joined,
+    )
+    outputs.append(_write_mode_coverage_diagnostics(gold_dir, mode_diagnostics_df))
 
     joined = filtered_joined
     if joined.empty:

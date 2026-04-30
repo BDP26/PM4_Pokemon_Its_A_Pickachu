@@ -8,13 +8,13 @@ Design:
 
 import logging
 from pathlib import Path
-import shelve
 from typing import Any
 
 import pandas as pd
 import pokebase as pb
 
 from src.pipeline.common.io import read_parquet, write_parquet
+from src.pipeline.common.pokebase_cache import get_cached_pokebase_payload
 from src.pipeline.silver.config.team_config import (
     FORM_LOOKUP_FALLBACKS,
     GAME_TO_VERSION_GROUP,
@@ -89,8 +89,6 @@ _OFFLINE_MOVE_PROFILE_SEED: dict[str, dict[str, Any]] = {
         "pp": 20,
     },
 }
-_POKEBASE_CACHE_PATH = Path.home() / ".cache" / "pokebase" / "api.cache"
-
 
 def _normalize_learned_level(raw_level: Any) -> int:
     try:
@@ -280,37 +278,12 @@ def _offline_move_profile(move_name: str) -> dict[str, Any] | None:
 
 
 def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any] | None:
-    cache_candidates = [_POKEBASE_CACHE_PATH, *_POKEBASE_CACHE_PATH.parent.glob(f"{_POKEBASE_CACHE_PATH.name}*")]
-    if not any(path.exists() for path in cache_candidates):
-        return None
-
-    uri = f"{endpoint.strip('/')}/"
-    if resource_name_or_id is not None:
-        if isinstance(resource_name_or_id, str):
-            listing = _cached_pokebase_payload(endpoint)
-            results = listing.get("results", []) if isinstance(listing, dict) else []
-            resource_id = None
-            for row in results:
-                if str(row.get("name") or "").strip().lower() == resource_name_or_id.strip().lower():
-                    url = str(row.get("url") or "")
-                    parts = [part for part in url.split("/") if part]
-                    if parts:
-                        try:
-                            resource_id = int(parts[-1])
-                        except ValueError:
-                            resource_id = None
-                    break
-            if resource_id is None:
-                return None
-        else:
-            resource_id = int(resource_name_or_id)
-        uri = f"{endpoint.strip('/')}/{resource_id}/"
-
-    try:
-        with shelve.open(str(_POKEBASE_CACHE_PATH), flag="r") as cache:
-            payload = cache.get(uri)
-    except Exception:
-        return None
+    payload = get_cached_pokebase_payload(
+        endpoint,
+        resource_name_or_id,
+        resolve_name_via_listing=True,
+        empty_as_none=True,
+    )
     return payload if isinstance(payload, dict) else None
 
 

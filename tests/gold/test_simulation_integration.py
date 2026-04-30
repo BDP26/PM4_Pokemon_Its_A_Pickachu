@@ -76,6 +76,10 @@ def test_monte_carlo_consumes_gold_simulation_rows(tmp_path: Path) -> None:
     assert count == 1
     results = read_parquet(gold_sim / "monte_carlo_results.parquet")
     assert len(results) == 1
+    row = results.iloc[0].to_dict()
+    assert "adaptive_rerun" in row
+    assert "final_mc_win_rate" in row
+    assert float(row["mc_win_rate"]) == float(row["final_mc_win_rate"])
 
 
 def test_gold_simulation_scenario_ids_distinguish_boss_and_gauntlet_rows(tmp_path: Path) -> None:
@@ -138,6 +142,58 @@ def test_gold_simulation_scenario_ids_distinguish_boss_and_gauntlet_rows(tmp_pat
     results = read_parquet(gold_sim / "monte_carlo_results.parquet").sort_values(["simulation_mode", "scenario_id"]).reset_index(drop=True)
     assert results["simulation_mode"].tolist() == ["boss", "gauntlet"]
     assert results["scenario_id"].nunique() == 2
+
+
+def test_adaptive_rerun_applies_only_to_borderline_simulated_loss(tmp_path: Path) -> None:
+    gold_sim = tmp_path / "gold" / "simulation"
+    gold_sim.mkdir(parents=True, exist_ok=True)
+
+    write_parquet(
+        gold_sim / "team_battle_simulations.parquet",
+        [
+            {
+                "team_id_attacker": "player_team_1",
+                "team_id_defender": "boss_team_1",
+                "attacker_win": False,
+                "predicted_player_win_chance": 0.0,
+                "simulation_score": -0.4,
+                "attacker_wins": 0,
+                "attacker_losses": 10,
+                "n_trials": 10,
+                "degraded_data": False,
+                "outcome_cause": "simulated_loss",
+            },
+            {
+                "team_id_attacker": "player_team_2",
+                "team_id_defender": "boss_team_2",
+                "attacker_win": False,
+                "predicted_player_win_chance": 0.0,
+                "simulation_score": -0.6,
+                "attacker_wins": 0,
+                "attacker_losses": 10,
+                "n_trials": 10,
+                "degraded_data": False,
+                "outcome_cause": "level_filter",
+            },
+        ],
+    )
+
+    count = run_monte_carlo_team_optimizer(
+        gold_dir=tmp_path / "gold",
+        n_trials=20,
+        rng_seed=13,
+        adaptive_rerun_threshold_low=0.0,
+        adaptive_rerun_threshold_high=0.02,
+        adaptive_rerun_resamples=200,
+    )
+    assert count == 2
+    results = read_parquet(gold_sim / "monte_carlo_results.parquet").sort_values("player_team_id").reset_index(drop=True)
+    row1 = results.iloc[0].to_dict()
+    row2 = results.iloc[1].to_dict()
+    assert bool(row1["adaptive_rerun"]) is True
+    assert int(row1["mc_resamples"]) == 200
+    assert bool(row2["adaptive_rerun"]) is False
+    assert int(row2["mc_resamples"]) == 20
 
 
 def test_team_members_accept_numpy_array_columns() -> None:

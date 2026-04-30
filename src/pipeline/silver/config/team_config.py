@@ -124,6 +124,7 @@ DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
 TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000, minimum=1)
 ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
 DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
+SIMULATION_POLICY_PROFILE = os.getenv("PM4_SIM_POLICY_PROFILE", "strict").strip().lower() or "strict"
 
 
 # =========================
@@ -183,6 +184,7 @@ def resolve_runtime_team_config() -> dict[str, object]:
 
         # Parser / data quality controls.
         "parser_min_boss_coverage": PARSER_MIN_BOSS_COVERAGE,
+        "simulation_policy_profile": SIMULATION_POLICY_PROFILE,
 
         # Deprecated compatibility controls.
         # Silver now stores compact logical teams; full expansion/sampling belongs in Gold.

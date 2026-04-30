@@ -49,7 +49,6 @@ REQUIRED_NON_NULL: dict[str, list[str]] = {
         "boss_id",
         "boss_name_canonical",
         "boss_order",
-        "boss_index",
         "game_version",
         "boss_role",
     ],
@@ -90,7 +89,6 @@ REQUIRED_NON_NULL: dict[str, list[str]] = {
         "available_species_count",
         "max_species_count",
         "progression_depth",
-        "starter_condition",
         "game_version",
     ],
     "references/pokemon_reference.parquet": [

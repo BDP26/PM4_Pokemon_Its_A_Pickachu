@@ -10,7 +10,15 @@ from typing import Any, NoReturn, cast
 import numpy as np
 import pandas as pd
 
-from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json
+from src.pipeline.common.cast import to_bool, to_float, to_int
+from src.pipeline.common.contracts import format_contract_error
+from src.pipeline.common.io import read_jsonl, read_parquet, write_json
+from src.pipeline.common.manifest import (
+    ManifestResolutionError,
+    load_manifest,
+    resolve_manifest_dataset_path,
+)
+from src.pipeline.common.normalize import normalize_slug
 from src.pipeline.gold.inputs.team_tables import load_reconstructed_teams_from_silver
 from src.pipeline.silver.config.game_config import get_games_config, get_starter_family_members
 from src.pipeline.settings import SILVER_DIR, GOLD_DIR
@@ -24,13 +32,15 @@ class GoldWebContractError(ValueError):
 
 
 def _raise_web_contract_error(code: str, message: str, *, dataset: str | None = None, path: Path | None = None) -> NoReturn:
-    parts: list[str] = [f"[gold.contract.web] {code}"]
-    if dataset:
-        parts.append(f"dataset={dataset}")
-    if path is not None:
-        parts.append(f"path={path}")
-    parts.append(f"action=\"{message}\"")
-    raise GoldWebContractError(" ".join(parts))
+    raise GoldWebContractError(
+        format_contract_error(
+            prefix="gold.contract.web",
+            code=code,
+            message=message,
+            dataset=dataset,
+            path=path,
+        )
+    )
 
 
 def _norm_name(value: str) -> str:
@@ -38,7 +48,7 @@ def _norm_name(value: str) -> str:
 
 
 def _species_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
+    slug = normalize_slug(value)
     # Keep canonical PokeAPI naming for punctuation-heavy species names.
     if slug == "mr-mime":
         return "mr-mime"
@@ -56,39 +66,21 @@ def _extract_pokeid_from_url(url: str) -> int | None:
 
 
 def _safe_int(value: Any) -> int | None:
-    try:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return None
-        return int(value)
-    except Exception:
-        return None
+    return to_int(value, default=None)
 
 
 
 def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None or pd.isna(value):
-            return None
-        parsed = float(value)
-        if math.isnan(parsed) or math.isinf(parsed):
-            return None
-        return parsed
-    except Exception:
-        return None
+    return to_float(value, default=None, finite_only=True)
 
 
 def _safe_bool(value: Any, *, default: bool = False) -> bool:
-    if value is None or pd.isna(value):
-        return default
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if not normalized:
-            return default
-        if normalized in {"true", "1", "yes", "y", "ja"}:
-            return True
-        if normalized in {"false", "0", "no", "n", "nein"}:
-            return False
-    return bool(value)
+    return to_bool(
+        value,
+        default=default,
+        truthy={"true", "1", "yes", "y", "ja"},
+        falsy={"false", "0", "no", "n", "nein"},
+    )
 
 
 def _json_safe(value: Any) -> Any:
@@ -710,61 +702,62 @@ def _coerce_location_encounters_map(value: Any) -> dict[str, list[dict[str, Any]
 
 def _load_silver_manifest(silver_dir: Path) -> dict[str, Any]:
     manifest_path = silver_dir / "manifest.json"
-    if not manifest_path.exists():
+    try:
+        return load_manifest(manifest_path)
+    except FileNotFoundError:
         _raise_web_contract_error(
             "missing_manifest",
             "Run Silver first to generate manifest.json.",
             path=manifest_path,
         )
-    try:
-        payload = read_json(manifest_path)
     except Exception as exc:
         _raise_web_contract_error(
             "invalid_manifest_json",
             f"manifest.json is unreadable ({exc}).",
             path=manifest_path,
         )
-    if not isinstance(payload, dict):
-        _raise_web_contract_error(
-            "invalid_manifest_shape",
-            "manifest.json must be a JSON object.",
-            path=manifest_path,
-        )
-    return cast(dict[str, Any], payload)
 
 
 def _dataset_path_from_manifest(silver_dir: Path, silver_manifest: dict[str, Any], dataset_key: str) -> Path:
-    datasets = silver_manifest.get("datasets")
-    if not isinstance(datasets, dict):
+    try:
+        resolved = resolve_manifest_dataset_path(
+            base_dir=silver_dir,
+            manifest=silver_manifest,
+            dataset_key=dataset_key,
+            strict_sharded=False,
+        )
+    except ValueError:
         _raise_web_contract_error(
             "missing_manifest_datasets",
             "manifest.json requires a top-level datasets object.",
             dataset=dataset_key,
         )
-    dataset = datasets.get(dataset_key)
-    if not isinstance(dataset, dict):
+    except ManifestResolutionError as exc:
+        if exc.code == "missing_dataset_entry":
+            _raise_web_contract_error(
+                exc.code,
+                f"Add datasets.{dataset_key} to silver/manifest.json.",
+                dataset=dataset_key,
+            )
+        if exc.code == "missing_dataset_file_path":
+            _raise_web_contract_error(
+                exc.code,
+                f"Set datasets.{dataset_key}.file in silver/manifest.json.",
+                dataset=dataset_key,
+            )
         _raise_web_contract_error(
-            "missing_dataset_entry",
-            f"Add datasets.{dataset_key} to silver/manifest.json.",
-            dataset=dataset_key,
-        )
-    rel_path = dataset.get("file")
-    if not isinstance(rel_path, str) or not rel_path.strip():
-        _raise_web_contract_error(
-            "missing_dataset_file_path",
-            f"Set datasets.{dataset_key}.file in silver/manifest.json.",
-            dataset=dataset_key,
-        )
-    path = silver_dir / cast(str, rel_path)
-    # Silver may publish partitioned parquet datasets as directories.
-    if not path.exists():
-        _raise_web_contract_error(
-            "missing_dataset_file",
+            exc.code,
             "Regenerate Silver outputs so all required files exist.",
             dataset=dataset_key,
-            path=path,
+            path=exc.path,
         )
-    return path
+    if not isinstance(resolved, Path):
+        _raise_web_contract_error(
+            "invalid_dataset_shape",
+            f"Expected datasets.{dataset_key}.file for walkthrough payload inputs.",
+            dataset=dataset_key,
+        )
+    return resolved
 
 
 def build_walkthrough_best_teams_payload(

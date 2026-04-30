@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,87 @@ def _select_diverse_moves(ordered_moves: list[str], *, width: int = 4) -> list[s
             if len(selected) >= width:
                 break
     return selected[:width]
+
+
+def validate_reconstructed_teams_for_simulation(teams: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    if not teams:
+        issues.append("no reconstructed teams found")
+        return issues
+
+    seen_team_ids: set[str] = set()
+    boss_context_to_player_count: dict[tuple[str, str], int] = {}
+    boss_contexts: set[tuple[str, str]] = set()
+
+    def _norm_text(value: Any) -> str:
+        text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+        text = re.sub(r"[^a-z0-9\\s]+", " ", text)
+        return " ".join(text.split())
+
+    for idx, team in enumerate(teams):
+        team_id = str(team.get("team_id") or "").strip()
+        game_version = str(team.get("game_version") or "").strip().lower()
+        pokemon = team.get("pokemon")
+        levels = team.get("levels")
+        moves = team.get("moves")
+
+        if not team_id:
+            issues.append(f"row {idx}: missing team_id")
+            continue
+        if team_id in seen_team_ids:
+            issues.append(f"team_id '{team_id}' appears more than once")
+        seen_team_ids.add(team_id)
+        if not game_version:
+            issues.append(f"team_id '{team_id}': missing game_version")
+        if not isinstance(pokemon, list) or len(pokemon) == 0:
+            issues.append(f"team_id '{team_id}': pokemon must be a non-empty list")
+            continue
+        if not isinstance(levels, list) or len(levels) != len(pokemon):
+            issues.append(f"team_id '{team_id}': levels length must match pokemon length")
+            continue
+        if not isinstance(moves, list) or len(moves) != len(pokemon):
+            issues.append(f"team_id '{team_id}': moves length must match pokemon length")
+            continue
+
+        boss_name = _norm_text(team.get("boss_name") or team.get("gym"))
+        team_role = _norm_text(team.get("team_role"))
+        if game_version and boss_name:
+            context = (game_version, boss_name)
+            if team_role == "boss":
+                boss_contexts.add(context)
+            if bool(team.get("is_player_candidate", False)):
+                boss_context_to_player_count[context] = boss_context_to_player_count.get(context, 0) + 1
+
+        for member_idx, species in enumerate(pokemon):
+            species_name = str(species or "").strip().lower()
+            if not species_name:
+                issues.append(f"team_id '{team_id}' member {member_idx + 1}: missing pokemon species")
+            try:
+                level_value = int(levels[member_idx])
+            except Exception:
+                issues.append(f"team_id '{team_id}' member {member_idx + 1}: level is not an integer")
+                continue
+            if level_value <= 0:
+                issues.append(f"team_id '{team_id}' member {member_idx + 1}: level must be > 0")
+
+            member_moves = moves[member_idx]
+            if not isinstance(member_moves, list):
+                issues.append(f"team_id '{team_id}' member {member_idx + 1}: moves must be a list")
+                continue
+            for move in member_moves:
+                if _normalize_move_value(move) == "":
+                    issues.append(f"team_id '{team_id}' member {member_idx + 1}: invalid move placeholder found")
+                    break
+
+    for context in sorted(boss_contexts):
+        if boss_context_to_player_count.get(context, 0) <= 0:
+            game_version, boss_name = context
+            issues.append(
+                "missing player candidate teams for boss context "
+                f"game_version='{game_version}' boss_name='{boss_name}'"
+            )
+
+    return issues
 def load_reconstructed_teams_from_silver(
     silver_dir: Path = SILVER_DIR,
     simulation_dirname: str = SILVER_SIMULATION_DIRNAME,

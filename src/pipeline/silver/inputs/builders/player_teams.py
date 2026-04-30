@@ -587,17 +587,19 @@ def build_progression_source_teams_from_encounters(
     allow_trade_evolutions: bool = False,
 ) -> list[dict[str, Any]]:
     """Build player source teams using persisted Silver references only."""
-    required_encounter_columns = {"boss_id", "location", "pokemon", "level_min", "level_max", "game"}
-    optional_encounter_columns = {"encounter_chance_max", "capture_rate"}
+    required_encounter_columns = {
+        "boss_id",
+        "location",
+        "pokemon",
+        "level_min",
+        "level_max",
+        "encounter_chance_max",
+        "capture_rate",
+        "game",
+    }
     missing_encounter_columns = sorted(required_encounter_columns - set(encounters_df.columns))
     if missing_encounter_columns:
         raise ValueError(f"encounters.parquet missing required columns: {missing_encounter_columns}")
-    missing_optional_columns = sorted(optional_encounter_columns - set(encounters_df.columns))
-    if missing_optional_columns:
-        logger.warning(
-            "[silver/teams] encounters parquet missing optional ranking columns %s; defaulting to 0 for backward compatibility",
-            missing_optional_columns,
-        )
 
     required_boss_columns = {"boss_id", "game_version", "boss_name_canonical", "boss_order"}
     missing_boss_columns = sorted(required_boss_columns - set(bosses_df.columns))
@@ -617,10 +619,6 @@ def build_progression_source_teams_from_encounters(
     encounters["pokemon_species"] = encounters["pokemon_species"].map(normalize_key_part)
     encounters["level_min"] = pd.to_numeric(encounters["level_min"], errors="coerce").fillna(0).astype(int)
     encounters["level_max"] = pd.to_numeric(encounters["level_max"], errors="coerce").fillna(0).astype(int)
-    if "encounter_chance_max" not in encounters.columns:
-        encounters["encounter_chance_max"] = 0
-    if "capture_rate" not in encounters.columns:
-        encounters["capture_rate"] = 0
     encounters["encounter_chance_max"] = pd.to_numeric(encounters["encounter_chance_max"], errors="coerce").fillna(0).astype(int)
     encounters["capture_rate"] = pd.to_numeric(encounters["capture_rate"], errors="coerce").fillna(0).astype(int)
     encounters = encounters[
@@ -961,6 +959,8 @@ def build_player_team_compact_tables(
                         "team_member_id": member_id,
                         "source_team_id": source_team_id,
                         "game_version": game_version,
+                        "team_role": "player",
+                        "origin": "generated",
                         "boss_id": boss_id,
                         "boss_name": boss_name,
                         "gym_index": progression_team.get("gym_index"),

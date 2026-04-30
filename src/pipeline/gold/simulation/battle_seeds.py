@@ -9,25 +9,11 @@ from typing import Any
 import pandas as pd
 
 from src.pipeline.common.io import read_many_parquet, read_parquet, write_parquet
+from src.pipeline.common.simulation_schema import normalize_team_battle_simulation_schema
 from src.pipeline.silver.simulation.schema_contract import canonical_scenario_context_id
-from src.pipeline.settings import GOLD_DIR, GOLD_SIMULATION_DIRNAME, SILVER_DIR, SILVER_SIMULATION_DIRNAME
+from src.pipeline.settings import GOLD_DIR, GOLD_SIMULATION_DIRNAME, SILVER_DIR
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_simulation_schema(simulations_df: pd.DataFrame) -> pd.DataFrame:
-    column_aliases = {
-        "player_team_id": "team_id_attacker",
-        "boss_team_id": "team_id_defender",
-        "win_probability": "predicted_player_win_chance",
-        "score": "simulation_score",
-    }
-    renamed = simulations_df.rename(columns={k: v for k, v in column_aliases.items() if k in simulations_df.columns})
-    required = {"team_id_attacker", "team_id_defender", "predicted_player_win_chance", "simulation_score"}
-    missing = sorted(required - set(renamed.columns))
-    if missing:
-        raise ValueError(f"team_battle_simulations missing required columns after schema normalization: {missing}")
-    return renamed
 
 
 def build_battle_seeds(
@@ -47,27 +33,20 @@ def build_battle_seeds(
         if teams_file.exists():
             teams_df = read_parquet(teams_file)
         else:
-            fallback_teams_file = silver_dir / SILVER_SIMULATION_DIRNAME / "teams.parquet"
-            if fallback_teams_file.exists():
-                logger.warning("[gold/simulation] deprecated silver simulation path used")
-                teams_df = read_parquet(fallback_teams_file)
-            else:
-                logger.warning("[battle_seeds] no teams found in gold/silver paths; skipping")
-                return
+            logger.warning("[battle_seeds] no teams found in gold simulation directory; skipping")
+            return
 
     logger.info("[battle_seeds] input teams rows=%s", len(teams_df))
     boss_teams_df = teams_df[teams_df["boss_name"].notna()].copy()
     logger.info("[battle_seeds] rows after boss filter=%s", len(boss_teams_df))
 
     if simulations_file.exists():
-        simulations_df = _normalize_simulation_schema(read_parquet(simulations_file))
+        simulations_df = normalize_team_battle_simulation_schema(
+            read_parquet(simulations_file),
+            required_columns={"team_id_attacker", "team_id_defender", "predicted_player_win_chance", "simulation_score"},
+        )
     else:
-        fallback_simulations_file = silver_dir / SILVER_SIMULATION_DIRNAME / "team_battle_simulations.parquet"
-        if fallback_simulations_file.exists():
-            logger.warning("[gold/simulation] deprecated silver simulation path used")
-            simulations_df = _normalize_simulation_schema(read_parquet(fallback_simulations_file))
-        else:
-            simulations_df = pd.DataFrame()
+        simulations_df = pd.DataFrame()
 
     logger.info("[battle_seeds] input simulation rows=%s", len(simulations_df))
 

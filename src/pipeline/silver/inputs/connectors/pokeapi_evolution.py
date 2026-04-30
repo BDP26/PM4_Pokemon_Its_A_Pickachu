@@ -6,35 +6,29 @@ from collections import deque
 from functools import lru_cache
 import logging
 from pathlib import Path
-import shelve
 from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
+from src.pipeline.common.pokebase_cache import POKEBASE_CACHE_PATH, get_cached_pokebase_payload
 
 POKEAPI = "https://pokeapi.co/api/v2"
 logger = logging.getLogger(__name__)
 _SESSION = requests.Session()
 _SESSION.mount("https://", HTTPAdapter(max_retries=0))
 _SESSION.mount("http://", HTTPAdapter(max_retries=0))
-_POKEBASE_CACHE_PATH = Path.home() / ".cache" / "pokebase" / "api.cache"
+_POKEBASE_CACHE_PATH = POKEBASE_CACHE_PATH
 
 
 def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any]:
-    cache_candidates = [_POKEBASE_CACHE_PATH, *_POKEBASE_CACHE_PATH.parent.glob(f"{_POKEBASE_CACHE_PATH.name}*")]
-    if not any(path.exists() for path in cache_candidates):
-        return {}
-
-    endpoint_key = str(endpoint or "").strip().strip("/").lower()
-    resource_key = str(resource_name_or_id or "").strip().strip("/").lower()
-
-    try:
-        with shelve.open(str(_POKEBASE_CACHE_PATH), flag="r") as cache:
-            if resource_key:
-                return dict(cache.get(f"{endpoint_key}/{resource_key}/") or {})
-            return dict(cache.get(f"{endpoint_key}/") or {})
-    except Exception:  # noqa: BLE001
-        return {}
+    payload = get_cached_pokebase_payload(
+        endpoint,
+        resource_name_or_id,
+        resolve_name_via_listing=False,
+        empty_as_none=False,
+        cache_path=_POKEBASE_CACHE_PATH,
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 @lru_cache(maxsize=512)

@@ -12,19 +12,16 @@ from pathlib import Path
 from typing import Any
 
 from src.pipeline.common.io import read_parquet
+from src.pipeline.common.normalize import normalize_slug, normalize_text
 from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP, SPECIES_SLUG_ALIASES
 from src.pipeline.silver.move_power import normalize_move_power_name, resolve_effective_power
 from src.pipeline.settings import SILVER_DIR
 
 
 def normalize_key(value: Any) -> str:
-    normalized = str(value).strip().lower().replace(".", " ").replace("_", " ")
+    normalized = normalize_text(value).replace(".", " ").replace("_", " ").replace("'", "")
     normalized = " ".join(normalized.split())
-    normalized = normalized.replace("'", "")
-    normalized = normalized.replace(" ", "-")
-    while "--" in normalized:
-        normalized = normalized.replace("--", "-")
-    return normalized.strip("-")
+    return normalize_slug(normalized)
 
 
 def normalize_species_slug(species: Any) -> str:
