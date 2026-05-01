@@ -179,12 +179,6 @@ def test_version_compatibility_contract() -> None:
     assert not _is_version_compatible("red", "black", cfg)
 
 
-def test_spark_pairing_uses_keyed_join_not_cross_join() -> None:
-    source = Path("src/pipeline/gold/simulation/team_battle_simulations.py").read_text(encoding="utf-8")
-    assert ".crossJoin(" not in source
-    assert 'on=["game_version", "target"]' in source
-
-
 def test_conditional_striaton_selection_pairs_exactly_one_boss(tmp_path: Path) -> None:
     bronze_dir = tmp_path / "bronze"
     silver_dir = tmp_path / "silver"

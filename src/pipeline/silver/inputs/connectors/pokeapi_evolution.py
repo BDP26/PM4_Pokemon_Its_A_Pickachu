@@ -6,14 +6,8 @@ from collections import deque
 from functools import lru_cache
 import logging
 from typing import Any
+
 import pokebase as pb
-
-
-def pokebase_get_data(endpoint: str, resource_name_or_id: str | int | None):
-    loader = getattr(pb, str(endpoint).strip().lower().replace("-", "_"), None)
-    if not callable(loader):
-        raise ValueError(f"Unsupported pokebase endpoint: {endpoint}")
-    return loader(resource_name_or_id)
 
 
 def _normalize_pokebase_payload(value: Any) -> Any:
@@ -35,9 +29,12 @@ logger = logging.getLogger(__name__)
 def _get_resource(endpoint: str, resource_name_or_id: str | int | None) -> dict[str, Any]:
     if not endpoint:
         return {}
+    loader = getattr(pb, str(endpoint).strip().lower().replace("-", "_"), None)
+    if not callable(loader):
+        raise ValueError(f"Unsupported pokebase endpoint: {endpoint}")
     try:
-        payload = pokebase_get_data(endpoint, resource_name_or_id)
-    except Exception:
+        payload = loader(resource_name_or_id)
+    except Exception:  # noqa: BLE001
         logger.warning(
             "[silver/evolution] resource fetch failed endpoint=%s resource=%s",
             endpoint,
@@ -56,8 +53,14 @@ def get_evolution_chain_for_species(species_name: str) -> dict[str, Any]:
 
     species_payload = _get_resource("pokemon-species", species)
     evo_chain = species_payload.get("evolution_chain") if isinstance(species_payload, dict) else None
+    if isinstance(evo_chain, dict) and isinstance(evo_chain.get("chain"), dict):
+        return evo_chain
     evo_url = str(evo_chain.get("url") or "") if isinstance(evo_chain, dict) else ""
     evo_id: str | int | None = None
+    if isinstance(evo_chain, dict):
+        maybe_id = evo_chain.get("id")
+        if isinstance(maybe_id, int) and maybe_id > 0:
+            evo_id = maybe_id
     if evo_url:
         parts = [part for part in evo_url.rstrip("/").split("/") if part]
         if parts:

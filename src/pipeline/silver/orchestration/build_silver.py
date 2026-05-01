@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 import gc
+import json
 import logging
 import re
 import shutil
@@ -1395,6 +1396,82 @@ def _build_evolution_rules_by_game_from_encounters(
     return rules_by_game
 
 
+def _evolution_rules_rows_from_map(
+    evolution_rules_by_game: dict[str, dict[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for game_version, species_map in evolution_rules_by_game.items():
+        game_key = normalize_key_part(game_version)
+        if not game_key or not isinstance(species_map, dict):
+            continue
+        for species_name, payload in species_map.items():
+            species_slug = normalize_species_slug(species_name)
+            if not species_slug or not isinstance(payload, dict):
+                continue
+            special_conditions = payload.get("special_evolution_conditions")
+            if isinstance(special_conditions, list):
+                serialized_conditions = special_conditions
+            elif special_conditions is None:
+                serialized_conditions = []
+            elif hasattr(special_conditions, "tolist"):
+                converted = special_conditions.tolist()
+                serialized_conditions = converted if isinstance(converted, list) else [converted]
+            else:
+                serialized_conditions = [special_conditions]
+            rows.append(
+                {
+                    "game_version": game_key,
+                    "species_name": species_slug,
+                    "base_species": normalize_species_slug(payload.get("base_species") or species_slug),
+                    "evolution_stage": int(payload.get("evolution_stage") or 1),
+                    "min_valid_level": payload.get("min_valid_level"),
+                    "min_level_from_previous": payload.get("min_level_from_previous"),
+                    "special_evolution_conditions_json": json.dumps(serialized_conditions, ensure_ascii=True),
+                }
+            )
+    return rows
+
+
+def _evolution_rules_map_from_rows(
+    evolution_rules_df: pd.DataFrame,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    rules_by_game: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    if evolution_rules_df.empty:
+        return rules_by_game
+    required_columns = {
+        "game_version",
+        "species_name",
+        "base_species",
+        "evolution_stage",
+        "min_valid_level",
+        "min_level_from_previous",
+        "special_evolution_conditions_json",
+    }
+    if not required_columns.issubset(evolution_rules_df.columns):
+        return rules_by_game
+    for row in evolution_rules_df[list(required_columns)].to_dict(orient="records"):
+        game_version = normalize_key_part(row.get("game_version"))
+        species_name = normalize_species_slug(row.get("species_name"))
+        if not game_version or not species_name:
+            continue
+        raw_conditions = row.get("special_evolution_conditions_json")
+        try:
+            parsed_conditions = json.loads(str(raw_conditions or "[]"))
+            if not isinstance(parsed_conditions, list):
+                parsed_conditions = []
+        except Exception:  # noqa: BLE001
+            parsed_conditions = []
+        rules_by_game[game_version][species_name] = {
+            "species_name": species_name,
+            "base_species": normalize_species_slug(row.get("base_species") or species_name),
+            "evolution_stage": int(row.get("evolution_stage") or 1),
+            "min_valid_level": row.get("min_valid_level"),
+            "min_level_from_previous": row.get("min_level_from_previous"),
+            "special_evolution_conditions": parsed_conditions,
+        }
+    return rules_by_game
+
+
 def _dedupe_bootstrap_entries(
     entries: list[tuple[str, int, str, list[str]]],
 ) -> list[tuple[str, int, str, list[str]]]:
@@ -2113,7 +2190,33 @@ def build_silver_from_bronze(
         if game_version:
             boss_teams_by_game[game_version].append(team)
 
-    evolution_rules_by_game = _build_evolution_rules_by_game_from_encounters(encounters_reference_df)
+    evolution_rules_path = references_dir / "evolution_rules.parquet"
+    evolution_rules_by_game: dict[str, dict[str, dict[str, Any]]] = (
+        _evolution_rules_map_from_rows(read_parquet(evolution_rules_path))
+        if evolution_rules_path.exists()
+        else {}
+    )
+
+    if not evolution_rules_by_game:
+        evolution_rules_by_game = _build_evolution_rules_by_game_from_encounters(encounters_reference_df)
+    if evolution_rules_by_game:
+        evolution_rows = _evolution_rules_rows_from_map(evolution_rules_by_game)
+        if evolution_rows:
+            write_parquet(evolution_rules_path, evolution_rows, partition_cols=["game_version"])
+            logger.info(
+                "[silver/evolution] persisted canonical evolution rules parquet rows=%s games=%s path=%s",
+                len(evolution_rows),
+                len({str(row.get('game_version') or '').strip().lower() for row in evolution_rows}),
+                evolution_rules_path,
+            )
+        else:
+            logger.warning("[silver/evolution] no evolution rules persisted; map is empty")
+    else:
+        logger.info(
+            "[silver/evolution] loaded evolution rules parquet games=%s path=%s",
+            len(evolution_rules_by_game),
+            evolution_rules_path,
+        )
     progression_source_teams_seed = build_progression_source_teams_from_encounters(
         encounters_df=encounters_reference_df,
         bosses_df=simulatable_bosses_reference_df,

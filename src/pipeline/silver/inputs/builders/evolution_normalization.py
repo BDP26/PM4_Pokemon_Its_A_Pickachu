@@ -212,7 +212,8 @@ def normalize_candidate_pool_for_level(
     removed_invalid = 0
 
     for species, chance, lvl_max, capture in candidates:
-        effective_level = min(max(1, int(member_level or 1)), max(1, int(lvl_max or member_level or 1)))
+        # Evolution legality is determined at source-team generation level.
+        effective_level = max(1, int(member_level or 1))
         normalized_species, applied = normalize_species_for_level(
             species,
             member_level=effective_level,
@@ -261,7 +262,8 @@ def legal_species_pool_for_level(
     """Return the species set that remains legal after forced evolutions at the given level."""
     legal_species: set[str] = set()
     for species, _, lvl_max, _ in candidates:
-        effective_level = min(max(1, int(member_level or 1)), max(1, int(lvl_max or member_level or 1)))
+        # Evolution legality is determined at source-team generation level.
+        effective_level = max(1, int(member_level or 1))
         normalized_species, _ = normalize_species_for_level(
             species,
             member_level=effective_level,
