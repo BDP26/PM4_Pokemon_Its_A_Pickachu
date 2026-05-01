@@ -46,3 +46,29 @@ def test_get_species_classification_defaults_false_when_species_missing(monkeypa
         "is_legendary": False,
         "is_mythical": False,
     }
+
+
+def test_get_species_classification_keeps_null_flags_as_non_restricted_defaults(tmp_path: Path, monkeypatch) -> None:
+    silver_dir = tmp_path / "silver"
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+    write_parquet(
+        references_dir / "pokemon_data.parquet",
+        [
+            {"pokemon_species": "reshiram", "is_legendary": None, "is_mythical": None},
+            {"pokemon_species": "pikachu", "is_legendary": None, "is_mythical": None},
+        ],
+    )
+
+    monkeypatch.setattr(species_classification, "SILVER_DIR", silver_dir)
+    species_classification._persisted_species_classification.cache_clear()
+    species_classification.get_species_classification.cache_clear()
+
+    assert species_classification.get_species_classification("reshiram") == {
+        "is_legendary": False,
+        "is_mythical": False,
+    }
+    assert species_classification.get_species_classification("pikachu") == {
+        "is_legendary": False,
+        "is_mythical": False,
+    }

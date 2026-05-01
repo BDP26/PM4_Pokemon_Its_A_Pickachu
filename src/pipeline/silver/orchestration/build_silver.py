@@ -4,13 +4,13 @@ from collections import Counter, defaultdict
 import gc
 import logging
 import re
-import shelve
 import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
 import pandas as pd
+import pokebase as pb
 
 from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
 from src.pipeline.common.cast import to_list
@@ -74,6 +74,13 @@ from src.pipeline.silver.writers.outputs import (
 logger = logging.getLogger(__name__)
 
 
+def pokebase_get_data(endpoint: str, resource_name_or_id: str | int):
+    loader = getattr(pb, str(endpoint).strip().lower().replace("-", "_"), None)
+    if not callable(loader):
+        raise ValueError(f"Unsupported pokebase endpoint: {endpoint}")
+    return loader(resource_name_or_id)
+
+
 STAT_NAME_TO_COLUMN = {
     "hp": "base_hp",
     "attack": "base_attack",
@@ -108,111 +115,7 @@ POKEMON_RESOLUTION_ALIAS_FALLBACKS: dict[str, str] = {
     "jellicent-male": "jellicent",
 }
 
-OFFLINE_POKEMON_PROFILE_SEEDS: dict[str, dict[str, Any]] = {
-    "aegislash": {
-        "name": "aegislash-shield",
-        "pokemon_species": "aegislash",
-        "pokeapi_id": 681,
-        "source_url": "https://pokeapi.co/api/v2/pokemon/681/",
-        "type_1": "steel",
-        "type_2": "ghost",
-        "base_hp": 60,
-        "base_attack": 50,
-        "base_defense": 140,
-        "base_special_attack": 50,
-        "base_special_defense": 140,
-        "base_speed": 60,
-        "height": 17,
-        "weight": 530,
-        "base_experience": 234,
-        "is_default": True,
-        "resolved_pokemon_name": "aegislash-shield",
-        "resolved_pokeapi_id": 681,
-    },
-    "gourgeist": {
-        "name": "gourgeist-average",
-        "pokemon_species": "gourgeist",
-        "pokeapi_id": 711,
-        "source_url": "https://pokeapi.co/api/v2/pokemon/711/",
-        "type_1": "ghost",
-        "type_2": "grass",
-        "base_hp": 65,
-        "base_attack": 90,
-        "base_defense": 122,
-        "base_special_attack": 58,
-        "base_special_defense": 75,
-        "base_speed": 84,
-        "height": 9,
-        "weight": 125,
-        "base_experience": 173,
-        "is_default": True,
-        "resolved_pokemon_name": "gourgeist-average",
-        "resolved_pokeapi_id": 711,
-    },
-    "jellicent": {
-        "name": "jellicent",
-        "pokemon_species": "jellicent",
-        "pokeapi_id": 593,
-        "source_url": "https://pokeapi.co/api/v2/pokemon/593/",
-        "type_1": "water",
-        "type_2": "ghost",
-        "base_hp": 100,
-        "base_attack": 60,
-        "base_defense": 70,
-        "base_special_attack": 85,
-        "base_special_defense": 105,
-        "base_speed": 60,
-        "height": 22,
-        "weight": 1350,
-        "base_experience": 168,
-        "is_default": True,
-        "resolved_pokemon_name": "jellicent",
-        "resolved_pokeapi_id": 593,
-    },
-    "meowstic": {
-        "name": "meowstic-male",
-        "pokemon_species": "meowstic",
-        "pokeapi_id": 678,
-        "source_url": "https://pokeapi.co/api/v2/pokemon/678/",
-        "type_1": "psychic",
-        "type_2": None,
-        "base_hp": 74,
-        "base_attack": 48,
-        "base_defense": 76,
-        "base_special_attack": 83,
-        "base_special_defense": 81,
-        "base_speed": 104,
-        "height": 6,
-        "weight": 85,
-        "base_experience": 163,
-        "is_default": True,
-        "resolved_pokemon_name": "meowstic-male",
-        "resolved_pokeapi_id": 678,
-    },
-    "pyroar": {
-        "name": "pyroar-male",
-        "pokemon_species": "pyroar",
-        "pokeapi_id": 668,
-        "source_url": "https://pokeapi.co/api/v2/pokemon/668/",
-        "type_1": "fire",
-        "type_2": "normal",
-        "base_hp": 86,
-        "base_attack": 68,
-        "base_defense": 72,
-        "base_special_attack": 109,
-        "base_special_defense": 66,
-        "base_speed": 106,
-        "height": 15,
-        "weight": 815,
-        "base_experience": 177,
-        "is_default": True,
-        "resolved_pokemon_name": "pyroar-male",
-        "resolved_pokeapi_id": 668,
-    },
-}
-
 INVALID_NORMALIZED_POKEMON_TOKENS = {"", "nan", "none", "null", "<na>", "na"}
-_POKEBASE_CACHE_PATH = Path.home() / ".cache" / "pokebase" / "api.cache"
 
 
 def _coerce_alias_values(value: Any) -> list[Any]:
@@ -589,7 +492,8 @@ def _canonicalize_boss_teams_to_references(
 
 
 def _extract_pokeapi_id_from_source_url(source_url: str) -> int | None:
-    match = re.search(r"/pokemon/(\d+)/?$", str(source_url or "").strip().lower())
+    normalized = str(source_url or "").strip().lower()
+    match = re.search(r"(?:/pokemon/|pokebase://pokemon/)(\d+)/?$", normalized)
     if match is None:
         return None
     try:
@@ -606,41 +510,6 @@ def _normalize_requested_pokemon_name(value: Any) -> str:
     return normalized
 
 
-def _cached_pokebase_resource(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any] | None:
-    cache_candidates = [_POKEBASE_CACHE_PATH, *_POKEBASE_CACHE_PATH.parent.glob(f"{_POKEBASE_CACHE_PATH.name}*")]
-    if not any(path.exists() for path in cache_candidates):
-        return None
-
-    uri = f"{endpoint.strip('/')}/"
-    if resource_name_or_id is not None:
-        if isinstance(resource_name_or_id, str):
-            listing = _cached_pokebase_resource(endpoint)
-            results = listing.get("results", []) if isinstance(listing, dict) else []
-            resource_id = None
-            for row in results:
-                if str(row.get("name") or "").strip().lower() == resource_name_or_id.strip().lower():
-                    url = str(row.get("url") or "")
-                    parts = [part for part in url.split("/") if part]
-                    if parts:
-                        try:
-                            resource_id = int(parts[-1])
-                        except ValueError:
-                            resource_id = None
-                    break
-            if resource_id is None:
-                return None
-        else:
-            resource_id = int(resource_name_or_id)
-        uri = f"{endpoint.strip('/')}/{resource_id}/"
-
-    try:
-        with shelve.open(str(_POKEBASE_CACHE_PATH), flag="r") as cache:
-            payload = cache.get(uri)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _species_resolution_candidates(normalized_name: str) -> list[str]:
     parts = [part for part in normalized_name.split("-") if part]
     candidates: list[str] = []
@@ -649,6 +518,19 @@ def _species_resolution_candidates(normalized_name: str) -> list[str]:
         if candidate:
             candidates.append(candidate)
     return list(dict.fromkeys(candidates))
+
+
+def _normalize_pokebase_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_pokebase_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_pokebase_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_pokebase_payload(item) for item in value]
+    if hasattr(value, "__dict__"):
+        raw = dict(getattr(value, "__dict__", {}) or {})
+        return {key: _normalize_pokebase_payload(item) for key, item in raw.items()}
+    return value
 
 
 def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -695,7 +577,7 @@ def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "name": profile_name,
         "pokemon_species": species_slug or profile_name,
         "pokeapi_id": pokeapi_id_value,
-        "source_url": f"https://pokeapi.co/api/v2/pokemon/{pokeapi_id_value}/" if pokeapi_id_value is not None else None,
+        "source_url": f"pokebase://pokemon/{pokeapi_id_value}" if pokeapi_id_value is not None else None,
         "type_1": type_names[0] if type_names else None,
         "type_2": type_names[1] if len(type_names) > 1 else None,
         **stats_payload,
@@ -718,9 +600,25 @@ def _species_classification_from_payload(payload: dict[str, Any] | None) -> dict
     }
 
 
+def _has_complete_pokemon_profile_payload(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    try:
+        int(payload.get("id"))
+    except (TypeError, ValueError):
+        return False
+    types = payload.get("types")
+    stats = payload.get("stats")
+    if not isinstance(types, list) or not types:
+        return False
+    if not isinstance(stats, list) or not stats:
+        return False
+    return True
+
+
 def _resolve_requested_pokemon_profile(
     requested_name: str,
-    fetch_json: Callable[[str], dict[str, Any] | None],
+    fetch_resource: Callable[[str, str | int], dict[str, Any] | None],
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     normalized_requested_name = _normalize_requested_pokemon_name(requested_name)
     lineage_base: dict[str, Any] = {
@@ -738,13 +636,13 @@ def _resolve_requested_pokemon_profile(
         lineage["resolution_warning"] = "empty_requested_name"
         return None, lineage
 
-    pokemon_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon/{normalized_requested_name}/")
-    if pokemon_payload is not None:
+    pokemon_payload = fetch_resource("pokemon", normalized_requested_name)
+    if _has_complete_pokemon_profile_payload(pokemon_payload):
         profile = _profile_from_pokemon_payload(pokemon_payload)
         species_payload = None
-        species_url = str(((pokemon_payload.get("species") or {}).get("url")) or "").strip()
-        if species_url:
-            species_payload = fetch_json(species_url)
+        species_name = _normalize_requested_pokemon_name(((pokemon_payload.get("species") or {}).get("name")) or "")
+        if species_name:
+            species_payload = fetch_resource("pokemon-species", species_name)
         normalized_species = normalize_species_slug(((pokemon_payload.get("species") or {}).get("name")) or profile.get("pokemon_species") or "")
         profile.update(
             {
@@ -766,7 +664,7 @@ def _resolve_requested_pokemon_profile(
     species_payload: dict[str, Any] | None = None
     species_candidate: str | None = None
     for candidate in _species_resolution_candidates(normalized_requested_name):
-        species_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon-species/{candidate}/")
+        species_payload = fetch_resource("pokemon-species", candidate)
         if species_payload is not None:
             species_candidate = candidate
             break
@@ -774,7 +672,7 @@ def _resolve_requested_pokemon_profile(
     if species_payload is None:
         alias_candidate = POKEMON_RESOLUTION_ALIAS_FALLBACKS.get(normalized_requested_name)
         if alias_candidate:
-            species_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon-species/{alias_candidate}/")
+            species_payload = fetch_resource("pokemon-species", alias_candidate)
             if species_payload is not None:
                 species_candidate = alias_candidate
                 used_alias_fallback = True
@@ -803,7 +701,7 @@ def _resolve_requested_pokemon_profile(
         )
         return None, lineage
 
-    default_payload = fetch_json(f"https://pokeapi.co/api/v2/pokemon/{default_variety_name}/")
+    default_payload = fetch_resource("pokemon", default_variety_name)
     if default_payload is None:
         lineage = dict(lineage_base)
         lineage.update(
@@ -835,71 +733,6 @@ def _resolve_requested_pokemon_profile(
     return profile, None
 
 
-def _cached_profile_lookup_keys(row: dict[str, Any]) -> set[str]:
-    keys = {
-        normalize_species_slug(row.get("pokemon_species") or ""),
-        _normalize_requested_pokemon_name(row.get("requested_pokemon_name") or ""),
-        _normalize_requested_pokemon_name(row.get("normalized_requested_name") or ""),
-        normalize_species_slug(row.get("normalized_species") or ""),
-        _normalize_requested_pokemon_name(row.get("resolved_pokemon_name") or ""),
-        _normalize_requested_pokemon_name(row.get("name") or ""),
-    }
-    return {key for key in keys if key}
-
-
-def _build_cached_profile_index(cached_profiles_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    if cached_profiles_df.empty:
-        return {}
-
-    indexed: dict[str, dict[str, Any]] = {}
-    for row in cached_profiles_df.to_dict(orient="records"):
-        for key in _cached_profile_lookup_keys(row):
-            indexed.setdefault(key, row)
-    return indexed
-
-
-def _hydrate_profile_from_cache(
-    requested_species: str,
-    cached_profile_index: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
-    cached_row = cached_profile_index.get(requested_species)
-    if cached_row is None:
-        return None
-
-    hydrated = dict(cached_row)
-    normalized_species = normalize_species_slug(
-        hydrated.get("normalized_species")
-        or hydrated.get("pokemon_species")
-        or hydrated.get("resolved_pokemon_name")
-        or hydrated.get("name")
-        or requested_species
-    )
-    hydrated["pokemon_species"] = requested_species
-    hydrated["requested_pokemon_name"] = requested_species
-    hydrated["normalized_requested_name"] = requested_species
-    hydrated["normalized_species"] = normalized_species or requested_species
-    hydrated["resolution_method"] = str(hydrated.get("resolution_method") or "cached_profile").strip() or "cached_profile"
-    return hydrated
-
-
-def _hydrate_profile_from_offline_seed(requested_species: str) -> dict[str, Any] | None:
-    seed = OFFLINE_POKEMON_PROFILE_SEEDS.get(requested_species)
-    if seed is None:
-        return None
-
-    hydrated = dict(seed)
-    hydrated["pokemon_species"] = requested_species
-    hydrated["requested_pokemon_name"] = requested_species
-    hydrated["normalized_requested_name"] = requested_species
-    hydrated["normalized_species"] = requested_species
-    hydrated["is_default_variety"] = True
-    hydrated["is_legendary"] = False
-    hydrated["is_mythical"] = False
-    hydrated["resolution_method"] = "offline_seed_profile"
-    hydrated["resolution_warning"] = "offline_seed_profile"
-    return hydrated
-
-
 def _build_enriched_pokemon_profiles(
     all_pokemon_references: dict[str, Any],
     required_species: set[str],
@@ -916,43 +749,29 @@ def _build_enriched_pokemon_profiles(
             if normalized
         }
     )
-    cached_profiles_path = silver_dir / "references" / "pokemon_data.parquet"
-    cached_profiles_df = read_parquet(cached_profiles_path) if cached_profiles_path.exists() else pd.DataFrame()
-    cached_profile_index = _build_cached_profile_index(cached_profiles_df)
-
-    def _fetch_json(url: str) -> dict[str, Any] | None:
-        normalized_url = str(url or "").strip().lower()
-        pokeapi_match = re.search(r"/api/v2/([^/]+)/([^/?#]+)/?$", normalized_url)
-        if pokeapi_match is not None:
-            endpoint = pokeapi_match.group(1)
-            resource_part = pokeapi_match.group(2)
-            resource_name_or_id: str | int = resource_part
-            try:
-                resource_name_or_id = int(resource_part)
-            except (TypeError, ValueError):
-                resource_name_or_id = resource_part
-            cached_payload = _cached_pokebase_resource(endpoint, resource_name_or_id)
-            if cached_payload is not None:
-                return cached_payload
-        return None
+    def _fetch_resource(endpoint: str, resource_name_or_id: str | int) -> dict[str, Any] | None:
+        endpoint_name = str(endpoint or "").strip().lower()
+        if not endpoint_name:
+            return None
+        try:
+            payload = pokebase_get_data(endpoint_name, resource_name_or_id)
+        except Exception:
+            return None
+        normalized = _normalize_pokebase_payload(payload)
+        return normalized if isinstance(normalized, dict) and normalized else None
 
     for species in normalized_required_species:
         requested_species = _normalize_requested_pokemon_name(species)
         if not requested_species:
             continue
-        cached_profile = _hydrate_profile_from_cache(requested_species, cached_profile_index)
-        if cached_profile is not None:
-            profiles_by_requested[requested_species] = cached_profile
-            continue
         payload = all_pokemon_references.get(requested_species, {}) if isinstance(all_pokemon_references.get(requested_species), dict) else {}
         source_url = str(payload.get("url") or payload.get("source_url") or "").strip()
         reference_name = _normalize_requested_pokemon_name(payload.get("name") or requested_species)
-        profile, failure = _resolve_requested_pokemon_profile(reference_name or requested_species, fetch_json=_fetch_json)
+        profile, failure = _resolve_requested_pokemon_profile(
+            reference_name or requested_species,
+            fetch_resource=_fetch_resource,
+        )
         if profile is None:
-            offline_profile = _hydrate_profile_from_offline_seed(requested_species)
-            if offline_profile is not None:
-                profiles_by_requested[requested_species] = offline_profile
-                continue
             diagnostics.append(
                 {
                     "requested_pokemon_name": requested_species,

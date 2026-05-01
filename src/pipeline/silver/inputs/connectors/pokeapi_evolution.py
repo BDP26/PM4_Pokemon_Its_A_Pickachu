@@ -5,54 +5,47 @@ from __future__ import annotations
 from collections import deque
 from functools import lru_cache
 import logging
-from pathlib import Path
 from typing import Any
+import pokebase as pb
 
-import requests
-from requests.adapters import HTTPAdapter
-from src.pipeline.common.pokebase_cache import POKEBASE_CACHE_PATH, get_cached_pokebase_payload
 
-POKEAPI = "https://pokeapi.co/api/v2"
+def pokebase_get_data(endpoint: str, resource_name_or_id: str | int | None):
+    loader = getattr(pb, str(endpoint).strip().lower().replace("-", "_"), None)
+    if not callable(loader):
+        raise ValueError(f"Unsupported pokebase endpoint: {endpoint}")
+    return loader(resource_name_or_id)
+
+
+def _normalize_pokebase_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _normalize_pokebase_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_pokebase_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_pokebase_payload(item) for item in value]
+    if hasattr(value, "__dict__"):
+        raw = dict(getattr(value, "__dict__", {}) or {})
+        return {key: _normalize_pokebase_payload(item) for key, item in raw.items()}
+    return value
+
 logger = logging.getLogger(__name__)
-_SESSION = requests.Session()
-_SESSION.mount("https://", HTTPAdapter(max_retries=0))
-_SESSION.mount("http://", HTTPAdapter(max_retries=0))
-_POKEBASE_CACHE_PATH = POKEBASE_CACHE_PATH
 
 
-def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any]:
-    payload = get_cached_pokebase_payload(
-        endpoint,
-        resource_name_or_id,
-        resolve_name_via_listing=False,
-        empty_as_none=False,
-        cache_path=_POKEBASE_CACHE_PATH,
-    )
-    return payload if isinstance(payload, dict) else {}
-
-
-@lru_cache(maxsize=512)
-def _get_json(url: str) -> dict[str, Any]:
-    normalized_url = str(url or "").strip().rstrip("/")
-    if normalized_url.startswith(f"{POKEAPI}/"):
-        endpoint_resource = normalized_url.removeprefix(f"{POKEAPI}/")
-        parts = [part for part in endpoint_resource.split("/") if part]
-        if parts:
-            endpoint = parts[0]
-            resource_name_or_id = parts[1] if len(parts) > 1 else None
-            cached_payload = _cached_pokebase_payload(endpoint, resource_name_or_id)
-            if cached_payload:
-                return cached_payload
-            logger.warning("[silver/evolution] missing cached evolution payload url=%s", url)
-            return {}
-    try:
-        response = _SESSION.get(url, timeout=5)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        logger.warning("[silver/evolution] unable to fetch evolution payload url=%s error=%s", url, exc)
+@lru_cache(maxsize=1024)
+def _get_resource(endpoint: str, resource_name_or_id: str | int | None) -> dict[str, Any]:
+    if not endpoint:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    try:
+        payload = pokebase_get_data(endpoint, resource_name_or_id)
+    except Exception:
+        logger.warning(
+            "[silver/evolution] resource fetch failed endpoint=%s resource=%s",
+            endpoint,
+            resource_name_or_id,
+        )
+        return {}
+    normalized = _normalize_pokebase_payload(payload)
+    return normalized if isinstance(normalized, dict) else {}
 
 
 def get_evolution_chain_for_species(species_name: str) -> dict[str, Any]:
@@ -61,12 +54,18 @@ def get_evolution_chain_for_species(species_name: str) -> dict[str, Any]:
     if not species:
         return {}
 
-    species_payload = _get_json(f"{POKEAPI}/pokemon-species/{species}")
+    species_payload = _get_resource("pokemon-species", species)
     evo_chain = species_payload.get("evolution_chain") if isinstance(species_payload, dict) else None
-    evo_url = evo_chain.get("url") if isinstance(evo_chain, dict) else None
-    if not isinstance(evo_url, str) or not evo_url:
+    evo_url = str(evo_chain.get("url") or "") if isinstance(evo_chain, dict) else ""
+    evo_id: str | int | None = None
+    if evo_url:
+        parts = [part for part in evo_url.rstrip("/").split("/") if part]
+        if parts:
+            last = parts[-1]
+            evo_id = int(last) if last.isdigit() else last
+    if evo_id is None:
         return {}
-    return _get_json(evo_url)
+    return _get_resource("evolution-chain", evo_id)
 
 
 def _detail_has_special_condition(detail: dict[str, Any]) -> bool:

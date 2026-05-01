@@ -6,11 +6,15 @@ from src.pipeline.common.io import read_parquet, write_parquet
 from src.pipeline.silver.inputs.connectors import pokeapi_moves
 
 
-def test_api_move_profile_uses_offline_seed_for_gen6_kaggle_moves(monkeypatch) -> None:
-    def _fail_live_lookup(_: str) -> None:
-        raise AssertionError("live pokebase lookup should not run for offline-seeded moves")
+def test_api_move_profile_uses_pokebase_live_lookup(monkeypatch) -> None:
+    class _Move:
+        power = 80
+        accuracy = 100
+        pp = 10
+        damage_class = type("DamageClass", (), {"name": "special"})()
+        type = type("MoveType", (), {"name": "fairy"})()
 
-    monkeypatch.setattr(pokeapi_moves.pb, "move", _fail_live_lookup)
+    monkeypatch.setattr(pokeapi_moves.pb, "move", lambda _: _Move())
 
     profile = pokeapi_moves._api_move_profile("Dazzling Gleam")
 
@@ -21,7 +25,7 @@ def test_api_move_profile_uses_offline_seed_for_gen6_kaggle_moves(monkeypatch) -
     assert bool(profile["is_damage_move"]) is True
 
 
-def test_api_move_profile_uses_readonly_pokebase_cache_before_live_lookup(monkeypatch) -> None:
+def test_api_move_profile_falls_back_to_readonly_pokebase_cache_when_live_lookup_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         pokeapi_moves,
         "_cached_pokebase_payload",
@@ -310,7 +314,7 @@ def test_bootstrap_move_reference_preserves_existing_non_target_rows(tmp_path: P
     assert set(move_reference_df["move_name"].tolist()) == {"thunder-shock", "vine-whip"}
 
 
-def test_bootstrap_move_reference_writes_offline_seed_profiles_without_live_api(
+def test_bootstrap_move_reference_fetches_profiles_from_pokebase(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -339,10 +343,14 @@ def test_bootstrap_move_reference_writes_offline_seed_profiles_without_live_api(
     )
     monkeypatch.setattr(pokeapi_moves, "_api_learnable_move_levels_for_species", lambda species, game_version: {})
 
-    def _fail_live_lookup(_: str) -> None:
-        raise AssertionError("live pokebase lookup should not run for offline-seeded moves")
+    class _Move:
+        power = 140
+        accuracy = 100
+        pp = 10
+        damage_class = type("DamageClass", (), {"name": "special"})()
+        type = type("MoveType", (), {"name": "normal"})()
 
-    monkeypatch.setattr(pokeapi_moves.pb, "move", _fail_live_lookup)
+    monkeypatch.setattr(pokeapi_moves.pb, "move", lambda _: _Move())
 
     pokeapi_moves._clear_loaded_caches()
     pokeapi_moves.bootstrap_move_reference_cache(

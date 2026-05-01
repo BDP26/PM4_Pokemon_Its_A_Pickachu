@@ -831,13 +831,32 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
     sequence_df = joined[joined["simulation_mode"].fillna("").eq("gauntlet")].copy()
     if not sequence_df.empty:
         sequence_df["sequence_position"] = pd.to_numeric(sequence_df["sequence_position"], errors="coerce")
+        sequence_df["mc_win_rate"] = pd.to_numeric(sequence_df["mc_win_rate"], errors="coerce").fillna(0.0)
+        sequence_df["n_trials"] = pd.to_numeric(sequence_df.get("n_trials"), errors="coerce").fillna(0).astype(int)
+        sequence_df["gauntlet_success_rate"] = pd.to_numeric(
+            sequence_df.get("gauntlet_success_rate"),
+            errors="coerce",
+        ).fillna(0.0)
+        sequence_df["sequence_win_rate_fallback"] = (
+            sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"])["mc_win_rate"]
+            .transform("prod")
+            .fillna(0.0)
+        )
+        sequence_df["sequence_expected_wins_fallback"] = (
+            sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"])["mc_win_rate"]
+            .transform("sum")
+            .fillna(0.0)
+        )
         if "gauntlet_success_rate" in sequence_df.columns and sequence_df["gauntlet_success_rate"].notna().any():
             sequence_rank = (
                 sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
                 .agg(
-                    sequence_win_rate=("gauntlet_success_rate", "max"),
+                    strict_clear_rate=("gauntlet_success_rate", "max"),
                     mean_mc_win_rate=("mc_win_rate", "mean"),
                     bosses_covered=("sequence_position", lambda s: int(s.dropna().nunique())),
+                    sequence_n_trials=("n_trials", "max"),
+                    sequence_completion_prob=("sequence_win_rate_fallback", "max"),
+                    sequence_expected_wins=("sequence_expected_wins_fallback", "max"),
                     degraded_ratio=("degraded_data", "mean"),
                     player_avg_level=("player_avg_level", "mean"),
                     player_max_level=("player_max_level", "max"),
@@ -853,9 +872,12 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             sequence_rank = (
                 sequence_df.groupby(["effective_game_version", "starter_base", "player_team_id"], as_index=False)
                 .agg(
-                    sequence_win_rate=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).prod())),
+                    strict_clear_rate=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).prod())),
                     mean_mc_win_rate=("mc_win_rate", "mean"),
                     bosses_covered=("sequence_position", lambda s: int(s.dropna().nunique())),
+                    sequence_n_trials=("n_trials", "max"),
+                    sequence_completion_prob=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).prod())),
+                    sequence_expected_wins=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
                     degraded_ratio=("degraded_data", "mean"),
                     player_avg_level=("player_avg_level", "mean"),
                     player_max_level=("player_max_level", "max"),
@@ -867,18 +889,48 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
                     progression_pool_id=("progression_pool_id", "first"),
                 )
             )
+        sequence_rank["sequence_win_rate"] = pd.to_numeric(
+            sequence_rank["sequence_completion_prob"],
+            errors="coerce",
+        ).fillna(0.0)
+        sequence_rank["sequence_n_trials"] = (
+            pd.to_numeric(sequence_rank["sequence_n_trials"], errors="coerce").fillna(0).astype(int)
+        )
+        sequence_rank["bosses_covered"] = pd.to_numeric(
+            sequence_rank["bosses_covered"],
+            errors="coerce",
+        ).fillna(0).astype(int)
+        sequence_rank["sequence_expected_wins"] = pd.to_numeric(
+            sequence_rank["sequence_expected_wins"],
+            errors="coerce",
+        ).fillna(0.0)
+        sequence_rank["sequence_expected_wins_pct"] = (
+            sequence_rank["sequence_expected_wins"]
+            / sequence_rank["bosses_covered"].clip(lower=1)
+        )
+        sequence_rank["sequence_wins"] = (
+            (pd.to_numeric(sequence_rank["strict_clear_rate"], errors="coerce").fillna(0.0)
+             * sequence_rank["sequence_n_trials"])
+            .round()
+            .astype(int)
+        )
         sequence_rank = _attach_group_diagnostics(
             sequence_rank,
             group_cols=["effective_game_version", "starter_base"],
             win_rate_col="sequence_win_rate",
         )
         sequence_rank["degraded_ratio"] = sequence_rank["degraded_ratio"].fillna(0.0)
-        sequence_rank["sequence_score"] = sequence_rank["sequence_win_rate"] * (
-            1.0 - sequence_rank["degraded_ratio"] * 0.2
-        )
+        progression_signal = pd.to_numeric(sequence_rank["progression_depth"], errors="coerce").fillna(0.5).clip(0.0, 1.0)
+        early_weight = 1.0 - progression_signal
+        late_weight = progression_signal
+        sequence_rank["sequence_score"] = (
+            (0.35 + 0.45 * late_weight) * sequence_rank["sequence_completion_prob"]
+            + (0.25 + 0.35 * early_weight) * sequence_rank["sequence_expected_wins_pct"]
+            + 0.10 * pd.to_numeric(sequence_rank["strict_clear_rate"], errors="coerce").fillna(0.0)
+        ) * (1.0 - sequence_rank["degraded_ratio"] * 0.2)
         sequence_rank = sequence_rank.sort_values(
-            ["effective_game_version", "starter_base", "sequence_score", "sequence_win_rate", "mean_mc_win_rate", "player_team_id"],
-            ascending=[True, True, False, False, False, True],
+            ["effective_game_version", "starter_base", "sequence_score", "sequence_completion_prob", "sequence_expected_wins_pct", "mean_mc_win_rate", "player_team_id"],
+            ascending=[True, True, False, False, False, False, True],
         )
         sequence_rank["rank_in_sequence"] = sequence_rank.groupby(["effective_game_version", "starter_base"]).cumcount() + 1
         outputs.extend(_write_starter_sequence_outputs(gold_dir, sequence_rank))

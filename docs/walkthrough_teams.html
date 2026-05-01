@@ -919,6 +919,21 @@
       }
       return Array.isArray(sequence.top_teams_overall) ? sequence.top_teams_overall.slice(0, 5) : [];
     }
+    function sequencePct(team) {
+      if (!team || typeof team !== "object") return null;
+      const completion = Number.isFinite(team.sequence_completion_prob) ? Number(team.sequence_completion_prob) : null;
+      const expectedPct = Number.isFinite(team.sequence_expected_wins_pct) ? Number(team.sequence_expected_wins_pct) : null;
+      const legacySequence = Number.isFinite(team.sequence_win_rate) ? Number(team.sequence_win_rate) : null;
+      const legacyBoss = Number.isFinite(team.mc_win_rate) ? Number(team.mc_win_rate) : null;
+      if (completion !== null && completion > 0) return completion;
+      if (expectedPct !== null && expectedPct > 0) return expectedPct;
+      if (legacySequence !== null && legacySequence > 0) return legacySequence;
+      if (legacyBoss !== null) return legacyBoss;
+      if (completion !== null) return completion;
+      if (expectedPct !== null) return expectedPct;
+      if (legacySequence !== null) return legacySequence;
+      return null;
+    }
     function leagueBosses(rows) {
       return rows.filter((row) => {
         const role = String((row.boss_metadata || {}).boss_role || "");
@@ -1122,7 +1137,7 @@
         <div class="kpis">
           <div class="kpi"><div class="kpi-label">Boss Order</div><div class="kpi-value">#${safeText(selected.boss_order)}</div></div>
           <div class="kpi"><div class="kpi-label">Reachable Areas</div><div class="kpi-value">${safeText(selected.location_count || 0)}</div></div>
-          <div class="kpi"><div class="kpi-label">Top Win Rate</div><div class="kpi-value">${pct(leadTeam && leadTeam.mc_win_rate)}</div></div>
+          <div class="kpi"><div class="kpi-label">Top Win Rate</div><div class="kpi-value">${pct(sequencePct(leadTeam))}</div></div>
           <div class="kpi"><div class="kpi-label">Starter Filter</div><div class="kpi-value">${safeText(starter ? cap(starter) : "Any")}</div></div>
         </div>
       `;
@@ -1176,7 +1191,7 @@
         ? teams.map((team, idx) => {
           const rankValue = isLeagueStage ? (team.rank_in_sequence || idx + 1) : (team.rank_in_boss_version || idx + 1);
           const statPills = [
-            isLeagueStage ? `Sequence ${pct(team.sequence_win_rate)}` : `Win ${pct(team.mc_win_rate)}`,
+            isLeagueStage ? `Sequence ${pct(sequencePct(team))}` : `Win ${pct(team.mc_win_rate)}`,
             isLeagueStage ? `Bosses ${safeText(team.bosses_covered)}` : `${safeText(team.wins)}/${safeText(team.n_trials)} wins`,
             `Avg Lv ${safeText(team.avg_level)}`,
             isLeagueStage ? `Degraded ${safeText(team.degraded_ratio)}` : (team.boss_avg_level !== null && team.boss_avg_level !== undefined ? `Boss Avg Lv ${safeText(team.boss_avg_level)}` : null),
@@ -1204,7 +1219,7 @@
                 `Expand team #${safeText(rankValue)}`,
                 [
                   `${Array.isArray(team && team.pokemon) ? team.pokemon.length : 0} Pokemon`,
-                  isLeagueStage ? `Sequence ${pct(team.sequence_win_rate)}` : `Win ${pct(team.mc_win_rate)}`,
+                  isLeagueStage ? `Sequence ${pct(sequencePct(team))}` : `Win ${pct(team.mc_win_rate)}`,
                   `Avg Lv ${safeText(team.avg_level)}`
                 ],
                 team

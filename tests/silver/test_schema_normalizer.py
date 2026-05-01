@@ -21,7 +21,7 @@ def test_normalize_boss_records_preserves_encounter_metadata() -> None:
                     "route-24": [
                         {
                             "species": "psyduck",
-                            "pokemon_url": "https://pokeapi.co/api/v2/pokemon/54/",
+                            "pokemon_url": "pokebase://pokemon/54",
                             "level_min": 18,
                             "level_max": 20,
                             "encounter_chance_min": 25,

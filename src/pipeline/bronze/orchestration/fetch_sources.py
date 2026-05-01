@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional, cast
 
 from bs4 import BeautifulSoup
+from pokebase.api import get_data as pokebase_get_data
 
 from src.pipeline.common.http import build_session
 from src.pipeline.common.io import write_json
@@ -17,7 +18,6 @@ from src.pipeline.settings import (
     BULBA_API,
     KAGGLE_GYM_LEADERS_DATASET,
     KAGGLE_GYM_LEADERS_FILE_PATH,
-    POKEAPI,
     ensure_medallion_dirs,
 )
 from src.pipeline.silver.config.game_config import get_games_config
@@ -82,15 +82,19 @@ def _build_location_area_parent_map(area_rows: list[dict[str, object]]) -> dict[
     return parent_map
 
 
-def _fetch_pokeapi_location_index(session) -> dict[str, object]:
-    location_response = session.get(f"{POKEAPI}/location", params={"limit": 2000}, timeout=30)
-    location_response.raise_for_status()
-    location_payload = location_response.json()
+def _get_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, object]:
+    try:
+        payload = pokebase_get_data(endpoint, resource_name_or_id)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _fetch_pokeapi_location_index() -> dict[str, object]:
+    location_payload = _get_pokebase_payload("location")
     results = location_payload.get("results", [])
 
-    area_response = session.get(f"{POKEAPI}/location-area", params={"limit": 20000}, timeout=30)
-    area_response.raise_for_status()
-    area_payload = area_response.json()
+    area_payload = _get_pokebase_payload("location-area")
     area_results = area_payload.get("results", [])
 
     return {
@@ -104,27 +108,22 @@ def _fetch_pokeapi_location_index(session) -> dict[str, object]:
     }
 
 
-def _fetch_capture_rate(session, pokemon_url: str, capture_rate_cache: dict[str, int | None]) -> int | None:
+def _fetch_capture_rate(pokemon_url: str, capture_rate_cache: dict[str, int | None]) -> int | None:
     if not pokemon_url:
         return None
     if pokemon_url in capture_rate_cache:
         return capture_rate_cache[pokemon_url]
     try:
         pokemon_id = pokemon_url.rstrip("/").split("/")[-1]
-        species_url = f"{POKEAPI}/pokemon-species/{pokemon_id}"
-        response = session.get(species_url, timeout=15)
-        if response.status_code == 200:
-            payload = response.json()
-            value = payload.get("capture_rate")
-            capture_rate_cache[pokemon_url] = int(value) if isinstance(value, int) else None
-        else:
-            capture_rate_cache[pokemon_url] = None
+        payload = _get_pokebase_payload("pokemon-species", pokemon_id)
+        value = payload.get("capture_rate")
+        capture_rate_cache[pokemon_url] = int(value) if isinstance(value, int) else None
     except Exception:
         capture_rate_cache[pokemon_url] = None
     return capture_rate_cache[pokemon_url]
 
 
-def _build_location_pokemon_snapshot(session, location_index: dict[str, object]) -> dict[str, object]:
+def _build_location_pokemon_snapshot(location_index: dict[str, object]) -> dict[str, object]:
     diagnostics: dict[str, object] = {"location_errors": [], "area_errors": [], "capture_rate_errors": []}
     payload: dict[str, dict[str, object]] = {}
     capture_rate_cache: dict[str, int | None] = {}
@@ -135,11 +134,11 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
         if not slug:
             continue
         try:
-            location_response = session.get(f"{POKEAPI}/location/{slug}", timeout=15)
-            if location_response.status_code != 200:
-                cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "status": location_response.status_code})
+            location_payload = _get_pokebase_payload("location", slug)
+            if not location_payload:
+                cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "status": 404})
                 continue
-            area_names = [str(entry.get("name") or "").strip() for entry in location_response.json().get("areas", []) if entry.get("name")]
+            area_names = [str(entry.get("name") or "").strip() for entry in location_payload.get("areas", []) if entry.get("name")]
         except Exception:
             cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "reason": "request_exception"})
             continue
@@ -149,11 +148,10 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
         area_details: dict[str, dict[str, object]] = {}
         for area_name in area_names:
             try:
-                area_response = session.get(f"{POKEAPI}/location-area/{area_name}", timeout=15)
-                if area_response.status_code != 200:
-                    cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "status": area_response.status_code})
+                area_payload = _get_pokebase_payload("location-area", area_name)
+                if not area_payload:
+                    cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "status": 404})
                     continue
-                area_payload = area_response.json()
             except Exception:
                 cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "reason": "request_exception"})
                 continue
@@ -253,7 +251,7 @@ def _build_location_pokemon_snapshot(session, location_index: dict[str, object])
         for species_map in version_encounters.values():
             for entry in species_map.values():
                 if entry.get("capture_rate") is None:
-                    entry["capture_rate"] = _fetch_capture_rate(session, str(entry.get("pokemon_url") or ""), capture_rate_cache)
+                    entry["capture_rate"] = _fetch_capture_rate(str(entry.get("pokemon_url") or ""), capture_rate_cache)
                     if entry["capture_rate"] is None:
                         cast(list[dict[str, object]], diagnostics["capture_rate_errors"]).append({"slug": slug, "species": entry.get("species")})
 
@@ -385,11 +383,11 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
 
     session = build_session()
 
-    location_index = _fetch_pokeapi_location_index(session)
+    location_index = _fetch_pokeapi_location_index()
     location_signature = stable_signature(location_index)
     if _should_write_source(source_state, "pokeapi:location_index", location_signature):
         write_json(pokeapi_dir / "location_index.json", location_index)
-        location_snapshot = _build_location_pokemon_snapshot(session, location_index)
+        location_snapshot = _build_location_pokemon_snapshot(location_index)
         write_json(pokeapi_dir / "location_pokemon_snapshot.json", location_snapshot)
         source_state["pokeapi:location_index"] = BronzeSourceState(
             source="pokeapi:location_index",

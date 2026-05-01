@@ -20,7 +20,6 @@ TYPE_CHART_CSV_PATH = BRONZE_DIR / "type_chart.csv"
 TYPE_CHART_JSON_PATH = BRONZE_DIR / "type_chart.json"
 
 BULBA_API = "https://bulbapedia.bulbagarden.net/w/api.php"
-POKEAPI = "https://pokeapi.co/api/v2"
 
 KAGGLE_GYM_LEADERS_DATASET = "maxiboo/pokemon-gen-1-9-gym-leaders-elite-four"
 KAGGLE_GYM_LEADERS_FILE_PATH = ""

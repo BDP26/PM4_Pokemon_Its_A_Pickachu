@@ -70,6 +70,7 @@ GAME_VERSION_TO_GENERATION = {
     "x": 6,
     "y": 6,
 }
+_EXCLUDED_ENCOUNTER_METHODS = {"only one", "gift", "npc trade"}
 
 
 def _normalize_nullable_key_part(value: Any) -> str | None:
@@ -121,6 +122,13 @@ def _clamp_progression_depth(value: Any) -> float:
     return max(0.0, min(1.0, numeric))
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _progression_level_offset(progression_depth: float) -> int:
     depth = _clamp_progression_depth(progression_depth)
     span = EARLY_GAME_LEVEL_OFFSET - LATE_GAME_LEVEL_OFFSET
@@ -140,6 +148,58 @@ def _effective_member_level(*, level_cap: int, encounter_level_max: int) -> int:
 def _generation_for_game_version(game_version: str) -> int | None:
     normalized = normalize_key_part(game_version)
     return GAME_VERSION_TO_GENERATION.get(normalized)
+
+
+def _normalize_encounter_methods(value: Any) -> set[str]:
+    if isinstance(value, (set, tuple)):
+        source = list(value)
+    elif hasattr(value, "tolist") and not isinstance(value, (str, bytes, dict)):
+        source = list(value.tolist())
+    elif isinstance(value, list):
+        source = value
+    else:
+        return set()
+    return {
+        str(method).strip().lower()
+        for method in source
+        if str(method).strip()
+    }
+
+
+def _is_excluded_encounter_method(method: str) -> bool:
+    normalized = str(method or "").strip().lower()
+    if not normalized:
+        return False
+    compact = normalized.replace("-", " ").replace("_", " ")
+    compact = " ".join(part for part in compact.split() if part)
+    if compact in _EXCLUDED_ENCOUNTER_METHODS:
+        return True
+    return any(token in compact for token in ("only one", "npc trade", "gift"))
+
+
+def _has_excluded_encounter_method(methods: Any) -> bool:
+    if isinstance(methods, set):
+        method_iter = methods
+    elif isinstance(methods, list):
+        method_iter = methods
+    else:
+        return False
+    return any(_is_excluded_encounter_method(str(method)) for method in method_iter)
+
+
+def _target_team_fill_size(
+    *,
+    progression_depth: float | None,
+    catch_pool_size: int,
+) -> int:
+    """Scale generated team size with progression: early small, late larger."""
+    max_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
+    if max_size <= 2:
+        return max_size
+    depth = _clamp_progression_depth(0.5 if progression_depth is None else progression_depth)
+    # 2 slots in very early game, gradually up to max_size near endgame.
+    scaled = 2 + int(round(depth * float(max_size - 2)))
+    return max(1, min(max_size, scaled))
 
 
 def _legacy_progression_depth_context_from_boss_teams(
@@ -243,6 +303,8 @@ def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, 
             for encounter in encounters:
                 if not isinstance(encounter, dict):
                     continue
+                if _has_excluded_encounter_method(encounter.get("encounter_methods") or encounter.get("methods")):
+                    continue
                 species = normalize_key_part(encounter.get("species"))
                 if not species or is_restricted_encounter_species(species):
                     continue
@@ -276,6 +338,7 @@ def _rank_candidate_pool(
     *,
     boss_level: int,
     pool_size: int,
+    progression_depth: float | None = None,
 ) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
     if not candidates:
         return [], {"input": 0, "output": 0, "pruned": 0, "family_pruned": 0}
@@ -284,12 +347,20 @@ def _rank_candidate_pool(
     family_pruned = max(0, len(candidates) - len(family_deduped))
     scored: list[tuple[float, tuple[str, int, int, int]]] = []
 
+    clamped_depth = _clamp_progression_depth(0.5 if progression_depth is None else progression_depth)
+    early_focus = 1.0 - clamped_depth
     for species, chance_max, level_max, capture_rate in family_deduped:
         level_gap = abs(int(level_max or 0) - int(boss_level or DEFAULT_MEMBER_LEVEL))
         level_realism = max(0.0, 1.0 - min(level_gap, 25) / 25.0)
         chance_signal = min(max(float(chance_max), 0.0), 100.0) / 100.0
         capture_signal = min(max(float(capture_rate), 0.0), 255.0) / 255.0
-        score = (0.20 * chance_signal) + (0.15 * capture_signal) + (0.65 * level_realism)
+        rarity_penalty = (1.0 - chance_signal) * 0.6 + (1.0 - capture_signal) * 0.4
+        score = (
+            (0.20 + 0.25 * early_focus) * chance_signal
+            + (0.15 + 0.20 * early_focus) * capture_signal
+            + (0.65 - 0.35 * early_focus) * level_realism
+            - (0.35 * early_focus) * rarity_penalty
+        )
         scored.append((score, (species, chance_max, level_max, capture_rate)))
 
     scored.sort(key=lambda item: (-item[0], -item[1][1], -item[1][2], -item[1][3], item[1][0]))
@@ -359,6 +430,8 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
                 continue
             for encounter in encounters:
                 if not isinstance(encounter, dict):
+                    continue
+                if _has_excluded_encounter_method(encounter.get("encounter_methods") or encounter.get("methods")):
                     continue
                 species = normalize_key_part(encounter.get("species"))
                 if not species or is_restricted_encounter_species(species):
@@ -468,12 +541,17 @@ def build_progression_source_teams(
 
     evolution_rules_by_game = evolution_rules_by_game or {}
 
-    team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
-    candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
+    max_team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
+    candidate_pool_size = max(max_team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
 
     for pool in progression_pools:
         game_version = pool["game_version"]
         boss_name = pool["boss_name"]
+        pool_progression_depth = _safe_float(pool.get("progression_depth"))
+        team_fill_size = _target_team_fill_size(
+            progression_depth=pool_progression_depth,
+            catch_pool_size=max_team_fill_size,
+        )
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
         target_generation = _generation_for_game_version(game_version)
         raw_candidates = list(pool["pool_candidates"])
@@ -507,6 +585,7 @@ def build_progression_source_teams(
             normalized_candidates,
             boss_level=boss_level,
             pool_size=candidate_pool_size,
+            progression_depth=None,
         )
         logger.debug(
             "[silver/teams] candidate pool diagnostics game=%s boss=%s raw=%s game_filtered_removed=%s progression_filtered_removed=%s evolved=%s post_validation_removed=%s no_damage_removed=%s final=%s rank_pruned=%s",
@@ -621,10 +700,14 @@ def build_progression_source_teams_from_encounters(
     encounters["level_max"] = pd.to_numeric(encounters["level_max"], errors="coerce").fillna(0).astype(int)
     encounters["encounter_chance_max"] = pd.to_numeric(encounters["encounter_chance_max"], errors="coerce").fillna(0).astype(int)
     encounters["capture_rate"] = pd.to_numeric(encounters["capture_rate"], errors="coerce").fillna(0).astype(int)
+    encounters["methods"] = encounters["methods"].apply(_normalize_encounter_methods) if "methods" in encounters.columns else [set() for _ in range(len(encounters))]
     encounters = encounters[
         (encounters["game_version"] != "")
         & (encounters["boss_id"] != "")
         & (encounters["pokemon_species"] != "")
+    ]
+    encounters = encounters[
+        ~encounters["methods"].apply(_has_excluded_encounter_method)
     ]
 
     bosses = bosses_df.copy()
@@ -673,8 +756,8 @@ def build_progression_source_teams_from_encounters(
             boss_teams=boss_teams,
         )
     evolution_rules_by_game = evolution_rules_by_game or {}
-    team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
-    candidate_pool_size = max(team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
+    max_team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
+    candidate_pool_size = max(max_team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
     sources: list[dict[str, Any]] = []
 
     dropped_missing_boss = 0
@@ -707,6 +790,10 @@ def build_progression_source_teams_from_encounters(
         player_level_cap = _level_cap_from_progression(
             boss_ace_level=progression.boss_ace_level,
             progression_depth=progression.progression_depth,
+        )
+        team_fill_size = _target_team_fill_size(
+            progression_depth=progression.progression_depth,
+            catch_pool_size=max_team_fill_size,
         )
 
         grouped = (
@@ -768,6 +855,7 @@ def build_progression_source_teams_from_encounters(
             normalized_candidates,
             boss_level=player_level_cap,
             pool_size=candidate_pool_size,
+            progression_depth=progression.progression_depth,
         )
         logger.debug(
             "[silver/teams] per-boss final candidate count game=%s boss_id=%s boss_name=%s raw=%s final=%s evolved=%s removed=%s no_damage_removed=%s pruned=%s progression_depth=%.4f level_cap=%s offset=%s ace_level=%s",

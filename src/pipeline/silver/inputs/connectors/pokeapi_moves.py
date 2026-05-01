@@ -31,65 +31,6 @@ _MOVE_PROFILE_CACHE: dict[str, dict[str, Any]] = {}
 _LEARNABLE_BY_GAME_SPECIES: dict[tuple[str, str], dict[str, int]] = {}
 _LEARNABLE_CACHE: dict[tuple[str, int, str], tuple[str, ...]] = {}
 _CACHE_SILVER_DIR: str | None = None
-_OFFLINE_MOVE_PROFILE_SEED: dict[str, dict[str, Any]] = {
-    # These Gen 6 Kaggle boss moves are required by the active repo build
-    # targets and are missing from the persisted move_reference parquet.
-    "boomburst": {
-        "move_name": "boomburst",
-        "power": 140,
-        "raw_power": 140,
-        "damage_class": "special",
-        "type": "normal",
-        "accuracy": 100,
-        "pp": 10,
-    },
-    "bullet-punch": {
-        "move_name": "bullet-punch",
-        "power": 40,
-        "raw_power": 40,
-        "damage_class": "physical",
-        "type": "steel",
-        "accuracy": 100,
-        "pp": 30,
-    },
-    "dazzling-gleam": {
-        "move_name": "dazzling-gleam",
-        "power": 80,
-        "raw_power": 80,
-        "damage_class": "special",
-        "type": "fairy",
-        "accuracy": 100,
-        "pp": 10,
-    },
-    "electric-terrain": {
-        "move_name": "electric-terrain",
-        "power": None,
-        "raw_power": None,
-        "damage_class": "status",
-        "type": "electric",
-        "accuracy": None,
-        "pp": 10,
-    },
-    "frost-breath": {
-        "move_name": "frost-breath",
-        "power": 60,
-        "raw_power": 60,
-        "damage_class": "special",
-        "type": "ice",
-        "accuracy": 90,
-        "pp": 10,
-    },
-    "infestation": {
-        "move_name": "infestation",
-        "power": 20,
-        "raw_power": 20,
-        "damage_class": "special",
-        "type": "bug",
-        "accuracy": 100,
-        "pp": 20,
-    },
-}
-
 def _normalize_learned_level(raw_level: Any) -> int:
     try:
         level = int(raw_level or 0)
@@ -248,35 +189,6 @@ def _build_move_row_from_profile(move_name: str, profile: dict[str, Any]) -> dic
     return row
 
 
-def _offline_move_profile(move_name: str) -> dict[str, Any] | None:
-    normalized = normalize_move_name(move_name)
-    profile = _OFFLINE_MOVE_PROFILE_SEED.get(normalized)
-    if profile is None:
-        return None
-
-    damage_class = str(profile.get("damage_class") or "").strip().lower()
-    raw_power = profile.get("raw_power", profile.get("power"))
-    effective_power, power_handling = resolve_effective_power(
-        move_name=normalized,
-        power=raw_power,
-        damage_class=damage_class,
-    )
-    return {
-        "move_name": normalized,
-        "power": profile.get("power"),
-        "raw_power": raw_power,
-        "damage_class": damage_class,
-        "type": str(profile.get("type") or "").strip().lower() or None,
-        "accuracy": profile.get("accuracy"),
-        "pp": profile.get("pp"),
-        "effective_power": effective_power,
-        "power_handling": power_handling,
-        "is_status_move": damage_class == "status",
-        "is_damage_move": effective_power > 0,
-        "is_null_power": raw_power is None,
-    }
-
-
 def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None = None) -> dict[str, Any] | None:
     payload = get_cached_pokebase_payload(
         endpoint,
@@ -289,38 +201,38 @@ def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | Non
 
 def _api_move_profile(move_name: str) -> dict[str, Any]:
     normalized = normalize_move_name(move_name)
-    offline_profile = _offline_move_profile(normalized)
-    if offline_profile is not None:
-        return offline_profile
-    cached_move = _cached_pokebase_payload("move", normalized)
-    if cached_move is not None:
-        raw_power = cached_move.get("power")
-        damage_class = str(((cached_move.get("damage_class") or {}) if isinstance(cached_move.get("damage_class"), dict) else {}).get("name") or "").strip().lower()
-        move_type = str(((cached_move.get("type") or {}) if isinstance(cached_move.get("type"), dict) else {}).get("name") or "").strip().lower()
-        if damage_class and move_type:
-            effective_power, power_handling = resolve_effective_power(
-                move_name=normalized,
-                power=raw_power,
-                damage_class=damage_class,
-            )
-            return {
-                "move_name": normalized,
-                "power": raw_power,
-                "raw_power": raw_power,
-                "damage_class": damage_class,
-                "type": move_type,
-                "accuracy": cached_move.get("accuracy"),
-                "pp": cached_move.get("pp"),
-                "effective_power": effective_power,
-                "power_handling": power_handling,
-                "is_status_move": damage_class == "status",
-                "is_damage_move": effective_power > 0,
-                "is_null_power": raw_power is None,
-            }
     try:
         move = pb.move(normalized)
     except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"Unable to fetch canonical move metadata for move={normalized}") from exc
+        cached_move = _cached_pokebase_payload("move", normalized)
+        if cached_move is None:
+            raise ValueError(f"Unable to fetch canonical move metadata for move={normalized}") from exc
+        raw_power = cached_move.get("power")
+        damage_class = str(((cached_move.get("damage_class") or {}) if isinstance(cached_move.get("damage_class"), dict) else {}).get("name") or "").strip().lower()
+        move_type = str(((cached_move.get("type") or {}) if isinstance(cached_move.get("type"), dict) else {}).get("name") or "").strip().lower()
+        if not damage_class or not move_type:
+            raise ValueError(
+                f"Canonical move metadata incomplete for move={normalized}: type={move_type or None} damage_class={damage_class or None}"
+            ) from exc
+        effective_power, power_handling = resolve_effective_power(
+            move_name=normalized,
+            power=raw_power,
+            damage_class=damage_class,
+        )
+        return {
+            "move_name": normalized,
+            "power": raw_power,
+            "raw_power": raw_power,
+            "damage_class": damage_class,
+            "type": move_type,
+            "accuracy": cached_move.get("accuracy"),
+            "pp": cached_move.get("pp"),
+            "effective_power": effective_power,
+            "power_handling": power_handling,
+            "is_status_move": damage_class == "status",
+            "is_damage_move": effective_power > 0,
+            "is_null_power": raw_power is None,
+        }
 
     raw_power = getattr(move, "power", None)
     damage_class = str(getattr(getattr(move, "damage_class", None), "name", "") or "").strip().lower()

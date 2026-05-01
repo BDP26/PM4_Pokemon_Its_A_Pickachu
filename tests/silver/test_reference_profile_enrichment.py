@@ -138,29 +138,15 @@ def test_pokemon_data_contract_ignores_nan_required_species(tmp_path: Path) -> N
     assert diagnostics_df.empty
 
 
-def test_enriched_profiles_ignore_nan_required_species(tmp_path: Path) -> None:
-    cached_profiles = pd.DataFrame(
-        [
-            {
-                "pokemon_species": "snivy",
-                "name": "snivy",
-                "type_1": "grass",
-                "type_2": None,
-                "base_hp": 45,
-                "base_attack": 45,
-                "base_defense": 55,
-                "base_special_attack": 45,
-                "base_special_defense": 55,
-                "base_speed": 63,
-                "resolved_pokemon_name": "snivy",
-                "resolved_pokeapi_id": 495,
-                "resolution_method": "cached_profile",
-            }
-        ]
-    )
-    references_dir = tmp_path / "references"
-    references_dir.mkdir(parents=True, exist_ok=True)
-    cached_profiles.to_parquet(references_dir / "pokemon_data.parquet", index=False)
+def test_enriched_profiles_ignore_nan_required_species(tmp_path: Path, monkeypatch) -> None:
+    def _pokebase_payload(endpoint: str, resource_name_or_id: str | int):
+        if endpoint == "pokemon" and resource_name_or_id == "snivy":
+            return _fake_payload("snivy", 495, species="snivy", is_default=True)
+        if endpoint == "pokemon-species" and resource_name_or_id == "snivy":
+            return {"name": "snivy", "is_legendary": False, "is_mythical": False, "varieties": []}
+        return {}
+
+    monkeypatch.setattr(build_silver, "pokebase_get_data", _pokebase_payload)
 
     profiles_df, diagnostics = _build_enriched_pokemon_profiles({"snivy": {"name": "snivy"}}, {"snivy", float("nan")}, silver_dir=tmp_path)
 
@@ -168,8 +154,8 @@ def test_enriched_profiles_ignore_nan_required_species(tmp_path: Path) -> None:
     assert diagnostics == []
 
 
-def test_enriched_profiles_use_cached_pokebase_payloads_before_http(tmp_path: Path, monkeypatch) -> None:
-    def _cached_resource(endpoint: str, resource_name_or_id=None):
+def test_enriched_profiles_use_pokebase_payloads(tmp_path: Path, monkeypatch) -> None:
+    def _pokebase_payload(endpoint: str, resource_name_or_id=None):
         if endpoint == "pokemon" and resource_name_or_id == "snivy":
             return _fake_payload("snivy", 495, species="snivy", is_default=True)
         if endpoint == "pokemon-species" and resource_name_or_id == "snivy":
@@ -181,12 +167,7 @@ def test_enriched_profiles_use_cached_pokebase_payloads_before_http(tmp_path: Pa
             }
         return None
 
-    monkeypatch.setattr(build_silver, "_cached_pokebase_resource", _cached_resource)
-
-    def _fail_http_session():
-        raise AssertionError("HTTP session should not be constructed when cached Pokebase payloads exist")
-
-    monkeypatch.setattr(build_silver, "build_session", _fail_http_session)
+    monkeypatch.setattr(build_silver, "pokebase_get_data", _pokebase_payload)
 
     profiles_df, diagnostics = _build_enriched_pokemon_profiles(
         {"snivy": {"name": "snivy"}},
@@ -198,6 +179,7 @@ def test_enriched_profiles_use_cached_pokebase_payloads_before_http(tmp_path: Pa
     profile = profiles_df.iloc[0].to_dict()
     assert profile["pokemon_species"] == "snivy"
     assert profile["resolved_pokeapi_id"] == 495
+
 
 
 def test_progression_source_team_boss_target_validation_rejects_unknown_boss_ids() -> None:
@@ -279,12 +261,11 @@ def test_species_default_resolution_examples() -> None:
         "jellicent": _fake_payload("jellicent", 593, species="jellicent"),
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon-species/" in url:
-            key = url.rstrip("/").split("/")[-1]
+    def _fetch(endpoint: str, resource_name_or_id: str | int) -> dict | None:
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon-species":
             return species_payloads.get(key)
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
+        if endpoint == "pokemon":
             return pokemon_payloads.get(key)
         return None
 
@@ -315,9 +296,9 @@ def test_exact_resolution_examples_for_variant_forms() -> None:
         "zygarde-50": _fake_payload("zygarde-50", 718, species="zygarde", is_default=False),
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
+    def _fetch(endpoint: str, resource_name_or_id: str | int) -> dict | None:
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon":
             return pokemon_payloads.get(key)
         return None
 
@@ -345,12 +326,11 @@ def test_resolved_profiles_include_species_classification_flags() -> None:
         }
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon-species/" in url:
-            key = url.rstrip("/").split("/")[-1]
+    def _fetch(endpoint: str, resource_name_or_id: str | int) -> dict | None:
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon-species":
             return species_payloads.get(key)
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
+        if endpoint == "pokemon":
             return pokemon_payloads.get(key)
         return None
 
@@ -361,46 +341,130 @@ def test_resolved_profiles_include_species_classification_flags() -> None:
     assert profile["is_mythical"] is False
 
 
-def test_enriched_profiles_prefer_cached_parquet_without_http(monkeypatch, tmp_path: Path) -> None:
-    references_dir = tmp_path / "references"
-    references_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        [
-            {
-                "name": "aegislash-shield",
-                "pokemon_species": "aegislash",
-                "pokeapi_id": 681,
-                "source_url": "https://pokeapi.co/api/v2/pokemon/681/",
-                "type_1": "steel",
-                "type_2": "ghost",
-                "base_hp": 60,
-                "base_attack": 50,
-                "base_defense": 140,
-                "base_special_attack": 50,
-                "base_special_defense": 140,
-                "base_speed": 60,
-                "height": 17,
-                "weight": 530,
-                "base_experience": 234,
-                "is_default": True,
-                "requested_pokemon_name": "aegislash",
-                "normalized_requested_name": "aegislash",
-                "normalized_species": "aegislash",
-                "resolved_pokemon_name": "aegislash-shield",
-                "resolved_pokeapi_id": 681,
-                "is_default_variety": True,
+def test_resolve_requested_pokemon_profile_marks_reshiram_as_legendary() -> None:
+    def _fetch(endpoint: str, resource_name_or_id: str | int) -> dict | None:
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon" and key == "reshiram":
+            return _fake_payload("reshiram", 643, species="reshiram", is_default=True)
+        if endpoint == "pokemon-species" and key == "reshiram":
+            return {
+                "name": "reshiram",
+                "is_legendary": True,
+                "is_mythical": False,
+                "varieties": [{"is_default": True, "pokemon": {"name": "reshiram"}}],
+            }
+        return None
+
+    profile, failure = _resolve_requested_pokemon_profile("reshiram", _fetch)
+
+    assert failure is None
+    assert profile == {
+        "name": "reshiram",
+        "pokemon_species": "reshiram",
+        "pokeapi_id": 643,
+        "source_url": "pokebase://pokemon/643",
+        "type_1": "normal",
+        "type_2": None,
+        "base_hp": 60,
+        "base_attack": 60,
+        "base_defense": 60,
+        "base_special_attack": 60,
+        "base_special_defense": 60,
+        "base_speed": 60,
+        "height": 10,
+        "weight": 100,
+        "base_experience": 100,
+        "is_default": True,
+        "requested_pokemon_name": "reshiram",
+        "normalized_requested_name": "reshiram",
+        "normalized_species": "reshiram",
+        "resolved_pokemon_name": "reshiram",
+        "resolved_pokeapi_id": 643,
+        "is_default_variety": True,
+        "is_legendary": True,
+        "is_mythical": False,
+        "resolution_method": "pokemon_exact",
+        "resolution_warning": None,
+    }
+
+
+def test_resolve_requested_pokemon_profile_uses_alias_fallback_when_exact_payload_incomplete() -> None:
+    def _fetch(endpoint: str, resource_name_or_id: str | int) -> dict | None:
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon" and key == "aegislash":
+            # Mimics incomplete Pokebase object metadata (no combat payload).
+            return {"name": "aegislash", "id": None}
+        if endpoint == "pokemon-species" and key == "aegislash-shield":
+            return {
+                "name": "aegislash",
                 "is_legendary": False,
                 "is_mythical": False,
-                "resolution_method": "species_default_variety",
-                "resolution_warning": None,
+                "varieties": [{"is_default": True, "pokemon": {"name": "aegislash-shield"}}],
             }
-        ]
-    ).to_parquet(references_dir / "pokemon_data.parquet", index=False)
+        if endpoint == "pokemon" and key == "aegislash-shield":
+            return _fake_payload("aegislash-shield", 681, species="aegislash", is_default=True)
+        return None
 
-    def _fail_build_session():
-        raise AssertionError("HTTP session should not be created when cached profiles cover all required species")
+    profile, failure = _resolve_requested_pokemon_profile("aegislash", _fetch)
 
-    monkeypatch.setattr("src.pipeline.silver.orchestration.build_silver.build_session", _fail_build_session)
+    assert failure is None
+    assert profile is not None
+    assert profile["resolved_pokemon_name"] == "aegislash-shield"
+    assert profile["resolved_pokeapi_id"] == 681
+    assert profile["resolution_method"] == "alias_species_default_variety"
+
+
+def test_build_enriched_profiles_fetches_reshiram_from_pokebase_and_uses_species_flags(monkeypatch, tmp_path: Path) -> None:
+    fetch_calls: list[tuple[str, str | int]] = []
+
+    def _pokebase_payload(endpoint: str, resource_name_or_id: str | int):
+        fetch_calls.append((endpoint, resource_name_or_id))
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon" and key == "reshiram":
+            return _fake_payload("reshiram", 643, species="reshiram", is_default=True)
+        if endpoint == "pokemon-species" and key == "reshiram":
+            return {
+                "name": "reshiram",
+                "is_legendary": True,
+                "is_mythical": False,
+                "varieties": [{"is_default": True, "pokemon": {"name": "reshiram"}}],
+            }
+        return {}
+
+    monkeypatch.setattr(build_silver, "pokebase_get_data", _pokebase_payload)
+
+    profiles_df, diagnostics = _build_enriched_pokemon_profiles(
+        all_pokemon_references={"reshiram": {"name": "reshiram"}},
+        required_species={"reshiram"},
+        silver_dir=tmp_path,
+    )
+
+    assert diagnostics == []
+    assert ("pokemon", "reshiram") in fetch_calls
+    assert ("pokemon-species", "reshiram") in fetch_calls
+    profile = profiles_df.iloc[0].to_dict()
+    assert profile["pokemon_species"] == "reshiram"
+    assert profile["resolved_pokeapi_id"] == 643
+    assert profile["is_legendary"] is True
+    assert profile["is_mythical"] is False
+
+
+def test_enriched_profiles_resolve_via_pokebase(monkeypatch, tmp_path: Path) -> None:
+    def _pokebase_payload(endpoint: str, resource_name_or_id: str | int):
+        if endpoint == "pokemon" and resource_name_or_id == "aegislash":
+            return {}
+        if endpoint == "pokemon-species" and resource_name_or_id == "aegislash":
+            return {
+                "name": "aegislash",
+                "is_legendary": False,
+                "is_mythical": False,
+                "varieties": [{"is_default": True, "pokemon": {"name": "aegislash-shield"}}],
+            }
+        if endpoint == "pokemon" and resource_name_or_id == "aegislash-shield":
+            return _fake_payload("aegislash-shield", 681, species="aegislash")
+        return {}
+
+    monkeypatch.setattr(build_silver, "pokebase_get_data", _pokebase_payload)
 
     profiles_df, diagnostics = _build_enriched_pokemon_profiles(
         all_pokemon_references={},
@@ -416,7 +480,34 @@ def test_enriched_profiles_prefer_cached_parquet_without_http(monkeypatch, tmp_p
     assert row["resolved_pokemon_name"] == "aegislash-shield"
 
 
-def test_enriched_profiles_use_offline_seed_for_missing_default_form_species(tmp_path: Path) -> None:
+def test_enriched_profiles_resolve_default_forms_via_pokebase(monkeypatch, tmp_path: Path) -> None:
+    species_defaults = {
+        "aegislash": "aegislash-shield",
+        "gourgeist": "gourgeist-average",
+        "jellicent": "jellicent",
+        "meowstic": "meowstic-male",
+        "pyroar": "pyroar-male",
+    }
+
+    def _pokebase_payload(endpoint: str, resource_name_or_id: str | int):
+        key = str(resource_name_or_id).strip().lower()
+        if endpoint == "pokemon" and key in species_defaults and key != species_defaults[key]:
+            return {}
+        if endpoint == "pokemon-species" and key in species_defaults:
+            return {
+                "name": key,
+                "is_legendary": False,
+                "is_mythical": False,
+                "varieties": [{"is_default": True, "pokemon": {"name": species_defaults[key]}}],
+            }
+        if endpoint == "pokemon":
+            for species, default_form in species_defaults.items():
+                if key == default_form:
+                    return _fake_payload(default_form, 100 + len(default_form), species=species)
+        return {}
+
+    monkeypatch.setattr(build_silver, "pokebase_get_data", _pokebase_payload)
+
     profiles_df, diagnostics = _build_enriched_pokemon_profiles(
         all_pokemon_references={},
         required_species={"aegislash", "gourgeist", "jellicent", "meowstic", "pyroar"},

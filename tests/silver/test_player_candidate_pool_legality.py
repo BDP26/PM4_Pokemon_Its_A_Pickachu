@@ -10,6 +10,7 @@ from src.pipeline.silver.inputs.builders.evolution_normalization import (
     normalize_species_for_level,
 )
 from src.pipeline.silver.inputs.builders.player_teams import (
+    _rank_candidate_pool,
     build_player_team_compact_tables,
     build_progression_source_teams_from_encounters,
 )
@@ -239,6 +240,137 @@ def test_restricted_legendary_encounters_are_removed_from_player_candidates() ->
     generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
     assert "articuno" not in generated_species
     assert generated_species == {"graveler"}
+
+
+def test_restricted_encounter_methods_are_removed_from_player_candidates() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "location": "gift-house", "pokemon": "eevee", "level_min": 25, "level_max": 25, "encounter_chance_max": 100, "capture_rate": 45, "methods": ["Gift"], "game": "red"},
+            {"boss_id": "red-lance", "location": "trade-npc", "pokemon": "mr-mime", "level_min": 20, "level_max": 20, "encounter_chance_max": 100, "capture_rate": 45, "methods": ["NPC Trade"], "game": "red"},
+            {"boss_id": "red-lance", "location": "power-plant", "pokemon": "electrode", "level_min": 43, "level_max": 43, "encounter_chance_max": 100, "capture_rate": 60, "methods": ["Only One"], "game": "red"},
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "graveler", "level_min": 45, "level_max": 47, "encounter_chance_max": 20, "capture_rate": 120, "methods": ["walk"], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "game_version": "red", "boss_name_canonical": "Lance", "boss_order": 12},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "lance", "avg_level": 53}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=2,
+    )
+
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"graveler"}
+
+
+def test_restricted_encounter_method_variants_are_removed_from_player_candidates() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "location": "gift-house", "pokemon": "eevee", "level_min": 25, "level_max": 25, "encounter_chance_max": 100, "capture_rate": 45, "methods": ["gift-pokemon"], "game": "red"},
+            {"boss_id": "red-lance", "location": "trade-npc", "pokemon": "mr-mime", "level_min": 20, "level_max": 20, "encounter_chance_max": 100, "capture_rate": 45, "methods": ["npc-trade"], "game": "red"},
+            {"boss_id": "red-lance", "location": "power-plant", "pokemon": "electrode", "level_min": 43, "level_max": 43, "encounter_chance_max": 100, "capture_rate": 60, "methods": ["only_one"], "game": "red"},
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "graveler", "level_min": 45, "level_max": 47, "encounter_chance_max": 20, "capture_rate": 120, "methods": ["walk"], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "game_version": "red", "boss_name_canonical": "Lance", "boss_order": 12},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "lance", "avg_level": 53}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=2,
+    )
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"graveler"}
+
+
+def test_restricted_encounter_methods_filter_handles_tuple_method_values() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "location": "dragonspiral", "pokemon": "reshiram", "level_min": 50, "level_max": 50, "encounter_chance_max": 100, "capture_rate": 3, "methods": ("only-one",), "game": "red"},
+            {"boss_id": "red-lance", "location": "victory-road", "pokemon": "graveler", "level_min": 45, "level_max": 47, "encounter_chance_max": 20, "capture_rate": 120, "methods": ["walk"], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-lance", "game_version": "red", "boss_name_canonical": "Lance", "boss_order": 12},
+        ]
+    )
+    boss_teams = [{"game_version": "red", "boss_name": "lance", "avg_level": 53}]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=2,
+    )
+    generated_species = {species for team in source_teams for species in team.get("pokemon", [])}
+    assert generated_species == {"graveler"}
+
+
+def test_rank_candidate_pool_early_stage_prefers_less_rare_species() -> None:
+    candidates = [
+        ("rare-high-level", 5, 25, 45),
+        ("common-lower-level", 60, 20, 255),
+    ]
+    ranked, _ = _rank_candidate_pool(
+        candidates,
+        boss_level=25,
+        pool_size=2,
+        progression_depth=0.05,
+    )
+    assert ranked[0][0] == "common-lower-level"
+
+
+def test_progression_based_team_size_is_smaller_early_and_larger_late() -> None:
+    encounters_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "location": "route-1", "pokemon": "pidgey", "level_min": 2, "level_max": 5, "encounter_chance_max": 60, "capture_rate": 255, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-brock", "location": "route-1", "pokemon": "rattata", "level_min": 2, "level_max": 5, "encounter_chance_max": 55, "capture_rate": 255, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-brock", "location": "route-2", "pokemon": "caterpie", "level_min": 3, "level_max": 6, "encounter_chance_max": 50, "capture_rate": 255, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-brock", "location": "route-2", "pokemon": "weedle", "level_min": 3, "level_max": 6, "encounter_chance_max": 45, "capture_rate": 255, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-brock", "location": "viridian-forest", "pokemon": "pikachu", "level_min": 4, "level_max": 7, "encounter_chance_max": 10, "capture_rate": 190, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "victory-road", "pokemon": "golbat", "level_min": 42, "level_max": 45, "encounter_chance_max": 40, "capture_rate": 90, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "victory-road", "pokemon": "onix", "level_min": 42, "level_max": 45, "encounter_chance_max": 35, "capture_rate": 45, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "seafoam", "pokemon": "seel", "level_min": 35, "level_max": 40, "encounter_chance_max": 50, "capture_rate": 190, "methods": ["surf"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "seafoam", "pokemon": "slowpoke", "level_min": 32, "level_max": 38, "encounter_chance_max": 45, "capture_rate": 190, "methods": ["surf"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "power-plant", "pokemon": "magneton", "level_min": 38, "level_max": 44, "encounter_chance_max": 25, "capture_rate": 60, "methods": ["walk"], "game": "red"},
+            {"boss_id": "red-mewtwo", "location": "power-plant", "pokemon": "electabuzz", "level_min": 38, "level_max": 43, "encounter_chance_max": 20, "capture_rate": 45, "methods": ["walk"], "game": "red"},
+        ]
+    )
+    bosses_df = pd.DataFrame(
+        [
+            {"boss_id": "red-brock", "game_version": "red", "boss_name_canonical": "Brock", "boss_order": 1},
+            {"boss_id": "red-mewtwo", "game_version": "red", "boss_name_canonical": "Mewtwo", "boss_order": 99},
+        ]
+    )
+    boss_teams = [
+        {"game_version": "red", "boss_name": "brock", "avg_level": 12},
+        {"game_version": "red", "boss_name": "mewtwo", "avg_level": 70},
+    ]
+
+    source_teams = build_progression_source_teams_from_encounters(
+        encounters_df=encounters_df,
+        bosses_df=bosses_df,
+        boss_teams=boss_teams,
+        catch_pool_size=5,
+    )
+    early_sizes = {len(team.get("pokemon", [])) for team in source_teams if team.get("boss_id") == "red-brock"}
+    late_sizes = {len(team.get("pokemon", [])) for team in source_teams if team.get("boss_id") == "red-mewtwo"}
+    assert early_sizes
+    assert late_sizes
+    assert max(early_sizes) < max(late_sizes)
 
 
 def test_progression_source_teams_preserve_colon_boss_ids() -> None:

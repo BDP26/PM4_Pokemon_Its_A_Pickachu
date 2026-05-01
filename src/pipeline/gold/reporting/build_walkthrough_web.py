@@ -56,7 +56,7 @@ def _species_slug(value: str) -> str:
 
 
 def _extract_pokeid_from_url(url: str) -> int | None:
-    match = re.search(r"/pokemon/(\d+)/?", str(url))
+    match = re.search(r"(?:/pokemon/|pokebase://pokemon/)(\d+)/?", str(url))
     if not match:
         return None
     try:
@@ -104,7 +104,7 @@ def _json_safe(value: Any) -> Any:
 
 def _build_sprite_fields_from_url(species_name: str, pokemon_url: str | None) -> tuple[str | None, str | None, int | None, str]:
     species_slug = _species_slug(species_name)
-    source_url = str(pokemon_url or f"https://pokeapi.co/api/v2/pokemon/{species_slug}/")
+    source_url = str(pokemon_url or f"pokebase://pokemon/{species_slug}")
     pokeid = _extract_pokeid_from_url(source_url)
     sprite_url = (
         f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/{pokeid}.png"
@@ -532,6 +532,107 @@ def _dedupe_team_payloads(team_payloads: list[dict[str, Any]]) -> list[dict[str,
         if current is None or _payload_score_key(payload) < _payload_score_key(current):
             best_by_combo[combo_key] = payload
     return sorted(best_by_combo.values(), key=_payload_score_key)
+
+
+def _family_key_for_species(species_name: str) -> str:
+    species = _norm_name(species_name)
+    return species
+
+
+def _team_species_set(team_payload: dict[str, Any]) -> set[str]:
+    species: set[str] = set()
+    for member in team_payload.get("pokemon", []):
+        if not isinstance(member, dict):
+            continue
+        name = str(member.get("name") or "").strip().lower()
+        if name:
+            species.add(name)
+    return species
+
+
+def _team_family_set(team_payload: dict[str, Any]) -> set[str]:
+    return {_family_key_for_species(species) for species in _team_species_set(team_payload)}
+
+
+def _build_realism_lookup(location_to_encounters: dict[str, list[dict[str, Any]]]) -> dict[str, tuple[float, float]]:
+    by_species: dict[str, tuple[float, float]] = {}
+    for entries in location_to_encounters.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            species = str(entry.get("species") or "").strip().lower()
+            if not species:
+                continue
+            chance = float(_safe_int(entry.get("encounter_chance_max")) or 0) / 100.0
+            capture = float(_safe_int(entry.get("capture_rate")) or 0) / 255.0
+            prev = by_species.get(species)
+            if prev is None:
+                by_species[species] = (chance, capture)
+            else:
+                by_species[species] = (max(prev[0], chance), max(prev[1], capture))
+    return by_species
+
+
+def _team_realism_score(team_payload: dict[str, Any], realism_lookup: dict[str, tuple[float, float]]) -> float:
+    species = _team_species_set(team_payload)
+    if not species:
+        return 0.0
+    values: list[float] = []
+    for member_species in species:
+        chance, capture = realism_lookup.get(member_species, (0.0, 0.0))
+        values.append((0.6 * chance) + (0.4 * capture))
+    return float(sum(values) / max(1, len(values)))
+
+
+def _select_diverse_team_payloads(
+    team_payloads: list[dict[str, Any]],
+    *,
+    limit: int,
+    progression_depth: float | None = None,
+    realism_lookup: dict[str, tuple[float, float]] | None = None,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not team_payloads:
+        return []
+    deduped = _dedupe_team_payloads(team_payloads)
+    if len(deduped) <= limit:
+        return deduped
+
+    clamped_depth = max(0.0, min(1.0, float(progression_depth if progression_depth is not None else 0.5)))
+    early_weight = 1.0 - clamped_depth
+    realism_lookup = realism_lookup or {}
+    selected: list[dict[str, Any]] = []
+    used_species: set[str] = set()
+    used_families: set[str] = set()
+    remaining = list(deduped)
+
+    while remaining and len(selected) < limit:
+        best_idx = 0
+        best_score = float("-inf")
+        for idx, payload in enumerate(remaining):
+            win_rate = float(payload.get("mc_win_rate") or 0.0)
+            wins = float(payload.get("wins") or 0.0)
+            species = _team_species_set(payload)
+            families = _team_family_set(payload)
+            species_overlap = (len(species & used_species) / max(1, len(species))) if species else 0.0
+            family_overlap = (len(families & used_families) / max(1, len(families))) if families else 0.0
+            novelty_bonus = 1.0 - (0.55 * species_overlap + 0.45 * family_overlap)
+            realism = _team_realism_score(payload, realism_lookup)
+            score = (
+                (1.15 - 0.15 * early_weight) * win_rate
+                + 0.02 * min(wins, 500.0) / 500.0
+                + (0.18 + 0.22 * early_weight) * novelty_bonus
+                + (0.05 + 0.30 * early_weight) * realism
+            )
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        pick = remaining.pop(best_idx)
+        selected.append(pick)
+        used_species.update(_team_species_set(pick))
+        used_families.update(_team_family_set(pick))
+    return selected
 
 
 def _invert_location_species_map(location_map: Any) -> dict[str, list[str]]:
@@ -977,6 +1078,19 @@ def build_walkthrough_best_teams_payload(
         if boss_team is None and variants:
             boss_team = variants[0]
 
+        reachable_location_pokemon = _coerce_location_pokemon_map(encounter_payload.get("reachable_location_pokemon"))
+        reachable_location_encounters = _coerce_location_encounters_map(encounter_payload.get("reachable_location_encounters"))
+        progression_depth = _safe_float(boss_meta.get("progression_depth"))
+        realism_lookup = _build_realism_lookup(reachable_location_encounters)
+        diverse_top_teams = _select_diverse_team_payloads(
+            all_ranked_teams,
+            limit=5,
+            progression_depth=progression_depth,
+            realism_lookup=realism_lookup,
+        )
+        if diverse_top_teams:
+            recommended_team = diverse_top_teams[0]
+
         top_teams_by_starter: dict[str, list[dict[str, Any]]] = {}
         for starter in starter_choices_by_version.get(version, []):
             starter_rank_rows = starter_rankings_by_key.get((version, boss_name_key, starter), [])
@@ -997,10 +1111,13 @@ def build_walkthrough_best_teams_payload(
                         if isinstance(member, dict)
                     )
                 ]
-            top_teams_by_starter[starter] = _dedupe_team_payloads(starter_teams)[:5]
+            top_teams_by_starter[starter] = _select_diverse_team_payloads(
+                starter_teams,
+                limit=5,
+                progression_depth=progression_depth,
+                realism_lookup=realism_lookup,
+            )
 
-        reachable_location_pokemon = _coerce_location_pokemon_map(encounter_payload.get("reachable_location_pokemon"))
-        reachable_location_encounters = _coerce_location_encounters_map(encounter_payload.get("reachable_location_encounters"))
         row = {
             "boss_key": str(boss_row.get("boss_id") or f"{version}:{boss_name_key}"),
             "boss_id": _encounter_boss_key(boss_row.get("boss_id")) or str(boss_row.get("boss_id") or ""),
@@ -1023,8 +1140,16 @@ def build_walkthrough_best_teams_payload(
             "boss_team": boss_team,
             "boss_team_variants": variants,
             "recommended_team": recommended_team,
-            "top_teams": all_ranked_teams[:5],
+            "top_teams": diverse_top_teams if diverse_top_teams else all_ranked_teams[:5],
             "top_teams_by_starter": top_teams_by_starter,
+        }
+        top_teams_for_metrics = row["top_teams"] if isinstance(row.get("top_teams"), list) else []
+        unique_species = {species for team in top_teams_for_metrics for species in _team_species_set(team)}
+        unique_families = {family for team in top_teams_for_metrics for family in _team_family_set(team)}
+        row["team_diversity_metrics"] = {
+            "top_team_count": len(top_teams_for_metrics),
+            "unique_species_count": len(unique_species),
+            "unique_family_count": len(unique_families),
         }
         if not row["reachable_pokemon_count"]:
             row["reachable_pokemon_count"] = len(_invert_location_species_map(reachable_location_pokemon))
@@ -1071,9 +1196,9 @@ def build_walkthrough_best_teams_payload(
                 pseudo_row = {
                     "player_team_id": seq_row.get("player_team_id"),
                     "mc_win_rate": seq_row.get("sequence_win_rate"),
-                    "wins": None,
+                    "wins": seq_row.get("sequence_wins"),
                     "losses": None,
-                    "n_trials": None,
+                    "n_trials": seq_row.get("sequence_n_trials"),
                     "rank_in_boss_version": seq_row.get("rank_in_sequence"),
                     "player_avg_level": None,
                     "boss_avg_level": None,
@@ -1084,19 +1209,32 @@ def build_walkthrough_best_teams_payload(
                 payload["sequence_win_rate"] = seq_row.get("sequence_win_rate")
                 payload["sequence_score"] = seq_row.get("sequence_score")
                 payload["bosses_covered"] = seq_row.get("bosses_covered")
+                payload["sequence_completion_prob"] = seq_row.get("sequence_completion_prob", seq_row.get("sequence_win_rate"))
+                payload["sequence_expected_wins"] = seq_row.get("sequence_expected_wins")
+                payload["sequence_expected_wins_pct"] = seq_row.get("sequence_expected_wins_pct")
+                payload["strict_clear_rate"] = seq_row.get("strict_clear_rate")
                 payload["degraded_ratio"] = seq_row.get("degraded_ratio")
                 payload["rank_in_sequence"] = seq_row.get("rank_in_sequence")
                 sequence_payloads.append(payload)
 
             starter_entry = elite_four_champion_sequence_by_version.setdefault(version, {"top_teams_overall": [], "by_starter": {}})
-            deduped = _dedupe_team_payloads(sequence_payloads)
-            starter_entry["by_starter"][starter] = deduped[:5]
+            starter_entry["by_starter"][starter] = _select_diverse_team_payloads(
+                sequence_payloads,
+                limit=5,
+                progression_depth=0.95,
+                realism_lookup={},
+            )
 
         for version, payload in elite_four_champion_sequence_by_version.items():
             flattened: list[dict[str, Any]] = []
             for starter_teams in payload.get("by_starter", {}).values():
                 flattened.extend(starter_teams)
-            payload["top_teams_overall"] = _dedupe_team_payloads(flattened)[:10]
+            payload["top_teams_overall"] = _select_diverse_team_payloads(
+                flattened,
+                limit=10,
+                progression_depth=0.95,
+                realism_lookup={},
+            )
 
     output = {
         "versions": sorted(walkthroughs.keys()),
