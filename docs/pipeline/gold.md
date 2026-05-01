@@ -1,87 +1,54 @@
 # Gold Layer
 
-The Gold layer aggregates Silver snapshots into analytics-ready outputs.
-
 ## Purpose
 
-- Produce compact, analysis-focused datasets.
-- Expose progression and location popularity metrics across games.
-- Provide a final layer with clear provenance metadata.
-- Turn Silver simulation outputs into ranked team recommendations.
+Gold is the serving layer. It consumes Silver contracts, runs battle simulations, and publishes ranking/analytics outputs.
 
-## Entrypoint
+## Code entrypoint
 
-- Function: `build_gold_from_silver`
+- Runner: `build_gold_from_silver`
 - File: `src/pipeline/gold/orchestration/build_gold.py`
-- Orchestration: `src/pipeline/run_pipeline.py` (`all` or `layers gold`)
+- CLI: `PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold`
 
-## Required Inputs
+## Required inputs
 
-Gold verwendet strikt `data/silver/manifest.json` als Input-Contract.
+Gold reads strictly from `data/silver/manifest.json` and does not do loose file discovery.
 
-Required dataset entries in `manifest.json`:
+Typical required datasets include:
+- `boss_records`
+- `simulation_inputs_teams`
+- `source_team_members`
+- `member_move_options`
+- reference tables used by simulation and reporting
 
-- `datasets.boss_records.files[]`
-- `datasets.simulation_inputs_teams.file`
-- `datasets.team_members.file`
-- `datasets.team_member_moves.file`
-- `datasets.pokemon_reference.file`
-- `datasets.snapshot_available_pokemon.file`
-- `datasets.encounters.file`
+## Main steps
 
-Es gibt keine Fallback-Discovery per `glob` mehr.
-
-## Core Processing
-
-1. Load all per-game Silver snapshot JSONL files.
-2. Concatenate into one dataframe and normalize to canonical `game_version`.
-3. Build game progression summary:
-   - Number of boss steps per game
-   - Final reachable location count
-   - Maximum reachable location count
-4. Build cross-game location popularity by exploding reachable location arrays.
-5. Run the Gold simulation stage into `data/gold/simulation/`.
-6. Aggregate `teams.parquet` + `monte_carlo_results.parquet` into team rankings and best-team outputs.
-7. Build the walkthrough payload (`walkthrough_best_teams.json`) for the static web view.
-8. Write Gold manifest with source file list and output inventory.
-
-## Fail-Fast Contract Errors
-
-Bei Contract-Verletzungen bricht Gold sofort mit `GoldContractError` ab.
-
-Beispiele:
-
-- `[gold.contract] missing_manifest ...`
-- `[gold.contract] missing_snapshot_files dataset=boss_records ...`
-- `[gold.contract] missing_dataset_entry dataset=team_members ...`
-- `[gold.contract] missing_dataset_file dataset=simulation_inputs_teams ...`
+1. Load Silver contract datasets from manifest entries.
+2. Build progression and location aggregate outputs.
+3. Run team-vs-boss battle simulations (`data/gold/simulation`).
+4. Run Monte Carlo aggregation and compute recommendation rankings.
+5. Build walkthrough payload and write Gold manifest.
 
 ## Outputs
 
 - `data/gold/game_progression_summary.csv`
 - `data/gold/location_popularity.parquet`
-- `data/gold/manifest.json`
-- `data/gold/simulation/teams.parquet`
 - `data/gold/simulation/team_battle_simulations.parquet`
-- `data/gold/simulation/battle_seeds.parquet`
 - `data/gold/simulation/monte_carlo_results.parquet`
-
-Optional outputs (if Silver simulation artifacts are present):
-
 - `data/gold/team_recommendations.parquet`
 - `data/gold/best_team_by_boss.parquet`
 - `data/gold/team_rankings_by_boss_version.parquet`
-- `data/gold/best_team_by_boss_version.parquet`
-- `data/gold/best_team_by_boss_version.csv`
 - `data/gold/walkthrough_best_teams.json`
+- `data/gold/manifest.json`
 
+## Spark and local fallback
 
-## Notes and Constraints
+Battle simulation can run on Spark or local Python:
+- `PIPELINE_USE_PYSPARK=1` (default): use Spark if available.
+- `PIPELINE_USE_PYSPARK=0`: skip Spark and run local engine.
 
-- Gold intentionally keeps only derived, analysis-oriented fields.
-- Metrics depend on Silver snapshot completeness and mapping quality.
-- Output schemas are stable for BI/notebook downstream use.
-- Internal key semantics are canonicalized to `game_version` at Gold ingress.
-- **Simulation Note:** Silver produces the simulation inputs (`teams.parquet`, `teams.jsonl`). Gold runs the battle simulation stage into `data/gold/simulation/`, then consumes the resulting Monte-Carlo results to rank teams and to prepare the walkthrough payload. The underlying damage model is reused, not redefined.
+## Operational notes
 
+- Gold fails fast on manifest contract violations (`GoldContractError`).
+- If simulation output quality looks wrong, validate Silver contract first, then rerun `silver -> gold`.
 

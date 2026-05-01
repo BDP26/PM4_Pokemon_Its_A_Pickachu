@@ -1,53 +1,41 @@
 # Bronze Layer
 
-The Bronze layer ingests raw external data with minimal transformation.
-
 ## Purpose
 
-- Preserve upstream payloads from Bulbapedia and PokeAPI.
-- Store a reproducible Kaggle snapshot for boss/team enrichment.
-- Snapshot the effective pipeline config and manual override folder.
-- Provide stable raw inputs for Silver without business-level filtering.
+Bronze collects raw source data and stores it reproducibly. It does not apply business logic beyond minimal normalization needed for storage.
 
-## Entrypoint
+## Code entrypoint
 
-- Function: `fetch_bronze_sources`
+- Runner: `fetch_bronze_sources`
 - File: `src/pipeline/bronze/orchestration/fetch_sources.py`
-- Orchestration: `src/pipeline/run_pipeline.py` (`all` or `layers bronze`)
+- CLI: `PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze`
 
-## Input Sources
+## Inputs
 
-- Bulbapedia MediaWiki API (`BULBA_API`) for walkthrough pages and parts.
-- PokeAPI (`POKEAPI`) for location index.
-- Kaggle dataset `maxiboo/pokemon-gen-1-9-gym-leaders-elite-four`.
+- Bulbapedia MediaWiki API pages (walkthrough HTML payloads)
+- PokeAPI location index
+- Kaggle dataset: `maxiboo/pokemon-gen-1-9-gym-leaders-elite-four`
 
-## Processing Steps
+## Main steps
 
-1. Ensure medallion directories exist.
-2. Download and store the PokeAPI location index as JSON.
-3. For each configured game (`get_games_config`):
-   - Resolve an existing walkthrough root title.
-   - Discover walkthrough part pages.
-   - Fetch each part HTML payload.
-   - Write one raw game JSON file.
-4. Download Kaggle dataset files and export a normalized CSV.
-5. Snapshot the effective Bronze config and create a config manifest.
-6. Write a Kaggle manifest with provenance metadata.
+1. Create medallion directories if missing.
+2. Fetch PokeAPI location index.
+3. For each configured game, fetch walkthrough pages and persist raw payloads.
+4. Download and persist Kaggle team data.
+5. Snapshot effective config and write manifests.
 
 ## Outputs
 
+- `data/bronze/bulbapedia/*.json`
 - `data/bronze/pokeapi/location_index.json`
-- `data/bronze/bulbapedia/{game_key}.json`
 - `data/bronze/kagglehub/gym_leaders_elite_four.csv`
 - `data/bronze/kagglehub/manifest.json`
 - `data/bronze/config/games_config.json`
 - `data/bronze/config/manifest.json`
-- `data/bronze/config/overrides/*` (optional, manual overrides)
 
-## Notes and Constraints
+## Operational notes
 
-- Bronze data is intentionally raw and can be large.
-- Walkthrough page existence checks are cached in-memory per run.
-- Missing game walkthrough roots are skipped instead of failing the full run.
-- Der Gold-Layer liest keine Bronze-Daten direkt; der verbindliche Pfad ist Bronze -> Silver -> Gold ueber `data/silver/manifest.json`.
-
+- Bronze intentionally keeps noisy/raw data for traceability.
+- Missing walkthrough roots are skipped, not fatal to full Bronze execution.
+- Kaggle export (`data/bronze/kagglehub/gym_leaders_elite_four.csv`) is mandatory for Silver and must be present after Bronze.
+- Gold does not read Bronze directly; data must flow through Silver contracts.

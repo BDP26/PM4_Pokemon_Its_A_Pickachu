@@ -1,185 +1,139 @@
 # PM4 - Pokemon It's A Pikachu
-> Gotta catch 'em all (or just the MVPs)
 
-## Medallion-Architektur
+Pokemon data pipeline with a medallion architecture (`bronze -> silver -> gold`) plus battle simulation and team ranking.
 
-Die Pipeline folgt einer **Bronze -> Silver -> Gold** Struktur:
+## What this project does
 
-| Layer | Ordner | Inhalt |
-|-------|--------|--------|
-| **Bronze** | `data/bronze/` | Rohdaten aus Bulbapedia, PokeAPI und Kaggle sowie Config-Snapshots (`config/`). |
-| **Silver** | `data/silver/` | Normalisierte Snapshots, Mappings, Referenzen, Diagnostik und Simulations-Inputs. |
-| **Gold** | `data/gold/` | Aggregierte Analyse-Datasets, Simulationsergebnisse und Walkthrough-Web-Payload. |
+The pipeline combines three external sources:
+- Bulbapedia walkthrough pages (progression and locations)
+- PokeAPI metadata (location and species context)
+- Kaggle gym/elite/champion team data
 
-## Projektstruktur (neues Setup)
+It turns them into:
+- Clean reference tables (`silver`)
+- Simulation inputs (`silver/simulation`)
+- Ranked team outputs and walkthrough payloads (`gold`)
 
-```text
-PM4_Pokemon_Its_A_Pickachu/
-|- data/
-|  |- bronze/
-|  |  |- bulbapedia/
-|  |  |- pokeapi/
-|  |  |- kagglehub/
-|  |  |- config/
-|  |  \- type_chart.json
-|  |- silver/
-|  |  |- snapshots/
-|  |  |- mappings/
-|  |  |- references/
-|  |  |- diagnostics/
-|  |  |- simulation/
-|  |  \- manifest.json
-|  \- gold/
-|     |- simulation/
-|     \- manifest.json
-|- docs/
-|  |- pipeline/
-|  |  |- bronze.md
-|  |  |- silver.md
-|  |  \- gold.md
-|  \- walkthrough_teams.html
-|- notebooks/
-|  \- loading_location.ipynb
-|- src/pipeline/
-|  |- run_pipeline.py
-|  |- settings.py
-|  |- common/
-|  |- bronze/
-|  |  |- inputs/
-|  |  |- enrichment/
-|  |  \- orchestration/
-|  |- silver/
-|  |  |- inputs/
-|  |  |- enrichment/
-|  |  |- simulation/
-|  |  |- reporting/
-|  |  \- orchestration/
-|  \- gold/
-|     |- simulation/
-|     |- reporting/
-|     \- orchestration/
-\- requirements.txt
-```
+## Architecture at a glance
 
-## Layer-Dokumentation
+| Layer | Main output path | Goal |
+|---|---|---|
+| `bronze` | `data/bronze/` | Ingest and persist raw source payloads with minimal transformation. |
+| `silver` | `data/silver/` | Normalize, map, and enrich data into validated contracts and simulation inputs. |
+| `gold` | `data/gold/` | Run simulations, aggregate metrics, and produce analytics-ready datasets. |
 
-- `docs/pipeline/bronze.md` - Ingestion, Quellvertraege, Bronze-Artefakte
-- `docs/pipeline/silver.md` - Normalisierung, Enrichment, Silver-Artefakte
-- `docs/pipeline/gold.md` - Aggregationen, Simulation, Gold-Artefakte
+Detailed layer docs:
+- [docs/pipeline/bronze.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/bronze.md)
+- [docs/pipeline/silver.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/silver.md)
+- [docs/pipeline/gold.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/gold.md)
 
-## Quickstart
+## Setup
+
+1. Create and activate a Python 3.11+ virtual environment.
+2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
+```
 
-# Voller Lauf (bronze -> silver -> gold)
+## Run the pipeline
+
+From repo root:
+
+```bash
+# all layers in order
 PYTHONPATH=src python -m src.pipeline.run_pipeline all
 
-# Einzelne Layer in gewuenschter Reihenfolge
+# selected layers
 PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze
 PYTHONPATH=src python -m src.pipeline.run_pipeline layers silver
 PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze silver gold
 
-# Simulation Smoke Checks fuer Gold-Ausgaben
+# simulation smoke checks for gold outputs
 PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
 ```
 
-## Silver -> Gold Contract (strict)
+## Spark usage in this codebase
 
-Gold liest Inputs ausschliesslich aus `data/silver/manifest.json` und nutzt keine Dateisystem-Discovery mehr.
+The team battle simulation has two engines:
+- Local Python engine
+- PySpark engine
 
-Erforderliche Dataset-Keys fuer Gold:
+Engine selection:
+- `PIPELINE_USE_PYSPARK=1` (default): try Spark
+- `PIPELINE_USE_PYSPARK=0`: force local engine
 
-- `boss_records` (`files[]`)
-- `simulation_inputs_teams` (`file`)
-- `source_team_members` (`file`)
-- `member_move_options` (`file`)
-
-Bei fehlenden/ungueltigen Eintraegen bricht Gold sofort mit `GoldContractError` ab (z. B. `[gold.contract] missing_dataset_file ...`).
-
-### Canonical Simulation Schema Contract
-
-Die Monte-Carlo-Ausgabe nutzt jetzt durchgehend den kanonischen Schluesselraum und ist mit Gold/Validierung synchron:
-
-- `scenario_id`
-- `player_team_id`
-- `boss_team_id`
-- `mc_win_rate`
-
-`team_id_attacker`/`team_id_defender` bleiben auf dem Team-Battle-Artefakt, werden aber fuer Monte-Carlo intern auf die kanonischen Felder gemappt.
-
-Typischer Repair-Flow:
+Example:
 
 ```bash
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers silver
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
+PIPELINE_USE_PYSPARK=0 PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
 ```
 
-Hinweise:
-- Kaggle-Quelle in Bronze: `maxiboo/pokemon-gen-1-9-gym-leaders-elite-four`
-- Download-Ziel: `data/bronze/kagglehub/`
+## Running Spark locally
 
-## Wichtige Silver-Artefakte
+Spark is used through `pyspark~=3.5.3` and requires Java.
 
-- `data/silver/snapshots/*_boss_snapshots.jsonl`
-- `data/silver/mappings/location_to_area_map.json`
-- `data/silver/mappings/location_to_pokemon_map.json`
-- `data/silver/mappings/boss_mapping_by_version.json`
-- `data/silver/references/encounters.jsonl`
-- `data/silver/references/pokemon_reference.json`
-- `data/silver/references/encounter_methods_reference.json`
-- `data/silver/simulation/source_teams_*.parquet`
-- `data/silver/simulation/source_team_members_*.parquet`
-- `data/silver/simulation/member_move_options_*.parquet`
-- `data/silver/simulation/teams.jsonl`
-- `data/silver/manifest.json`
+### macOS
 
-## Silver Orchestration Stages
-
-`build_silver_from_bronze` wurde in explizite Stages aufgeteilt (z. B. Parse-Stage in `src/pipeline/silver/orchestration/stages.py`), damit einzelne Schritte isoliert testbar und evolvierbar sind.
-
-## Team-Generierung: Scored constrained search
-
-Die Kandidatenbildung fuer Spielerteams nutzt jetzt einen scored constrained pool statt rein frueher Trunkierung:
-
-- Scoring-Signale: Encounter-Chance, Capture-Rate, Level-Realismus zum Boss-Level
-- Family-Dedupe vor Pool-Limit
-- Diagnostik im Log: `pruned_candidates`, `family_pruned_candidates`, `pruned_combos`
-
-## Gold-Outputs
-
-| Datei | Beschreibung |
-|------|--------------|
-| `data/gold/game_progression_summary.csv` | Boss-Progression und erreichbare Orte pro Spiel |
-| `data/gold/location_popularity.parquet` | Standort-Popularitaet ueber alle Spiele |
-| `data/gold/team_recommendations.parquet` | Team-Ranking auf Basis Monte-Carlo Win-Rate |
-| `data/gold/team_rankings_by_boss_version.parquet` | Team-Ranking je Boss innerhalb gleicher Version |
-| `data/gold/best_team_by_boss.parquet` | Bestes Team je Boss-Matchup |
-| `data/gold/best_team_by_boss_version.parquet` | Bestes Team je Boss und Version |
-| `data/gold/best_team_by_boss_version.csv` | CSV-Export des besten Teams je Boss/Version |
-| `data/gold/walkthrough_best_teams.json` | Web-Payload fuer die Walkthrough-Seite |
-| `data/gold/manifest.json` | Gold-Provenienz und Output-Liste |
-
-Simulationsergebnisse liegen in:
-- `data/gold/simulation/teams.parquet`
-- `data/gold/simulation/team_battle_simulations.parquet`
-- `data/gold/simulation/battle_seeds.parquet`
-- `data/gold/simulation/monte_carlo_results.parquet`
-
-## Walkthrough-Webseite
-
-Statische Seite:
-- `docs/walkthrough_teams.html`
-
-Benutzte Daten:
-- `data/gold/walkthrough_best_teams.json`
-
-Start lokal im Projekt-Root:
+1. Install Java (LTS recommended, e.g. Temurin 17).
+2. Set `JAVA_HOME`:
 
 ```bash
-python3 -m http.server 8000 --bind 127.0.0.1
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
-Dann im Browser oeffnen:
+3. Verify:
+
+```bash
+java -version
+python -c "import pyspark; print(pyspark.__version__)"
+```
+
+### Windows
+
+1. Install Java (LTS recommended, e.g. Temurin 17).
+2. Set environment variables (System or User):
+- `JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17...`
+- Add `%JAVA_HOME%\bin` to `Path`
+
+3. Open a new terminal and verify:
+
+```powershell
+java -version
+python -c "import pyspark; print(pyspark.__version__)"
+```
+
+### Spark troubleshooting
+
+- If Spark startup fails, set `PIPELINE_USE_PYSPARK=0` to run with the local engine.
+- If port `4040` is already used, stop the existing Spark app or rerun after it exits.
+- Always restart your terminal after changing `JAVA_HOME`/`Path`.
+
+## Key contracts
+
+- Gold reads inputs strictly from `data/silver/manifest.json`.
+- Missing required datasets cause fail-fast `GoldContractError`.
+- Canonical Monte Carlo columns are:
+  - `scenario_id`
+  - `player_team_id`
+  - `boss_team_id`
+  - `mc_win_rate`
+
+## Useful outputs
+
+- `data/silver/manifest.json`: Silver output contract
+- `data/gold/simulation/monte_carlo_results.parquet`: simulation win-rates
+- `data/gold/team_recommendations.parquet`: ranked team recommendations
+- `data/gold/walkthrough_best_teams.json`: payload for walkthrough view
+
+## Walkthrough page
+
+Serve locally:
+
+```bash
+python -m http.server 8000 --bind 127.0.0.1
+```
+
+Open:
 - `http://127.0.0.1:8000/docs/walkthrough_teams.html`
