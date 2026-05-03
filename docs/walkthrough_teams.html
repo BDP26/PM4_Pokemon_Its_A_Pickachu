@@ -953,6 +953,12 @@
     function safeText(v, fallback = "-") { return v === null || v === undefined || v === "" ? fallback : String(v); }
     function pct(v) { return Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(1)}%` : "-"; }
     function num(v) { return Number.isFinite(Number(v)) ? Number(v) : null; }
+    function normalizeCaptureRate(v) {
+      const rate = num(v);
+      if (rate === null) return null;
+      if (rate <= 0 || rate > 255) return null;
+      return rate;
+    }
     function cap(v) { return String(v || "").split(/[_-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" "); }
     function prettyLocation(v) { return cap(String(v || "").replace(/^pokemon-/, "")); }
 
@@ -1124,7 +1130,7 @@
         entries.forEach((entry) => {
           if (speciesSlug(entry && entry.species) !== keySlug) return;
           const chance = num(entry && entry.encounter_chance_max);
-          const rate = num(entry && entry.capture_rate);
+          const rate = normalizeCaptureRate(entry && entry.capture_rate);
           const minLevel = num(entry && entry.level_min);
           const maxLevel = num(entry && entry.level_max);
           if (chance !== null) chanceMax = chanceMax === null ? chance : Math.max(chanceMax, chance);
@@ -1152,7 +1158,7 @@
         const response = await fetch(`https://pokeapi.co/api/v2/pokemon-species/${id}`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
-        const rate = num(payload && payload.capture_rate);
+        const rate = normalizeCaptureRate(payload && payload.capture_rate);
         captureRateCache.set(id, rate);
         return rate;
       } catch (err) {
@@ -1650,7 +1656,7 @@
         teamsHtml = `<div class="panel"><div class="empty">No teams available</div></div>`;
       }
 
-      const catchHtml = recommendations.length ? `<div class="panel"><div class="panel-header"><h2 class="panel-title">Catch Radar</h2><p class="panel-subtitle">Top Pokemon recommendations</p></div><div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;">${recommendations.map((entry) => {const rarity = rarityLabel(entry.encounter && entry.encounter.chanceMax, (entry.locations || []).length); const levelLabel = (num(entry.encounter && entry.encounter.levelMin) !== null || num(entry.encounter && entry.encounter.levelMax) !== null) ? `${safeText(entry.encounter.levelMin, "?")} - ${safeText(entry.encounter.levelMax, "?")}` : "?"; const chanceLabel = num(entry.encounter && entry.encounter.chanceMax) !== null ? pct((entry.encounter.chanceMax || 0) / 100) : "-"; const methods = Array.isArray(entry.encounter && entry.encounter.methods) ? entry.encounter.methods : []; const methodLabel = methods.length ? methods.map((m) => cap(m)).join(", ") : "Unknown"; const topLocations = (entry.locations || []).slice(0, 2).map((loc) => prettyLocation(loc)); const fallbackCaptureRate = num(entry && entry.pokeid) !== null ? captureRateCache.get(num(entry.pokeid)) : null; const captureRateValue = num(entry.encounter && entry.encounter.captureRate) !== null ? num(entry.encounter && entry.encounter.captureRate) : (num(fallbackCaptureRate) !== null ? num(fallbackCaptureRate) : null); const captureRateLabel = captureRateValue !== null ? String(captureRateValue) : (num(entry && entry.pokeid) !== null && captureRatePending.has(num(entry.pokeid)) ? "loading..." : "n/a"); return `<div class="catch-card"><div class="catch-header"><img class="catch-sprite" src="${entry.sprite_url || placeholderSprite()}" alt="${safeText(entry.name)}" onerror="this.src='${placeholderSprite()}'" /><div class="catch-info"><div class="catch-name">${safeText(cap(entry.name))}</div><span class="catch-rarity ${rarity}">${cap(rarity)}</span></div></div><div class="catch-details"><div><strong>Priority:</strong> ${safeText(entry.score)}</div><div><strong>In ${safeText(entry.count)}/5 teams</strong></div><div><strong>Level:</strong> ${levelLabel}</div><div><strong>Best chance:</strong> ${chanceLabel}</div><div><strong>Capture rate:</strong> ${captureRateLabel}</div><div><strong>Methods:</strong> ${methodLabel}</div>${topLocations.length ? `<div><strong>Top spots:</strong> ${topLocations.join(", ")}</div>` : ""}</div></div>`;}).join("")}</div></div>` : `<div class="panel"><div class="empty">No recommendations</div></div>`;
+      const catchHtml = recommendations.length ? `<div class="panel"><div class="panel-header"><h2 class="panel-title">Catch Radar</h2><p class="panel-subtitle">Top Pokemon recommendations</p></div><div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;">${recommendations.map((entry) => {const rarity = rarityLabel(entry.encounter && entry.encounter.chanceMax, (entry.locations || []).length); const levelLabel = (num(entry.encounter && entry.encounter.levelMin) !== null || num(entry.encounter && entry.encounter.levelMax) !== null) ? `${safeText(entry.encounter.levelMin, "?")} - ${safeText(entry.encounter.levelMax, "?")}` : "?"; const chanceLabel = num(entry.encounter && entry.encounter.chanceMax) !== null ? pct((entry.encounter.chanceMax || 0) / 100) : "-"; const methods = Array.isArray(entry.encounter && entry.encounter.methods) ? entry.encounter.methods : []; const methodLabel = methods.length ? methods.map((m) => cap(m)).join(", ") : "Unknown"; const topLocations = (entry.locations || []).slice(0, 2).map((loc) => prettyLocation(loc)); const fallbackCaptureRate = num(entry && entry.pokeid) !== null ? captureRateCache.get(num(entry.pokeid)) : null; const localCaptureRate = normalizeCaptureRate(entry.encounter && entry.encounter.captureRate); const cachedCaptureRate = normalizeCaptureRate(fallbackCaptureRate); const captureRateValue = localCaptureRate !== null ? localCaptureRate : (cachedCaptureRate !== null ? cachedCaptureRate : null); const captureRateLabel = captureRateValue !== null ? String(captureRateValue) : (num(entry && entry.pokeid) !== null && captureRatePending.has(num(entry.pokeid)) ? "loading..." : "n/a"); return `<div class="catch-card"><div class="catch-header"><img class="catch-sprite" src="${entry.sprite_url || placeholderSprite()}" alt="${safeText(entry.name)}" onerror="this.src='${placeholderSprite()}'" /><div class="catch-info"><div class="catch-name">${safeText(cap(entry.name))}</div><span class="catch-rarity ${rarity}">${cap(rarity)}</span></div></div><div class="catch-details"><div><strong>Priority:</strong> ${safeText(entry.score)}</div><div><strong>In ${safeText(entry.count)}/5 teams</strong></div><div><strong>Level:</strong> ${levelLabel}</div><div><strong>Best chance:</strong> ${chanceLabel}</div><div><strong>Capture rate:</strong> ${captureRateLabel}</div><div><strong>Methods:</strong> ${methodLabel}</div>${topLocations.length ? `<div><strong>Top spots:</strong> ${topLocations.join(", ")}</div>` : ""}</div></div>`;}).join("")}</div></div>` : `<div class="panel"><div class="empty">No recommendations</div></div>`;
 
       if (token !== renderToken) return;
 
