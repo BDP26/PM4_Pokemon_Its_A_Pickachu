@@ -12,7 +12,7 @@ from uuid import uuid4
 import pandas as pd
 
 from src.pipeline.common.io import read_parquet, write_json, write_parquet
-from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
+from src.pipeline.common.simulation_config import RuntimeBattlePolicyConfig, load_runtime_battle_policy_config
 from src.pipeline.gold.inputs.team_tables import (
     load_reconstructed_teams_from_silver,
     validate_reconstructed_teams_for_simulation,
@@ -136,13 +136,33 @@ def _stamp_simulation_run(simulation_dir: Path, *, run_id: str, input_fingerprin
     write_json(simulation_dir / "simulation_run_metadata.json", metadata)
 
 
+def _build_runtime_battle_config(
+    *,
+    requested_trials: int | None,
+    requested_seed: int | None,
+    runtime_policy: RuntimeBattlePolicyConfig,
+) -> BattleSimulationConfig:
+    base_config = BattleSimulationConfig()
+    return BattleSimulationConfig(
+        max_overlevel=base_config.max_overlevel,
+        max_underlevel=base_config.max_underlevel,
+        n_battle_trials=int(requested_trials or runtime_policy.n_battle_trials),
+        damage_randomness_min=runtime_policy.damage_random_min,
+        damage_randomness_max=runtime_policy.damage_random_max,
+        crit_chance=runtime_policy.crit_chance_default,
+        max_turns_per_duel=base_config.max_turns_per_duel,
+        rng_seed=int(requested_seed or runtime_policy.rng_seed),
+        require_exact_version_match=True,
+    )
+
+
 def run_gold_simulation_from_silver(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
     bronze_dir: Path = BRONZE_DIR,
     required_input_files: dict[str, Path | list[Path]] | None = None,
-    n_trials: int = 500,
-    rng_seed: int = 42,
+    n_trials: int | None = None,
+    rng_seed: int | None = None,
 ) -> None:
     started_at = time.perf_counter()
     run_id = uuid4().hex[:12]
@@ -182,11 +202,13 @@ def run_gold_simulation_from_silver(
         raise ValueError(f"Gold simulation input integrity gate failed: {preview}{suffix}")
     _assert_no_invalid_team_moves(teams_data)
     runtime_policy = load_runtime_battle_policy_config()
+    effective_n_trials = int(n_trials or runtime_policy.n_battle_trials)
+    effective_rng_seed = int(rng_seed or runtime_policy.rng_seed)
     input_fingerprint = _fingerprint_payload(
         {
             "team_rows": len(teams_data),
-            "trials": int(n_trials),
-            "rng_seed": int(rng_seed),
+            "trials": effective_n_trials,
+            "rng_seed": effective_rng_seed,
             "silver_dir": str(silver_dir),
             "policy_profile": runtime_policy.profile,
         }
@@ -194,18 +216,10 @@ def run_gold_simulation_from_silver(
     write_parquet(temp_simulation_dir / "teams.parquet", teams_data)
     logger.info("[gold/simulation] loaded teams count=%s", len(teams_data))
     logger.info("[gold/simulation] runtime policy profile=%s", runtime_policy.profile)
-    base_config = BattleSimulationConfig()
-    runtime_config = BattleSimulationConfig(
-        max_overlevel=base_config.max_overlevel,
-        max_underlevel=base_config.max_underlevel,
-        n_battle_trials=int(n_trials or runtime_policy.n_battle_trials),
-        damage_randomness_min=runtime_policy.damage_random_min,
-        damage_randomness_max=runtime_policy.damage_random_max,
-        crit_chance=runtime_policy.crit_chance_default,
-        max_turns_per_duel=base_config.max_turns_per_duel,
-        rng_seed=int(rng_seed or runtime_policy.rng_seed),
-        require_exact_version_match=not bool(runtime_policy.allow_cross_version_fallback),
-        fail_on_degraded_data=bool(runtime_policy.fail_on_degraded_data),
+    runtime_config = _build_runtime_battle_config(
+        requested_trials=n_trials,
+        requested_seed=rng_seed,
+        runtime_policy=runtime_policy,
     )
 
     sims_started_at = time.perf_counter()
@@ -226,13 +240,13 @@ def run_gold_simulation_from_silver(
     logger.info("[gold/simulation] battle seeds done elapsed_s=%.2f", time.perf_counter() - seeds_started_at)
 
     mc_started_at = time.perf_counter()
-    logger.info("[gold/simulation] summarizing simulation results trials=%s seed=%s", n_trials, rng_seed)
+    logger.info("[gold/simulation] summarizing simulation results trials=%s seed=%s", effective_n_trials, effective_rng_seed)
     _run_gold_monte_carlo_optimizer(
         gold_dir=gold_dir,
         simulation_dirname=temp_simulation_dirname,
         silver_dir=silver_dir,
-        n_trials=n_trials,
-        rng_seed=rng_seed,
+        n_trials=effective_n_trials,
+        rng_seed=effective_rng_seed,
     )
     _stamp_simulation_run(temp_simulation_dir, run_id=run_id, input_fingerprint=input_fingerprint)
     if gold_simulation_dir.exists():

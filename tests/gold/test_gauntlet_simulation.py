@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import pytest
@@ -7,12 +8,14 @@ import pytest
 from src.pipeline.common.io import read_parquet, write_json, write_parquet
 from src.pipeline.gold.simulation.team_battle_simulations import (
     BattleSimulationConfig,
+    _calculate_damage,
     _install_reference_profiles,
     _stable_sequence_seed,
     build_team_battle_simulations,
     load_move_profiles_from_silver,
     load_pokemon_profiles_from_silver,
     simulate_gauntlet,
+    simulate_one_vs_one,
     simulate_team_battle,
 )
 
@@ -248,6 +251,296 @@ def test_simulate_team_battle_supports_double_battle_mode(tmp_path: Path) -> Non
     assert summaries
     assert any("events" in entry for entry in summaries)
     assert float(result["battle_turns"]) >= 1.0
+
+
+def test_damage_immunity_returns_zero_damage() -> None:
+    config = BattleSimulationConfig(damage_randomness_min=1.0, damage_randomness_max=1.0, crit_chance=0.0)
+    attacker = {
+        "species": "pikachu",
+        "species_id": "pikachu",
+        "level": 50,
+        "types": ["Electric"],
+        "stats": {"attack": 50, "defense": 50, "sp_attack": 100, "sp_defense": 50, "speed": 90, "hp": 35},
+        "max_hp": 100,
+        "current_hp": 100,
+        "legal_moves": [],
+    }
+    defender = {
+        "species": "golem",
+        "species_id": "golem",
+        "level": 50,
+        "types": ["Ground"],
+        "stats": {"attack": 100, "defense": 100, "sp_attack": 50, "sp_defense": 50, "speed": 45, "hp": 80},
+        "max_hp": 100,
+        "current_hp": 100,
+        "legal_moves": [],
+    }
+    move = {
+        "name": "thunderbolt",
+        "type": "electric",
+        "power": 90,
+        "raw_power": 90,
+        "effective_power": 90,
+        "power_handling": "direct_power",
+        "is_status_move": False,
+        "is_damage_move": True,
+        "is_null_power": False,
+        "damage_class": "special",
+        "accuracy": 100,
+        "pp": 15,
+        "level_learned_at": 1,
+        "version_group": "diamond-pearl",
+    }
+    type_chart = {"Electric": {"Ground": 0.0}}
+
+    damage = _calculate_damage(attacker, defender, move, type_chart, rng=random.Random(1), config=config)
+    assert damage == 0
+
+
+def test_one_vs_one_burn_adds_end_of_turn_chip_damage() -> None:
+    config = BattleSimulationConfig(
+        max_turns_per_duel=1,
+        damage_randomness_min=1.0,
+        damage_randomness_max=1.0,
+        crit_chance=0.0,
+    )
+    attacker = {
+        "species": "burner",
+        "species_id": "burner",
+        "level": 50,
+        "types": ["Fire"],
+        "stats": {"attack": 40, "defense": 80, "sp_attack": 40, "sp_defense": 80, "speed": 100, "hp": 90},
+        "max_hp": 160,
+        "current_hp": 160,
+        "legal_moves": [
+            {
+                "name": "will-o-wisp",
+                "type": "fire",
+                "power": 0,
+                "raw_power": 0,
+                "effective_power": 0,
+                "power_handling": "status",
+                "is_status_move": True,
+                "is_damage_move": False,
+                "is_null_power": False,
+                "damage_class": "status",
+                "accuracy": 100,
+                "pp": 15,
+                "level_learned_at": 1,
+                "version_group": "gold-silver",
+            }
+        ],
+    }
+    defender = {
+        "species": "target",
+        "species_id": "target",
+        "level": 50,
+        "types": ["Normal"],
+        "stats": {"attack": 40, "defense": 80, "sp_attack": 40, "sp_defense": 80, "speed": 50, "hp": 90},
+        "max_hp": 160,
+        "current_hp": 160,
+        "legal_moves": [
+            {
+                "name": "splash",
+                "type": "normal",
+                "power": 0,
+                "raw_power": 0,
+                "effective_power": 0,
+                "power_handling": "status",
+                "is_status_move": True,
+                "is_damage_move": False,
+                "is_null_power": False,
+                "damage_class": "status",
+                "accuracy": 100,
+                "pp": 40,
+                "level_learned_at": 1,
+                "version_group": "gold-silver",
+            }
+        ],
+    }
+
+    result = simulate_one_vs_one(
+        attacker=attacker,
+        defender=defender,
+        type_chart={"Fire": {"Normal": 1.0}, "Normal": {"Fire": 1.0, "Normal": 1.0}},
+        rng=random.Random(7),
+        config=config,
+    )
+
+    assert int(result["defender_remaining_hp"]) == 150
+
+
+def test_one_vs_one_sleep_blocks_defender_action() -> None:
+    config = BattleSimulationConfig(
+        max_turns_per_duel=1,
+        damage_randomness_min=1.0,
+        damage_randomness_max=1.0,
+        crit_chance=0.0,
+    )
+    attacker = {
+        "species": "sleeper",
+        "species_id": "sleeper",
+        "level": 50,
+        "types": ["Grass"],
+        "stats": {"attack": 40, "defense": 80, "sp_attack": 40, "sp_defense": 80, "speed": 100, "hp": 90},
+        "max_hp": 160,
+        "current_hp": 160,
+        "legal_moves": [
+            {
+                "name": "spore",
+                "type": "grass",
+                "power": 0,
+                "raw_power": 0,
+                "effective_power": 0,
+                "power_handling": "status",
+                "is_status_move": True,
+                "is_damage_move": False,
+                "is_null_power": False,
+                "damage_class": "status",
+                "accuracy": 100,
+                "pp": 15,
+                "level_learned_at": 1,
+                "version_group": "gold-silver",
+            }
+        ],
+    }
+    defender = {
+        "species": "hitter",
+        "species_id": "hitter",
+        "level": 50,
+        "types": ["Normal"],
+        "stats": {"attack": 120, "defense": 80, "sp_attack": 40, "sp_defense": 80, "speed": 50, "hp": 90},
+        "max_hp": 160,
+        "current_hp": 160,
+        "legal_moves": [
+            {
+                "name": "tackle",
+                "type": "normal",
+                "power": 40,
+                "raw_power": 40,
+                "effective_power": 40,
+                "power_handling": "direct_power",
+                "is_status_move": False,
+                "is_damage_move": True,
+                "is_null_power": False,
+                "damage_class": "physical",
+                "accuracy": 100,
+                "pp": 35,
+                "level_learned_at": 1,
+                "version_group": "gold-silver",
+            }
+        ],
+    }
+
+    result = simulate_one_vs_one(
+        attacker=attacker,
+        defender=defender,
+        type_chart={"Grass": {"Normal": 1.0}, "Normal": {"Grass": 1.0, "Normal": 1.0}},
+        rng=random.Random(11),
+        config=config,
+    )
+
+    assert int(result["attacker_remaining_hp"]) == 160
+
+
+def test_single_battle_stalemate_is_resolved_and_warned(tmp_path: Path) -> None:
+    silver_dir = tmp_path / "silver"
+    references_dir = silver_dir / "references"
+    references_dir.mkdir(parents=True, exist_ok=True)
+
+    write_parquet(
+        references_dir / "pokemon_data.parquet",
+        [
+            {
+                "name": "grounder_a",
+                "pokemon_species": "grounder_a",
+                "type_1": "ground",
+                "type_2": None,
+                "base_hp": 1,
+                "base_attack": 90,
+                "base_defense": 90,
+                "base_special_attack": 90,
+                "base_special_defense": 90,
+                "base_speed": 60,
+            },
+            {
+                "name": "grounder_b",
+                "pokemon_species": "grounder_b",
+                "type_1": "ground",
+                "type_2": None,
+                "base_hp": 1,
+                "base_attack": 90,
+                "base_defense": 90,
+                "base_special_attack": 90,
+                "base_special_defense": 90,
+                "base_speed": 50,
+            },
+        ],
+    )
+    write_parquet(
+        references_dir / "move_reference.parquet",
+        [
+            {
+                "move_name": "thunderbolt",
+                "type": "electric",
+                "damage_class": "special",
+                "power": 90,
+                "raw_power": 90,
+                "effective_power": 90,
+                "accuracy": 100,
+                "pp": 15,
+                "power_handling": "direct_power",
+                "is_status_move": False,
+                "is_damage_move": True,
+                "is_null_power": False,
+            }
+        ],
+    )
+
+    _install_reference_profiles(
+        load_pokemon_profiles_from_silver(silver_dir),
+        load_move_profiles_from_silver(silver_dir),
+    )
+
+    attacker_team = {
+        "team_id": "STALL_PLAYER",
+        "game_version": "gold",
+        "team_role": "player",
+        "origin": "generated",
+        "is_player_candidate": True,
+        "gym": "morty",
+        "pokemon": ["grounder_a"],
+        "levels": [45],
+        "moves": [["thunderbolt"]],
+        "avg_level": 45,
+    }
+    defender_team = {
+        "team_id": "STALL_BOSS",
+        "game_version": "gold",
+        "team_role": "boss",
+        "origin": "kaggle",
+        "is_player_candidate": False,
+        "boss_name": "Morty",
+        "gym": "morty",
+        "pokemon": ["grounder_b"],
+        "levels": [45],
+        "moves": [["thunderbolt"]],
+        "avg_level": 45,
+    }
+
+    result = simulate_team_battle(
+        attacker_team=attacker_team,
+        defender_team=defender_team,
+        type_chart={"Electric": {"Ground": 0.0}},
+        attacker_game_version="gold",
+        defender_game_version="gold",
+        n_trials=1,
+        rng_seed=19,
+        config=_battle_config(),
+    )
+
+    assert bool(result["attacker_win"])
+    assert any("stalemate_resolved_single_battle" in warning for warning in result["warnings"])
 
 
 def test_missing_boss_team_fails_fast_for_gauntlet_validation(tmp_path: Path) -> None:

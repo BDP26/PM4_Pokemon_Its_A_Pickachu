@@ -160,7 +160,6 @@ def test_runtime_n_trials_propagates_to_outputs(tmp_path: Path) -> None:
                 "predicted_player_win_chance": 0.6,
                 "simulation_score": 1.0,
                 "attacker_win": True,
-                "degraded_data": False,
                 "n_trials": 7,
             }
         ],

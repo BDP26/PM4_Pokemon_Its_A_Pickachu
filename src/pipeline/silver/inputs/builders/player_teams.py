@@ -20,6 +20,7 @@ from src.pipeline.silver.config.game_config import (
     resolve_starter_species_for_level,
 )
 from src.pipeline.silver.config.team_config import (
+    ALLOW_ITEM_EVOLUTIONS,
     DEFAULT_CATCH_POOL_SIZE,
     DEFAULT_MEMBER_LEVEL,
     DEFAULT_MEMBER_MOVESET_COMBO_LIMIT,
@@ -27,11 +28,13 @@ from src.pipeline.silver.config.team_config import (
     DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
     DEFAULT_SOURCE_TEAM_POOL_SIZE,
     DEFAULT_TEAM_MEMBER_LIMIT,
+    ITEM_EVOLUTION_DEFAULT_LEVEL,
     MOVESET_WIDTH,
 )
 from src.pipeline.silver.inputs.builders.evolution_normalization import (
     legal_species_pool_for_level,
     normalize_candidate_pool_for_level,
+    normalize_species_for_level,
     validate_candidate_pool,
     validate_generated_team,
 )
@@ -200,6 +203,162 @@ def _target_team_fill_size(
     # 2 slots in very early game, gradually up to max_size near endgame.
     scaled = 2 + int(round(depth * float(max_size - 2)))
     return max(1, min(max_size, scaled))
+
+
+def _normalize_trigger_name(trigger: Any) -> str:
+    return str(trigger or "").strip().lower().replace("_", "-")
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_adjacency_evolution_rules(
+    evolution_rules: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    rules_raw = evolution_rules or {}
+    if not isinstance(rules_raw, dict):
+        return {}
+    if rules_raw:
+        sample = next(iter(rules_raw.values()))
+        if isinstance(sample, dict) and "evolution_stage" in sample:
+            return normalize_candidate_pool_for_level.__globals__["build_level_up_evolution_index_from_species_rules"](rules_raw)  # type: ignore[index]
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for species, options in rules_raw.items():
+        species_key = normalize_key_part(species)
+        if not species_key or not isinstance(options, list):
+            continue
+        clean_options = [option for option in options if isinstance(option, dict)]
+        if clean_options:
+            normalized[species_key] = clean_options
+    return normalized
+
+
+def _propagate_obtainable_candidates(
+    raw_candidates: list[tuple[str, int, int, int]],
+    *,
+    evolution_rules: dict[str, Any] | None,
+    allow_trade_evolutions: bool,
+    allow_item_evolutions: bool,
+    item_evolution_default_level: int,
+) -> tuple[list[tuple[str, int, int, int]], dict[str, dict[str, Any]], set[str]]:
+    direct_rows: dict[str, tuple[str, int, int, int]] = {}
+    for species, chance, lvl_max, capture in raw_candidates:
+        key = normalize_key_part(species)
+        if not key:
+            continue
+        existing = direct_rows.get(key)
+        row = (key, int(chance or 0), int(lvl_max or 0), int(capture or 0))
+        if existing is None:
+            direct_rows[key] = row
+            continue
+        direct_rows[key] = (key, max(existing[1], row[1]), max(existing[2], row[2]), max(existing[3], row[3]))
+
+    rules = _normalize_adjacency_evolution_rules(evolution_rules)
+    obtainable_rows = dict(direct_rows)
+    obtainable_meta: dict[str, dict[str, Any]] = {
+        species: {"directly_catchable": True, "obtain_method": "direct", "evolves_from": None, "required_item": None, "min_level": None}
+        for species in direct_rows
+    }
+    queue = list(direct_rows.keys())
+
+    while queue:
+        current = queue.pop(0)
+        source_row = obtainable_rows.get(current)
+        if source_row is None:
+            continue
+        for option in rules.get(current, []):
+            target = normalize_key_part(option.get("to_species") or option.get("evolves_to") or option.get("species"))
+            if not target:
+                continue
+            trigger = _normalize_trigger_name(option.get("trigger") or option.get("evolution_trigger"))
+            raw_min_level = option.get("min_level") or option.get("min_level_from_previous") or option.get("level")
+            try:
+                min_level = int(str(raw_min_level).strip()) if raw_min_level is not None else None
+            except (TypeError, ValueError):
+                min_level = None
+            required_item = normalize_key_part(option.get("required_item") or option.get("item"))
+            supported = False
+            method = "evolution"
+            assigned_min_level = min_level
+            if trigger == "level-up":
+                supported = min_level is not None
+                method = "level_evolution"
+            elif trigger == "trade":
+                supported = allow_trade_evolutions
+                method = "trade_evolution"
+                assigned_min_level = min_level or 1
+            elif trigger in {"use-item", "item"}:
+                supported = allow_item_evolutions and bool(required_item)
+                method = "item_evolution"
+                assigned_min_level = max(1, int(source_row[2] or 0), int(item_evolution_default_level or 1))
+            if not supported:
+                continue
+            if target in obtainable_rows:
+                continue
+            obtainable_rows[target] = (target, source_row[1], source_row[2], source_row[3])
+            obtainable_meta[target] = {
+                "directly_catchable": False,
+                "obtain_method": method,
+                "evolves_from": current,
+                "required_item": required_item if method == "item_evolution" else None,
+                "min_level": assigned_min_level,
+            }
+            queue.append(target)
+
+    return (
+        sorted(obtainable_rows.values(), key=lambda item: (item[0])),
+        obtainable_meta,
+        set(direct_rows.keys()),
+    )
+
+
+def _filter_candidates_by_obtainable_level_cap(
+    raw_candidates: list[tuple[str, int, int, int]],
+    *,
+    direct_level_min_by_species: dict[str, int],
+    level_cap: int,
+    evolution_rules: dict[str, Any] | None,
+    allow_trade_evolutions: bool,
+    allow_item_evolutions: bool,
+    item_evolution_default_level: int,
+) -> list[tuple[str, int, int, int]]:
+    _, obtainable_meta, _ = _propagate_obtainable_candidates(
+        raw_candidates,
+        evolution_rules=evolution_rules,
+        allow_trade_evolutions=allow_trade_evolutions,
+        allow_item_evolutions=allow_item_evolutions,
+        item_evolution_default_level=item_evolution_default_level,
+    )
+
+    min_obtainable_cache: dict[str, int] = {}
+
+    def _min_obtainable_level(species_name: str) -> int:
+        species_key = normalize_key_part(species_name)
+        if not species_key:
+            return 1
+        if species_key in min_obtainable_cache:
+            return min_obtainable_cache[species_key]
+
+        info = obtainable_meta.get(species_key, {})
+        direct_min = _parse_positive_int(direct_level_min_by_species.get(species_key)) or 1
+        if bool(info.get("directly_catchable", True)):
+            min_obtainable_cache[species_key] = direct_min
+            return direct_min
+
+        parent = normalize_key_part(info.get("evolves_from"))
+        parent_min = _min_obtainable_level(parent) if parent else direct_min
+        evolution_min = _parse_positive_int(info.get("min_level")) or 1
+        value = max(parent_min, evolution_min)
+        min_obtainable_cache[species_key] = value
+        return value
+
+    cap = max(1, int(level_cap or 1))
+    return [row for row in raw_candidates if _min_obtainable_level(row[0]) <= cap]
 
 
 def _legacy_progression_depth_context_from_boss_teams(
@@ -403,6 +562,7 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
     pools: list[dict[str, Any]] = []
     seen_locations_by_game: dict[str, set[str]] = {}
     cumulative_candidates_by_game: dict[str, dict[str, tuple[str, int, int, int]]] = {}
+    direct_level_min_by_game: dict[str, dict[str, int]] = {}
     candidate_sources_by_game: dict[str, dict[str, set[str]]] = {}
 
     for record in progression_records:
@@ -414,6 +574,7 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
         location_to_encounters = record.get("reachable_location_encounters", {})
         known_locations = seen_locations_by_game.setdefault(game_version, set())
         cumulative_candidates = cumulative_candidates_by_game.setdefault(game_version, {})
+        direct_level_min = direct_level_min_by_game.setdefault(game_version, {})
         candidate_sources = candidate_sources_by_game.setdefault(game_version, {})
 
         delta_locations: list[str] = []
@@ -438,6 +599,7 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
                     continue
                 chance_max = int(encounter.get("encounter_chance_max") or 0)
                 level_max = int(encounter.get("level_max") or 0)
+                level_min = int(encounter.get("level_min") or 0)
                 capture_rate = int(encounter.get("capture_rate") or 0)
                 prior = cumulative_candidates.get(species)
                 updated = (
@@ -449,6 +611,10 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
                 if prior is None:
                     delta_species_count += 1
                 cumulative_candidates[species] = updated
+                if species not in direct_level_min:
+                    direct_level_min[species] = level_min
+                else:
+                    direct_level_min[species] = min(int(direct_level_min[species]), level_min)
                 candidate_sources.setdefault(species, set()).add(location)
 
         known_locations.update(delta_locations)
@@ -468,6 +634,7 @@ def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> l
                 "delta_location_count": len(delta_locations),
                 "delta_species_count": delta_species_count,
                 "pool_delta_added": [species for species, _, _, _ in pool_candidates][-delta_species_count:] if delta_species_count else [],
+                "direct_level_min_by_species": dict(direct_level_min),
                 "candidate_sources": {k: sorted(v) for k, v in candidate_sources.items()},
             }
         )
@@ -534,6 +701,8 @@ def build_progression_source_teams(
     evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     reference_context: MoveReferenceContext | None = None,
     allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = ALLOW_ITEM_EVOLUTIONS,
+    item_evolution_default_level: int = ITEM_EVOLUTION_DEFAULT_LEVEL,
 ) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     level_by_boss = _boss_level_lookup(boss_teams)
@@ -555,13 +724,29 @@ def build_progression_source_teams(
         boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
         target_generation = _generation_for_game_version(game_version)
         raw_candidates = list(pool["pool_candidates"])
+        direct_level_min_by_species = {
+            normalize_key_part(species): int(level_min)
+            for species, level_min in dict(pool.get("direct_level_min_by_species") or {}).items()
+            if normalize_key_part(species)
+        }
         evolution_rules = evolution_rules_by_game.get(game_version, {})
+        raw_candidates = _filter_candidates_by_obtainable_level_cap(
+            raw_candidates,
+            direct_level_min_by_species=direct_level_min_by_species,
+            level_cap=boss_level,
+            evolution_rules=evolution_rules,
+            allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
+        )
         legal_species = legal_species_pool_for_level(
             raw_candidates,
             member_level=boss_level,
             evolution_rules=evolution_rules,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
             raw_candidates,
@@ -570,6 +755,8 @@ def build_progression_source_teams(
             legal_species=legal_species if legal_species else None,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         if legal_species:
             validate_candidate_pool(normalized_candidates, legal_species=legal_species, game_version=game_version)
@@ -664,6 +851,8 @@ def build_progression_source_teams_from_encounters(
     evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     reference_context: MoveReferenceContext | None = None,
     allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = ALLOW_ITEM_EVOLUTIONS,
+    item_evolution_default_level: int = ITEM_EVOLUTION_DEFAULT_LEVEL,
 ) -> list[dict[str, Any]]:
     """Build player source teams using persisted Silver references only."""
     required_encounter_columns = {
@@ -771,13 +960,13 @@ def build_progression_source_teams_from_encounters(
 
         if (game_version, boss_id) not in legal_pairs:
             dropped_missing_boss += 1
-            logger.error(
-                "[silver/teams] candidates dropped missing boss encounter pool game=%s boss_id=%s boss_name=%s",
+            logger.warning(
+                "[silver/teams] skipping boss without encounter pool game=%s boss_id=%s boss_name=%s",
                 game_version,
                 boss_id,
                 boss_name,
             )
-            raise ValueError(f"Missing encounter pool for game={game_version} boss_id={boss_id} boss_name={boss_name}")
+            continue
 
         boss_rows = encounters[(encounters["game_version"] == game_version) & (encounters["boss_id"] == boss_id)]
         if boss_rows.empty:
@@ -816,6 +1005,21 @@ def build_progression_source_teams_from_encounters(
             for row in grouped.itertuples(index=False)
             if not is_restricted_encounter_species(str(row.pokemon_species))
         ]
+        direct_level_min_by_species = {
+            str(row.pokemon_species): int(row.level_min)
+            for row in grouped.itertuples(index=False)
+            if not is_restricted_encounter_species(str(row.pokemon_species))
+        }
+        evolution_rules = evolution_rules_by_game.get(game_version, {})
+        raw_candidates = _filter_candidates_by_obtainable_level_cap(
+            raw_candidates,
+            direct_level_min_by_species=direct_level_min_by_species,
+            level_cap=player_level_cap,
+            evolution_rules=evolution_rules,
+            allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
+        )
         raw_species = {species for species, _, _, _ in raw_candidates}
         logger.debug(
             "[silver/teams] per-boss raw candidate count game=%s boss_id=%s boss_name=%s count=%s",
@@ -833,6 +1037,8 @@ def build_progression_source_teams_from_encounters(
             evolution_rules=evolution_rules,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
             raw_candidates,
@@ -841,6 +1047,8 @@ def build_progression_source_teams_from_encounters(
             legal_species=legal_species if legal_species else None,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         validate_candidate_pool(normalized_candidates, legal_species=legal_species or raw_species, game_version=game_version)
 
@@ -964,6 +1172,11 @@ def build_progression_source_teams_from_encounters(
 def build_player_team_compact_tables(
     progression_source_teams: list[dict[str, Any]],
     reference_context: MoveReferenceContext,
+    *,
+    evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = ALLOW_ITEM_EVOLUTIONS,
+    item_evolution_default_level: int = ITEM_EVOLUTION_DEFAULT_LEVEL,
 ) -> dict[str, list[dict[str, Any]]]:
     started_at = time.perf_counter()
     source_teams: list[dict[str, Any]] = []
@@ -977,6 +1190,7 @@ def build_player_team_compact_tables(
     moveset_choice_seen: set[tuple[str, str, int, str, str]] = set()
     estimated_avoided_variants = 0
 
+    evolution_rules_by_game = evolution_rules_by_game or {}
     for progression_team in progression_source_teams:
         team_role = normalize_key_part(progression_team.get("team_role"))
         origin = normalize_key_part(progression_team.get("origin"))
@@ -987,6 +1201,8 @@ def build_player_team_compact_tables(
         if team_role == "boss" or origin == "kaggle" or not is_player_candidate:
             continue
         game_version = normalize_key_part(progression_team.get("game_version"))
+        target_generation = _generation_for_game_version(game_version)
+        evolution_rules = evolution_rules_by_game.get(game_version, {})
         avg_level = int(progression_team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
         starters = _resolve_starters_for_condition(game_version, starter_condition)
         if not game_version or not starters:
@@ -1041,6 +1257,16 @@ def build_player_team_compact_tables(
             for slot, species in enumerate(logical_species, start=1):
                 species_norm = normalize_key_part(species)
                 level = int(levels[slot - 1] if slot - 1 < len(levels) else avg_level)
+                if species_norm:
+                    species_norm, _ = normalize_species_for_level(
+                        species_norm,
+                        member_level=level,
+                        evolution_rules=evolution_rules,
+                        target_generation=target_generation,
+                        allow_trade_evolutions=allow_trade_evolutions,
+                        allow_item_evolutions=allow_item_evolutions,
+                        item_evolution_default_level=item_evolution_default_level,
+                    )
                 member_id = make_pokemon_instance_id(source_team_id, slot, species_norm)
                 source_team_members.append(
                     {

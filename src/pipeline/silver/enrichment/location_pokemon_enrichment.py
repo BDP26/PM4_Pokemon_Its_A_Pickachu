@@ -228,6 +228,11 @@ def get_location_area_and_pokemon_maps(
     snapshot_map = (snapshot or {}).get("location_pokemon_map", {}) if isinstance(snapshot, dict) else {}
     if not isinstance(snapshot_map, dict):
         snapshot_map = {}
+    if not snapshot_map:
+        raise ValueError(
+            "Bronze location snapshot is empty: "
+            f"{snapshot_path}. location_pokemon_map has no entries; run Bronze refresh before Silver."
+        )
 
     area_map: dict[str, list[str]] = {}
     location_pokemon_map: dict[str, dict[str, Any]] = {}

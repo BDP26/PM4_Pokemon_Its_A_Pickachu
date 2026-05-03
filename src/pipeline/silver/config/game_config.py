@@ -141,7 +141,6 @@ BASE_GAME_GROUPS = [
         "bosses": [
             "Falkner", "Bugsy", "Whitney", "Morty", "Chuck", "Jasmine", "Pryce",
             "Clair", "Will", "Koga", "Bruno", "Karen", "Lance",
-            "Lt. Surge", "Sabrina", "Misty", "Erika", "Janine", "Brock", "Blaine", "Blue",
         ],
     },
     {

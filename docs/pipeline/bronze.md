@@ -28,6 +28,7 @@ Bronze collects raw source data and stores it reproducibly. It does not apply bu
 
 - `data/bronze/bulbapedia/*.json`
 - `data/bronze/pokeapi/location_index.json`
+- `data/bronze/pokeapi/location_pokemon_snapshot.json`
 - `data/bronze/kagglehub/gym_leaders_elite_four.csv`
 - `data/bronze/kagglehub/manifest.json`
 - `data/bronze/config/games_config.json`
@@ -36,6 +37,7 @@ Bronze collects raw source data and stores it reproducibly. It does not apply bu
 ## Operational notes
 
 - Bronze intentionally keeps noisy/raw data for traceability.
+- Bronze fails fast when `location_pokemon_snapshot.json` cannot be built with non-empty `location_pokemon_map`.
 - Missing walkthrough roots are skipped, not fatal to full Bronze execution.
 - Kaggle export (`data/bronze/kagglehub/gym_leaders_elite_four.csv`) is mandatory for Silver and must be present after Bronze.
 - Gold does not read Bronze directly; data must flow through Silver contracts.

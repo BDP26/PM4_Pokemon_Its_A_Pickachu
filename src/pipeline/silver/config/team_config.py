@@ -90,22 +90,22 @@ GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 # Override with environment variables when needed.
 
 # Species / source-team diversity controls.
-DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 8, minimum=1)
-DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 18, minimum=1)
-DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 80, minimum=1)
+DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 14, minimum=1)
+DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 32, minimum=1)
+DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 60, minimum=1)
 
 # Compact Silver move option controls.
-DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 10, minimum=1)
+DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 6, minimum=1)
 DEFAULT_MEMBER_MOVESET_COMBO_LIMIT = _env_int(
     "PM4_MEMBER_MOVESET_COMBO_LIMIT",
-    _env_int("PM4_MEMBER_COMBO_LIMIT", 15, minimum=1),
+    _env_int("PM4_MEMBER_COMBO_LIMIT", 5, minimum=1),
     minimum=1,
 )
 DEFAULT_MEMBER_COMBO_LIMIT = DEFAULT_MEMBER_MOVESET_COMBO_LIMIT
 
 # Gold/simulation sampling controls.
-DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT = _env_int("PM4_SIMULATION_TEAM_SAMPLE_LIMIT", 160, minimum=1)
-DEFAULT_SIMULATION_ENUMERATION_THRESHOLD = _env_int("PM4_SIMULATION_ENUMERATION_THRESHOLD", 256, minimum=1)
+DEFAULT_SIMULATION_TEAM_SAMPLE_LIMIT = _env_int("PM4_SIMULATION_TEAM_SAMPLE_LIMIT", 96, minimum=1)
+DEFAULT_SIMULATION_ENUMERATION_THRESHOLD = _env_int("PM4_SIMULATION_ENUMERATION_THRESHOLD", 160, minimum=1)
 
 # Team structure.
 # Pokémon battle teams are capped at six members in core games.
@@ -123,6 +123,8 @@ DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20, minimum=1)
 DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
 TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000, minimum=1)
 ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
+ALLOW_ITEM_EVOLUTIONS = _env_bool("PM4_ALLOW_ITEM_EVOLUTIONS", True)
+ITEM_EVOLUTION_DEFAULT_LEVEL = _env_int("PM4_ITEM_EVOLUTION_DEFAULT_LEVEL", 1, minimum=1)
 DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
 SIMULATION_POLICY_PROFILE = os.getenv("PM4_SIM_POLICY_PROFILE", "strict").strip().lower() or "strict"
 
@@ -192,4 +194,6 @@ def resolve_runtime_team_config() -> dict[str, object]:
         "deprecated_moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
         "deprecated_team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
         "deprecated_allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
+        "allow_item_evolutions": ALLOW_ITEM_EVOLUTIONS,
+        "item_evolution_default_level": ITEM_EVOLUTION_DEFAULT_LEVEL,
     }

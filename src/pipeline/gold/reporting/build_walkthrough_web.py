@@ -283,6 +283,65 @@ def _load_move_reference(silver_dir: Path, silver_manifest: dict[str, Any]) -> d
     return reference
 
 
+def _load_evolution_index(silver_dir: Path, silver_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    evolution_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "evolution_rules")
+    try:
+        frame = read_parquet(evolution_path)
+    except Exception as exc:
+        _raise_web_contract_error(
+            "invalid_evolution_rules",
+            f"Failed to read evolution_rules dataset ({exc}).",
+            dataset="evolution_rules",
+            path=evolution_path,
+        )
+
+    if frame.empty:
+        return {}
+
+    rows = frame.to_dict(orient="records")
+    by_base: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        game = str(row.get("game_version") or "").strip().lower()
+        base = _species_slug(str(row.get("base_species") or ""))
+        species = _species_slug(str(row.get("species_name") or ""))
+        if not game or not base or not species:
+            continue
+        by_base.setdefault((game, base), []).append(
+            {
+                "species": species,
+                "stage": _safe_int(row.get("evolution_stage")) or 1,
+                "min_level": _safe_int(row.get("min_valid_level")),
+                "from_prev_level": _safe_int(row.get("min_level_from_previous")),
+            }
+        )
+
+    index: dict[str, dict[str, Any]] = {}
+    for (_, _), chain in by_base.items():
+        ordered = sorted(chain, key=lambda item: (int(item.get("stage") or 0), str(item.get("species") or "")))
+        for item in ordered:
+            species = str(item.get("species") or "")
+            if not species:
+                continue
+            existing = index.setdefault(species, {"evolves_from": None, "evolves_to": []})
+            prev_items = [c for c in ordered if int(c.get("stage") or 0) == int(item.get("stage") or 0) - 1]
+            next_items = [c for c in ordered if int(c.get("stage") or 0) == int(item.get("stage") or 0) + 1]
+            if prev_items and existing["evolves_from"] is None:
+                existing["evolves_from"] = str(prev_items[0].get("species") or "")
+            if next_items:
+                current_to = {str(v.get("species") or "") for v in existing["evolves_to"]}
+                for nxt in next_items:
+                    nxt_species = str(nxt.get("species") or "")
+                    if nxt_species in current_to:
+                        continue
+                    existing["evolves_to"].append(
+                        {
+                            "species": nxt_species,
+                            "min_level": nxt.get("from_prev_level") or nxt.get("min_level"),
+                        }
+                    )
+    return index
+
+
 def _boss_special_tags(boss_meta: dict[str, Any]) -> list[str]:
     tags: list[str] = []
     boss_role = str(boss_meta.get("boss_role") or "")
@@ -1031,6 +1090,7 @@ def build_walkthrough_best_teams_payload(
 
     pokemon_reference = _load_pokemon_reference(silver_dir, silver_manifest)
     move_reference = _load_move_reference(silver_dir, silver_manifest)
+    evolution_index = _load_evolution_index(silver_dir, silver_manifest)
     boss_metadata = _load_boss_metadata(silver_dir, silver_manifest)
     boss_team_payloads = _load_boss_team_payloads(silver_dir, silver_manifest, pokemon_reference)
     boss_team_variants = _load_boss_team_variants(silver_dir, silver_manifest, pokemon_reference)
@@ -1213,7 +1273,6 @@ def build_walkthrough_best_teams_payload(
                 payload["sequence_expected_wins"] = seq_row.get("sequence_expected_wins")
                 payload["sequence_expected_wins_pct"] = seq_row.get("sequence_expected_wins_pct")
                 payload["strict_clear_rate"] = seq_row.get("strict_clear_rate")
-                payload["degraded_ratio"] = seq_row.get("degraded_ratio")
                 payload["rank_in_sequence"] = seq_row.get("rank_in_sequence")
                 sequence_payloads.append(payload)
 
@@ -1241,6 +1300,7 @@ def build_walkthrough_best_teams_payload(
         "starter_choices_by_version": starter_choices_by_version,
         "starter_family_members_by_version": starter_family_members_by_version,
         "move_reference": move_reference,
+        "evolution_index": evolution_index,
         "walkthroughs": walkthroughs,
         "elite_four_champion_sequence_by_version": elite_four_champion_sequence_by_version,
     }

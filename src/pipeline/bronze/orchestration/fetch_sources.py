@@ -1,5 +1,7 @@
 import re
 import time
+import hashlib
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, cast
@@ -26,11 +28,41 @@ import kagglehub
 from kagglehub import KaggleDatasetAdapter
 
 _TITLE_EXISTS_CACHE: dict[str, bool] = {}
+logger = logging.getLogger(__name__)
 
 
 def _should_write_source(source_state: dict[str, dict[str, object]], source_name: str, signature: str) -> bool:
+    return _should_write_source_with_force(source_state, source_name, signature, force_write=False)
+
+
+def _should_write_source_with_force(
+    source_state: dict[str, dict[str, object]],
+    source_name: str,
+    signature: str,
+    *,
+    force_write: bool,
+) -> bool:
+    if force_write:
+        return True
     previous = source_state.get(source_name, {})
     return str(previous.get("signature") or "") != signature
+
+
+def _compute_bronze_code_fingerprint() -> str:
+    tracked_files = [
+        Path(__file__).resolve(),
+        (Path(__file__).resolve().parent / "config_snapshot.py"),
+    ]
+    digest = hashlib.sha256()
+    for file_path in tracked_files:
+        digest.update(str(file_path).encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(file_path.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def page_exists(session, title: str) -> bool:
@@ -90,6 +122,26 @@ def _get_pokebase_payload(endpoint: str, resource_name_or_id: str | int | None =
     return payload if isinstance(payload, dict) else {}
 
 
+def _resource_id_from_url(resource_url: str) -> int | None:
+    url = str(resource_url or "").strip()
+    match = re.search(r"/(\d+)/?$", url)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_payload_with_id_fallback(endpoint: str, primary: str | int | None, fallback_id: int | None) -> dict[str, object]:
+    payload = _get_pokebase_payload(endpoint, primary)
+    if payload:
+        return payload
+    if fallback_id is None:
+        return {}
+    return _get_pokebase_payload(endpoint, fallback_id)
+
+
 def _fetch_pokeapi_location_index() -> dict[str, object]:
     location_payload = _get_pokebase_payload("location")
     results = location_payload.get("results", [])
@@ -127,14 +179,33 @@ def _build_location_pokemon_snapshot(location_index: dict[str, object]) -> dict[
     diagnostics: dict[str, object] = {"location_errors": [], "area_errors": [], "capture_rate_errors": []}
     payload: dict[str, dict[str, object]] = {}
     capture_rate_cache: dict[str, int | None] = {}
+    snapshot_started_at = time.perf_counter()
+    progress_interval = 25
+    area_id_by_name: dict[str, int] = {}
+    area_rows = location_index.get("location_area_results", [])
+    for area_row in area_rows if isinstance(area_rows, list) else []:
+        area_name = str((area_row or {}).get("name") or "").strip()
+        area_id = _resource_id_from_url(str((area_row or {}).get("url") or ""))
+        if area_name and area_id is not None:
+            area_id_by_name[area_name] = area_id
 
     location_rows = location_index.get("results", [])
-    for location in location_rows if isinstance(location_rows, list) else []:
+    safe_location_rows = location_rows if isinstance(location_rows, list) else []
+    total_locations = len(safe_location_rows)
+    for idx, location in enumerate(safe_location_rows, start=1):
         slug = str((location or {}).get("name") or "").strip()
+        if idx == 1 or idx % progress_interval == 0 or idx == total_locations:
+            logger.info(
+                "[bronze][pokeapi] snapshot progress=%s/%s current_location=%s",
+                idx,
+                total_locations,
+                slug or "<missing>",
+            )
+        location_id = _resource_id_from_url(str((location or {}).get("url") or ""))
         if not slug:
             continue
         try:
-            location_payload = _get_pokebase_payload("location", slug)
+            location_payload = _get_payload_with_id_fallback("location", slug, location_id)
             if not location_payload:
                 cast(list[dict[str, object]], diagnostics["location_errors"]).append({"slug": slug, "status": 404})
                 continue
@@ -147,8 +218,9 @@ def _build_location_pokemon_snapshot(location_index: dict[str, object]) -> dict[
         version_encounters = defaultdict[str, dict[str, dict[str, object]]](dict)
         area_details: dict[str, dict[str, object]] = {}
         for area_name in area_names:
+            area_id = area_id_by_name.get(area_name)
             try:
-                area_payload = _get_pokebase_payload("location-area", area_name)
+                area_payload = _get_payload_with_id_fallback("location-area", area_name, area_id)
                 if not area_payload:
                     cast(list[dict[str, object]], diagnostics["area_errors"]).append({"slug": slug, "area": area_name, "status": 404})
                     continue
@@ -282,7 +354,29 @@ def _build_location_pokemon_snapshot(location_index: dict[str, object]) -> dict[
             "areas_detail": {name: area_details[name] for name in sorted(area_details)},
         }
 
+    logger.info(
+        "[bronze][pokeapi] snapshot done locations=%s mapped=%s location_errors=%s area_errors=%s capture_rate_errors=%s elapsed_s=%.2f",
+        total_locations,
+        len(payload),
+        len(cast(list[dict[str, object]], diagnostics["location_errors"])),
+        len(cast(list[dict[str, object]], diagnostics["area_errors"])),
+        len(cast(list[dict[str, object]], diagnostics["capture_rate_errors"])),
+        time.perf_counter() - snapshot_started_at,
+    )
     return {"location_pokemon_map": payload, "diagnostics": diagnostics}
+
+
+def _validate_location_snapshot(snapshot: dict[str, object]) -> None:
+    location_map = snapshot.get("location_pokemon_map") if isinstance(snapshot, dict) else None
+    if not isinstance(location_map, dict) or not location_map:
+        diagnostics = snapshot.get("diagnostics") if isinstance(snapshot, dict) else {}
+        location_errors = diagnostics.get("location_errors") if isinstance(diagnostics, dict) else []
+        area_errors = diagnostics.get("area_errors") if isinstance(diagnostics, dict) else []
+        raise ValueError(
+            "Bronze location snapshot generation failed: location_pokemon_map is empty "
+            f"location_errors={len(location_errors) if isinstance(location_errors, list) else 'n/a'} "
+            f"area_errors={len(area_errors) if isinstance(area_errors, list) else 'n/a'}"
+        )
 
 
 def get_walkthrough_parts(session, root_title: str) -> list[dict]:
@@ -313,6 +407,7 @@ def fetch_kaggle_gym_leaders_dataset(
     dataset_handle: str = KAGGLE_GYM_LEADERS_DATASET,
     file_path: str = KAGGLE_GYM_LEADERS_FILE_PATH,
 ) -> None:
+    logger.info("[bronze][kaggle] start dataset_handle=%s file_path=%s", dataset_handle, file_path or "<auto>")
     kaggle_output_dir = (output_dir or BRONZE_DIR) / "kagglehub"
     kaggle_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -335,6 +430,7 @@ def fetch_kaggle_gym_leaders_dataset(
     row_count = None
     columns = None
     if selected_file:
+        logger.info("[bronze][kaggle] loading file=%s", selected_file)
         dataset_loader = getattr(kagglehub, "dataset_load", None)
         if dataset_loader is None:
             dataset_loader = getattr(kagglehub, "load_dataset", None)
@@ -350,8 +446,9 @@ def fetch_kaggle_gym_leaders_dataset(
         dataframe.to_csv(table_output_path, index=False)
         row_count = int(len(dataframe))
         columns = list(dataframe.columns)
+        logger.info("[bronze][kaggle] loaded rows=%s columns=%s", row_count, len(columns))
     else:
-        print("[bronze] warning: No tabular file detected in Kaggle dataset; skipped dataframe export")
+        logger.warning("[bronze][kaggle] no tabular file detected; skipped dataframe export")
 
     metadata = {
         "dataset_handle": dataset_handle,
@@ -362,11 +459,12 @@ def fetch_kaggle_gym_leaders_dataset(
         "columns": columns,
     }
     write_json(kaggle_output_dir / "manifest.json", metadata)
-    print(f"[bronze] wrote Kaggle dataset artifacts (without raw copy) to {kaggle_output_dir}")
+    logger.info("[bronze][kaggle] wrote artifacts to %s", kaggle_output_dir)
 
 
 def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool = True) -> None:
     started_at = now_utc_iso()
+    started_at_perf = time.perf_counter()
     ensure_medallion_dirs()
     output = output_dir or BRONZE_DIR
     output.mkdir(parents=True, exist_ok=True)
@@ -377,17 +475,34 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
     pokeapi_dir.mkdir(parents=True, exist_ok=True)
 
     source_state = load_source_state(output)
+    state_meta = source_state.get("__meta__", {}) if isinstance(source_state.get("__meta__"), dict) else {}
+    current_code_fingerprint = _compute_bronze_code_fingerprint()
+    previous_code_fingerprint = str(state_meta.get("code_fingerprint") or "")
+    force_rebuild = previous_code_fingerprint != current_code_fingerprint
     updated_sources: list[str] = []
     unchanged_sources: list[str] = []
     errors: list[str] = []
 
+    logger.info("[bronze] start include_kaggle=%s output=%s", include_kaggle, output)
+    if force_rebuild:
+        logger.info("[bronze] code fingerprint changed -> forcing rebuild")
+
     session = build_session()
 
+    pokeapi_started_at = time.perf_counter()
+    logger.info("[bronze][pokeapi] loading location index")
     location_index = _fetch_pokeapi_location_index()
+    logger.info(
+        "[bronze][pokeapi] location index loaded locations=%s location_areas=%s",
+        len(location_index.get("results", [])) if isinstance(location_index.get("results"), list) else "n/a",
+        len(location_index.get("location_area_results", [])) if isinstance(location_index.get("location_area_results"), list) else "n/a",
+    )
     location_signature = stable_signature(location_index)
-    if _should_write_source(source_state, "pokeapi:location_index", location_signature):
+    if _should_write_source_with_force(source_state, "pokeapi:location_index", location_signature, force_write=force_rebuild):
         write_json(pokeapi_dir / "location_index.json", location_index)
+        logger.info("[bronze][pokeapi] building location snapshot")
         location_snapshot = _build_location_pokemon_snapshot(location_index)
+        _validate_location_snapshot(location_snapshot)
         write_json(pokeapi_dir / "location_pokemon_snapshot.json", location_snapshot)
         source_state["pokeapi:location_index"] = BronzeSourceState(
             source="pokeapi:location_index",
@@ -399,20 +514,37 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
             ],
         ).as_dict()
         updated_sources.append("pokeapi:location_index")
+        logger.info("[bronze][pokeapi] wrote location index + snapshot")
     else:
         unchanged_sources.append("pokeapi:location_index")
+        logger.info("[bronze][pokeapi] unchanged, skipped write")
+    logger.info("[bronze][pokeapi] done elapsed_s=%.2f", time.perf_counter() - pokeapi_started_at)
 
-    for config in get_games_config():
+    game_configs = get_games_config()
+    logger.info("[bronze][bulbapedia] processing games=%s", len(game_configs))
+    for idx, config in enumerate(game_configs, start=1):
         game_key = config["game_key"]
+        game_started_at = time.perf_counter()
+        logger.info("[bronze][bulbapedia][%s/%s] loading game_key=%s", idx, len(game_configs), game_key)
         resolved_root_title = resolve_existing_root_title(session, config["candidate_root_titles"])
         if not resolved_root_title:
-            print(f"[bronze] skip {game_key}: no matching walkthrough title")
+            logger.warning("[bronze][bulbapedia][%s] skip: no matching walkthrough title", game_key)
             errors.append(f"missing walkthrough title: {game_key}")
             continue
 
+        logger.info("[bronze][bulbapedia][%s] resolved_root_title=%s", game_key, resolved_root_title)
+
         parts = get_walkthrough_parts(session, resolved_root_title)
+        logger.info("[bronze][bulbapedia][%s] parts_detected=%s", game_key, len(parts))
         records: list[dict] = []
-        for part in parts:
+        for part_idx, part in enumerate(parts, start=1):
+            if part_idx == 1 or part_idx % 5 == 0 or part_idx == len(parts):
+                logger.info(
+                    "[bronze][bulbapedia][%s] progress part=%s/%s",
+                    game_key,
+                    part_idx,
+                    len(parts),
+                )
             response = session.get(
                 BULBA_API,
                 params={
@@ -441,7 +573,7 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
         }
         source_name = f"bulbapedia:{game_key}"
         signature = stable_signature(payload)
-        if _should_write_source(source_state, source_name, signature):
+        if _should_write_source_with_force(source_state, source_name, signature, force_write=force_rebuild):
             output_path = bulbapedia_dir / f"{game_key}.json"
             write_json(output_path, payload)
             source_state[source_name] = BronzeSourceState(
@@ -451,9 +583,11 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
                 output_paths=[str(output_path.relative_to(output))],
             ).as_dict()
             updated_sources.append(source_name)
-            print(f"[bronze] wrote {game_key}.json with {len(records)} parts")
+            logger.info("[bronze][bulbapedia][%s] wrote parts=%s", game_key, len(records))
         else:
             unchanged_sources.append(source_name)
+            logger.info("[bronze][bulbapedia][%s] unchanged, skipped write", game_key)
+        logger.info("[bronze][bulbapedia][%s] done elapsed_s=%.2f", game_key, time.perf_counter() - game_started_at)
 
     if include_kaggle:
         kaggle_started_at = time.perf_counter()
@@ -463,7 +597,7 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
             kaggle_manifest = kaggle_manifest_path.read_text(encoding="utf-8")
             kaggle_signature = stable_signature(kaggle_manifest)
             source_name = "kagglehub:gym_leaders"
-            if _should_write_source(source_state, source_name, kaggle_signature):
+            if _should_write_source_with_force(source_state, source_name, kaggle_signature, force_write=force_rebuild):
                 source_state[source_name] = BronzeSourceState(
                     source=source_name,
                     signature=kaggle_signature,
@@ -476,7 +610,12 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
                 updated_sources.append(source_name)
             else:
                 unchanged_sources.append(source_name)
-            print(f"[bronze] kaggle source processed elapsed_s={time.perf_counter() - kaggle_started_at:.2f}")
+            logger.info("[bronze][kaggle] source processed elapsed_s=%.2f", time.perf_counter() - kaggle_started_at)
+
+    source_state["__meta__"] = {
+        "code_fingerprint": current_code_fingerprint,
+        "updated_at_utc": now_utc_iso(),
+    }
 
     save_source_state(source_state, output)
     write_bronze_run_manifest(
@@ -486,6 +625,13 @@ def fetch_bronze_sources(output_dir: Optional[Path] = None, include_kaggle: bool
         unchanged_sources=unchanged_sources,
         errors=errors,
         bronze_dir=output,
+    )
+    logger.info(
+        "[bronze] done updated=%s unchanged=%s errors=%s elapsed_s=%.2f",
+        len(updated_sources),
+        len(unchanged_sources),
+        len(errors),
+        time.perf_counter() - started_at_perf,
     )
 
 if __name__ == "__main__":

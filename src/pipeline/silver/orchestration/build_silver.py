@@ -13,15 +13,19 @@ from typing import Any, Callable, cast
 import pandas as pd
 import pokebase as pb
 
-from src.pipeline.bronze.inputs.create_type_chart import build_type_chart, save_as_json
-from src.pipeline.common.cast import to_list
+from src.pipeline.common.type_chart import build_type_chart, save_as_json
+from src.pipeline.common.cast import to_bool, to_list
 from src.pipeline.common.http import build_session
 from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
 from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.silver.config.boss_config import BOSS_ALIASES, STRIATON_CONDITIONAL_BOSSES, boss_id
 from src.pipeline.silver.config.game_config import get_games_config, get_starter_choices, get_starter_family_members
-from src.pipeline.silver.config.team_config import resolve_runtime_team_config
+from src.pipeline.silver.config.team_config import (
+    ALLOW_ITEM_EVOLUTIONS,
+    ITEM_EVOLUTION_DEFAULT_LEVEL,
+    resolve_runtime_team_config,
+)
 from src.pipeline.silver.enrichment.location_pokemon_enrichment import (
     enrich_records_with_location_pokemon,
     get_location_area_and_pokemon_maps,
@@ -159,6 +163,36 @@ def _remove_if_exists(path: Path) -> None:
         path.unlink()
 
 
+def _validate_bronze_inputs_or_raise(*, bronze_dir: Path, location_index_path: Path, bulbapedia_dir: Path, kaggle_csv_path: Path) -> None:
+    if not location_index_path.exists():
+        raise FileNotFoundError("Bronze input missing: location_index.json. Run bronze layer first.")
+    if not bulbapedia_dir.exists():
+        raise FileNotFoundError("Bronze input missing: bulbapedia directory. Run bronze layer first.")
+
+    location_index_payload = read_json(location_index_path)
+    location_results = location_index_payload.get("results") if isinstance(location_index_payload, dict) else None
+    if not isinstance(location_results, list) or not location_results:
+        raise ValueError("Bronze location_index.json is empty or invalid; expected non-empty 'results'.")
+
+    location_snapshot_path = bronze_dir / "pokeapi" / "location_pokemon_snapshot.json"
+    if not location_snapshot_path.exists():
+        raise FileNotFoundError("Bronze input missing: location_pokemon_snapshot.json. Run bronze layer first.")
+    location_snapshot_payload = read_json(location_snapshot_path)
+    location_map = location_snapshot_payload.get("location_pokemon_map") if isinstance(location_snapshot_payload, dict) else None
+    if not isinstance(location_map, dict) or not location_map:
+        raise ValueError(
+            "Bronze location snapshot is empty: location_pokemon_map has no entries. "
+            "Re-run bronze layer and check PokeAPI diagnostics."
+        )
+
+    game_files = sorted(bulbapedia_dir.glob("*.json"))
+    if not game_files:
+        raise ValueError("Bronze bulbapedia payloads are missing; expected *.json files under data/bronze/bulbapedia.")
+
+    if not kaggle_csv_path.exists():
+        raise FileNotFoundError("Bronze Kaggle export missing: data/bronze/kagglehub/gym_leaders_elite_four.csv")
+
+
 def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
     return {
         "source_teams": simulation_dir / f"source_teams_{game_key}.parquet",
@@ -286,6 +320,55 @@ def _canonicalize_encounter_boss_ids(
     out["boss_id"] = out["canonical_boss_id"].fillna(out["boss_id"])
     out = out.drop(columns=["boss_slug", "canonical_boss_id"], errors="ignore")
     return out
+
+
+def _filter_bosses_with_encounter_pools(
+    bosses_df: pd.DataFrame,
+    encounters_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Keep only boss rows that have at least one encounter row in the same game."""
+    if bosses_df.empty or encounters_df.empty:
+        return bosses_df
+
+    required_boss_columns = {"game_version", "boss_id"}
+    required_encounter_columns = {"game", "boss_id"}
+    if not required_boss_columns.issubset(bosses_df.columns):
+        return bosses_df
+    if not required_encounter_columns.issubset(encounters_df.columns):
+        return bosses_df
+
+    encounter_pairs = {
+        (str(row.game).strip().lower(), str(row.boss_id).strip().lower())
+        for row in encounters_df[["game", "boss_id"]].drop_duplicates().itertuples(index=False)
+        if str(row.game).strip() and str(row.boss_id).strip()
+    }
+    if not encounter_pairs:
+        return bosses_df
+
+    normalized_pairs = [
+        (str(game_version).strip().lower(), str(boss_id).strip().lower())
+        for game_version, boss_id in bosses_df[["game_version", "boss_id"]].itertuples(index=False, name=None)
+    ]
+    keep_mask = [pair in encounter_pairs for pair in normalized_pairs]
+    filtered = bosses_df.loc[keep_mask].copy()
+
+    dropped = bosses_df.loc[[not keep for keep in keep_mask]].copy()
+    if not dropped.empty:
+        sample = [
+            {
+                "game_version": str(row.get("game_version") or "").strip().lower(),
+                "boss_id": str(row.get("boss_id") or "").strip().lower(),
+                "boss_name": str(row.get("boss_name_canonical") or row.get("boss_name") or "").strip().lower() or None,
+            }
+            for row in dropped.head(10).to_dict(orient="records")
+        ]
+        logger.warning(
+            "[silver/bosses] dropping bosses without encounter pools count=%s sample=%s",
+            len(dropped),
+            sample,
+        )
+
+    return filtered
 
 
 def _normalize_boss_teams_with_conditional_striaton(
@@ -973,7 +1056,6 @@ def _move_profiles_from_reference(move_reference_df: pd.DataFrame) -> dict[str, 
             "is_null_power": row.get("is_null_power", raw_power is None),
             "level_learned_at": 0,
             "version_group": "reference",
-            "degraded_data": False,
         }
     return profiles
 
@@ -1618,12 +1700,16 @@ def _build_boss_compact_tables(
     progression_depth_context: ProgressionDepthContext | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     del move_data
+
     source_teams: list[dict[str, Any]] = []
     source_team_members: list[dict[str, Any]] = []
     pokemon_moveset_options: list[dict[str, Any]] = []
     seen_contexts: set[tuple[str, str, int]] = set()
+    skipped_without_progression = 0
 
     for team in boss_teams:
+        if to_bool(team.get("is_optional"), default=False) or to_bool(team.get("is_postgame"), default=False):
+            continue
         source_team_id = str(team.get("team_id") or "").strip()
         if not source_team_id:
             continue
@@ -1635,6 +1721,15 @@ def _build_boss_compact_tables(
                 progression = progression_depth_context.require(game_version=game_version, boss_id="", boss_name=boss_name)
             except ValueError:
                 progression = None
+            if progression is None:
+                skipped_without_progression += 1
+                logger.info(
+                    "[silver/teams] skipping boss source team without progression mapping game=%s boss_name=%s team_id=%s",
+                    game_version,
+                    boss_name,
+                    source_team_id,
+                )
+                continue
 
         source_teams.append(
             {
@@ -1714,6 +1809,12 @@ def _build_boss_compact_tables(
                         "candidate_move_count": len(fixed_moves),
                     }
                 )
+
+    if skipped_without_progression > 0:
+        logger.info(
+            "[silver/teams] skipped boss source teams without progression mapping count=%s",
+            skipped_without_progression,
+        )
 
     return {
         "source_teams": source_teams,
@@ -1882,8 +1983,13 @@ def build_silver_from_bronze(
 
     location_index_path = bronze_dir / "pokeapi" / "location_index.json"
     bulbapedia_dir = bronze_dir / "bulbapedia"
-    if not location_index_path.exists() or not bulbapedia_dir.exists():
-        raise FileNotFoundError("Bronze inputs are missing. Run: python -m src.pipeline.run_pipeline layers bronze")
+    kaggle_csv_path = bronze_dir / "kagglehub" / "gym_leaders_elite_four.csv"
+    _validate_bronze_inputs_or_raise(
+        bronze_dir=bronze_dir,
+        location_index_path=location_index_path,
+        bulbapedia_dir=bulbapedia_dir,
+        kaggle_csv_path=kaggle_csv_path,
+    )
 
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
@@ -1900,7 +2006,6 @@ def build_silver_from_bronze(
         repo_root / "src" / "pipeline" / "settings.py",
     ])
 
-    kaggle_csv_path = bronze_dir / "kagglehub" / "gym_leaders_elite_four.csv"
     current_signature = build_input_signature(
         {
             "location_index": fingerprint_path(location_index_path),
@@ -1999,8 +2104,9 @@ def build_silver_from_bronze(
         write_parquet(references_dir / "encounters.parquet", encounters_frame, partition_cols=["game"])
     encounters_reference_path = references_dir / "encounters.parquet"
     encounters_reference_df = read_parquet(encounters_reference_path) if encounters_reference_path.exists() else pd.DataFrame()
+    progression_bosses_reference_df = _filter_bosses_with_encounter_pools(bosses_reference_df, encounters_reference_df)
     progression_depth_df = build_progression_depth_table(
-        bosses_df=bosses_reference_df,
+        bosses_df=progression_bosses_reference_df,
         encounters_df=encounters_reference_df,
     )
     write_parquet(
@@ -2132,6 +2238,10 @@ def build_silver_from_bronze(
         simulatable_bosses_reference_df = bosses_reference_df[
             bosses_reference_df["is_simulatable"].fillna(True).astype(bool)
         ].copy()
+    progression_simulatable_bosses_reference_df = _filter_bosses_with_encounter_pools(
+        simulatable_bosses_reference_df,
+        encounters_reference_df,
+    )
     _validate_boss_team_targets(
         boss_teams,
         simulatable_bosses_reference_df,
@@ -2219,9 +2329,11 @@ def build_silver_from_bronze(
         )
     progression_source_teams_seed = build_progression_source_teams_from_encounters(
         encounters_df=encounters_reference_df,
-        bosses_df=simulatable_bosses_reference_df,
+        bosses_df=progression_simulatable_bosses_reference_df,
         progression_depth_context=progression_depth_context,
         evolution_rules_by_game=evolution_rules_by_game,
+        allow_item_evolutions=ALLOW_ITEM_EVOLUTIONS,
+        item_evolution_default_level=ITEM_EVOLUTION_DEFAULT_LEVEL,
     )
     progression_bootstrap_entries = _build_progression_bootstrap_entries(progression_source_teams_seed)
     expanded_bootstrap_entries = _dedupe_bootstrap_entries(bootstrap_entries + progression_bootstrap_entries)
@@ -2250,10 +2362,12 @@ def build_silver_from_bronze(
     reference_context = load_reference_context(silver_dir=silver_dir)
     progression_source_teams_all = build_progression_source_teams_from_encounters(
         encounters_df=encounters_reference_df,
-        bosses_df=simulatable_bosses_reference_df,
+        bosses_df=progression_simulatable_bosses_reference_df,
         progression_depth_context=progression_depth_context,
         evolution_rules_by_game=evolution_rules_by_game,
         reference_context=reference_context,
+        allow_item_evolutions=ALLOW_ITEM_EVOLUTIONS,
+        item_evolution_default_level=ITEM_EVOLUTION_DEFAULT_LEVEL,
     )
     player_move_gap_df = _diagnose_player_missing_damaging_moves(
         progression_source_teams_all,
@@ -2295,7 +2409,13 @@ def build_silver_from_bronze(
         paths = _game_output_paths(simulation_dir, game_key)
         boss_teams_game = boss_teams_by_game.get(game_key, [])
         progression_source_teams = progression_source_teams_by_game.get(game_key, [])
-        player_compact = build_player_team_compact_tables(progression_source_teams, reference_context)
+        player_compact = build_player_team_compact_tables(
+            progression_source_teams,
+            reference_context,
+            evolution_rules_by_game=evolution_rules_by_game,
+            allow_item_evolutions=ALLOW_ITEM_EVOLUTIONS,
+            item_evolution_default_level=ITEM_EVOLUTION_DEFAULT_LEVEL,
+        )
         boss_compact = _build_boss_compact_tables(
             boss_teams_game,
             boss_move_data,

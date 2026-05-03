@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.pipeline.common.cast import to_bool
 from src.pipeline.common.io import read_many_parquet, read_parquet
 from src.pipeline.settings import SILVER_DIR, SILVER_SIMULATION_DIRNAME
 
@@ -114,6 +115,7 @@ def validate_reconstructed_teams_for_simulation(teams: list[dict[str, Any]]) -> 
     seen_team_ids: set[str] = set()
     boss_context_to_player_count: dict[tuple[str, str], int] = {}
     boss_contexts: set[tuple[str, str]] = set()
+    optional_boss_contexts: set[tuple[str, str]] = set()
 
     def _norm_text(value: Any) -> str:
         text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
@@ -151,6 +153,10 @@ def validate_reconstructed_teams_for_simulation(teams: list[dict[str, Any]]) -> 
             context = (game_version, boss_name)
             if team_role == "boss":
                 boss_contexts.add(context)
+                is_optional = to_bool(team.get("is_optional"), default=False) or to_bool(team.get("is_postgame"), default=False)
+                is_not_simulatable = "is_simulatable" in team and not to_bool(team.get("is_simulatable"), default=False)
+                if is_optional or is_not_simulatable:
+                    optional_boss_contexts.add(context)
             if bool(team.get("is_player_candidate", False)):
                 boss_context_to_player_count[context] = boss_context_to_player_count.get(context, 0) + 1
 
@@ -176,6 +182,8 @@ def validate_reconstructed_teams_for_simulation(teams: list[dict[str, Any]]) -> 
                     break
 
     for context in sorted(boss_contexts):
+        if context in optional_boss_contexts:
+            continue
         if boss_context_to_player_count.get(context, 0) <= 0:
             game_version, boss_name = context
             issues.append(
@@ -215,7 +223,20 @@ def load_reconstructed_teams_from_silver(
             if team_id:
                 meta_by_id[team_id] = row
 
+    bosses_path = silver_dir / "references" / "bosses.parquet"
+    boss_meta_by_id: dict[str, dict[str, Any]] = {}
+    if bosses_path.exists():
+        bosses_df = read_parquet(bosses_path)
+        if not bosses_df.empty and "boss_id" in bosses_df.columns:
+            for row in bosses_df.to_dict(orient="records"):
+                boss_id = str(row.get("boss_id") or "").strip()
+                if boss_id:
+                    boss_meta_by_id[boss_id] = row
+
     def _is_boss_or_kaggle_team(team_id: str) -> bool:
+        team_id_norm = str(team_id or "").strip().lower()
+        if team_id_norm.startswith("boss-team:"):
+            return True
         meta = meta_by_id.get(team_id, {})
         team_role = str(meta.get("team_role") or "").strip().lower()
         origin = str(meta.get("origin") or "").strip().lower()
@@ -299,12 +320,13 @@ def load_reconstructed_teams_from_silver(
             continue
 
         meta = meta_by_id.get(team_id, {})
+        boss_meta = boss_meta_by_id.get(str(meta.get("boss_id") or "").strip(), {})
         avg_level = int(sum(levels) / len(levels)) if levels else int(meta.get("avg_level") or 0)
         reconstructed.append(
             {
                 "team_id": team_id,
                 "game_version": str(meta.get("game_version") or members_sorted[0].get("game_version") or "").strip().lower(),
-                "team_role": meta.get("team_role", "player"),
+                "team_role": meta.get("team_role") or ("boss" if str(team_id).strip().lower().startswith("boss-team:") else "player"),
                 "origin": meta.get("origin"),
                 "boss_id": meta.get("boss_id"),
                 "boss_name": meta.get("boss_name"),
@@ -312,12 +334,17 @@ def load_reconstructed_teams_from_silver(
                 "gym_index": meta.get("gym_index"),
                 "starter_condition": meta.get("starter_condition"),
                 "starter_type": meta.get("starter_type"),
-                "is_player_candidate": bool(meta.get("is_player_candidate", True)),
+                "is_player_candidate": bool(
+                    meta.get("is_player_candidate", not str(team_id).strip().lower().startswith("boss-team:"))
+                ),
                 "starter_base": meta.get("starter_base"),
                 "starter_evolved_species": meta.get("starter_evolved_species"),
                 "team_variant": meta.get("team_variant"),
                 "variant_dimension": meta.get("variant_dimension"),
                 "battle_type": meta.get("battle_type"),
+                "is_optional": boss_meta.get("is_optional"),
+                "is_postgame": boss_meta.get("is_postgame"),
+                "is_simulatable": boss_meta.get("is_simulatable"),
                 "source_team_id": meta.get("progression_source_team_id"),
                 "progression_pool_id": meta.get("progression_pool_id"),
                 "pokemon": pokemon,

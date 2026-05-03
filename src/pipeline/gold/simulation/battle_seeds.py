@@ -74,7 +74,6 @@ def build_battle_seeds(
             predicted_win_chance = round(float(player_match.get("predicted_player_win_chance", 0.5) or 0.5), 4)
             simulation_score = float(player_match.get("simulation_score", 0.0) or 0.0)
             attacker_win = bool(player_match.get("attacker_win", False))
-            degraded_data = bool(player_match.get("degraded_data", False))
             n_trials = int(player_match.get("n_trials", 1) or 1)
 
             scenarios.append(
@@ -94,7 +93,6 @@ def build_battle_seeds(
                     "predicted_player_win_chance": predicted_win_chance,
                     "simulation_score": round(simulation_score, 3),
                     "simulated_attacker_win": attacker_win,
-                    "degraded_data": degraded_data,
                     "n_trials": n_trials,
                     "boss_sequence_id": player_match.get("boss_sequence_id"),
                     "sequence_position": player_match.get("sequence_position"),

@@ -204,7 +204,6 @@ def run_monte_carlo_team_optimizer(
                 "predicted_player_win_chance": float(row.get("predicted_player_win_chance") or 0.0),
                 "simulation_score": float(row.get("simulation_score") or 0.0),
                 "simulated_attacker_win": bool(row.get("attacker_win", False)),
-                "degraded_data": bool(row.get("degraded_data", False)),
                 "n_trials": int(row.get("n_trials") or 1),
                 "rng_seed": int(row.get("rng_seed") or rng_seed),
                 "wins": int(row.get("wins") or 0),

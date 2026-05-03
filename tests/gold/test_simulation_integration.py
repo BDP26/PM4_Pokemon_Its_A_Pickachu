@@ -67,7 +67,6 @@ def test_monte_carlo_consumes_gold_simulation_rows(tmp_path: Path) -> None:
                 "attacker_wins": 11,
                 "attacker_losses": 4,
                 "n_trials": 15,
-                "degraded_data": False,
             }
         ],
     )
@@ -110,7 +109,6 @@ def test_gold_simulation_scenario_ids_distinguish_boss_and_gauntlet_rows(tmp_pat
                 "simulation_mode": "boss",
                 "boss_sequence_id": None,
                 "sequence_position": None,
-                "degraded_data": False,
             },
             {
                 "team_id_attacker": "player_team",
@@ -126,7 +124,6 @@ def test_gold_simulation_scenario_ids_distinguish_boss_and_gauntlet_rows(tmp_pat
                 "sequence_position": 1,
                 "gauntlet_success": False,
                 "gauntlet_success_rate": 0.0,
-                "degraded_data": False,
             },
         ],
     )
@@ -160,7 +157,6 @@ def test_adaptive_rerun_applies_only_to_borderline_simulated_loss(tmp_path: Path
                 "attacker_wins": 0,
                 "attacker_losses": 10,
                 "n_trials": 10,
-                "degraded_data": False,
                 "outcome_cause": "simulated_loss",
             },
             {
@@ -172,7 +168,6 @@ def test_adaptive_rerun_applies_only_to_borderline_simulated_loss(tmp_path: Path
                 "attacker_wins": 0,
                 "attacker_losses": 10,
                 "n_trials": 10,
-                "degraded_data": False,
                 "outcome_cause": "level_filter",
             },
         ],

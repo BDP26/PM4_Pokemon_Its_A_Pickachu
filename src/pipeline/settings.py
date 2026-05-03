@@ -16,8 +16,6 @@ SILVER_DIAGNOSTICS_DIRNAME = "diagnostics"
 SILVER_SIMULATION_DIRNAME = "simulation"
 GOLD_SIMULATION_DIRNAME = "simulation"
 
-TYPE_CHART_CSV_PATH = BRONZE_DIR / "type_chart.csv"
-TYPE_CHART_JSON_PATH = BRONZE_DIR / "type_chart.json"
 
 BULBA_API = "https://bulbapedia.bulbagarden.net/w/api.php"
 
@@ -27,11 +25,11 @@ KAGGLE_GYM_LEADERS_FILE_PATH = ""
 SIMULATION_CONFIG = {
     "max_overlevel": 2,
     "max_underlevel": 10,
-    "default_trials": 15,
+    "default_trials": 4,
     "damage_randomness_min": 0.85,
     "damage_randomness_max": 1.00,
     "crit_chance": 0.0625,
-    "max_turns_per_duel": 100,
+    "max_turns_per_duel": 80,
 }
 
 

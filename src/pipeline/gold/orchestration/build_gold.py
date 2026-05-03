@@ -857,7 +857,6 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
                     sequence_n_trials=("n_trials", "max"),
                     sequence_completion_prob=("sequence_win_rate_fallback", "max"),
                     sequence_expected_wins=("sequence_expected_wins_fallback", "max"),
-                    degraded_ratio=("degraded_data", "mean"),
                     player_avg_level=("player_avg_level", "mean"),
                     player_max_level=("player_max_level", "max"),
                     progression_depth=("player_progression_depth", "max"),
@@ -878,7 +877,6 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
                     sequence_n_trials=("n_trials", "max"),
                     sequence_completion_prob=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).prod())),
                     sequence_expected_wins=("mc_win_rate", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
-                    degraded_ratio=("degraded_data", "mean"),
                     player_avg_level=("player_avg_level", "mean"),
                     player_max_level=("player_max_level", "max"),
                     progression_depth=("player_progression_depth", "max"),
@@ -919,7 +917,6 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             group_cols=["effective_game_version", "starter_base"],
             win_rate_col="sequence_win_rate",
         )
-        sequence_rank["degraded_ratio"] = sequence_rank["degraded_ratio"].fillna(0.0)
         progression_signal = pd.to_numeric(sequence_rank["progression_depth"], errors="coerce").fillna(0.5).clip(0.0, 1.0)
         early_weight = 1.0 - progression_signal
         late_weight = progression_signal
@@ -927,7 +924,7 @@ def _build_starter_rankings_from_monte_carlo(gold_dir: Path, gold_simulation_dir
             (0.35 + 0.45 * late_weight) * sequence_rank["sequence_completion_prob"]
             + (0.25 + 0.35 * early_weight) * sequence_rank["sequence_expected_wins_pct"]
             + 0.10 * pd.to_numeric(sequence_rank["strict_clear_rate"], errors="coerce").fillna(0.0)
-        ) * (1.0 - sequence_rank["degraded_ratio"] * 0.2)
+        )
         sequence_rank = sequence_rank.sort_values(
             ["effective_game_version", "starter_base", "sequence_score", "sequence_completion_prob", "sequence_expected_wins_pct", "mean_mc_win_rate", "player_team_id"],
             ascending=[True, True, False, False, False, False, True],

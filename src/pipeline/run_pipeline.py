@@ -15,7 +15,8 @@ warnings.filterwarnings("ignore", message=".*IProgress not found.*")
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(message)s",
+    format="%(asctime)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 

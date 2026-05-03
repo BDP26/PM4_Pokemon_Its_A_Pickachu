@@ -105,16 +105,28 @@ def build_level_up_evolution_index_from_species_rules(
         if not next_species_rows:
             continue
         for candidate in next_species_rows:
-            trigger = "level-up"
             special_conditions = candidate.get("special_evolution_conditions") or []
-            if special_conditions:
-                trigger_name = str((special_conditions[0] or {}).get("trigger") or "").strip().lower()
-                trigger = trigger_name or "special"
+            if isinstance(special_conditions, list) and special_conditions:
+                for condition in special_conditions:
+                    if not isinstance(condition, dict):
+                        continue
+                    trigger_name = str(condition.get("trigger") or "").strip().lower().replace("_", "-")
+                    transitions.setdefault(current_species, []).append(
+                        {
+                            "to_species": candidate.get("species"),
+                            "trigger": trigger_name or "special",
+                            "min_level": _parse_level(condition.get("min_level")) or candidate.get("min_level_from_previous"),
+                            "required_item": normalize_key_part(condition.get("item")),
+                            "introduced_generation": candidate.get("introduced_generation"),
+                        }
+                    )
+                continue
             transitions.setdefault(current_species, []).append(
                 {
                     "to_species": candidate.get("species"),
-                    "trigger": trigger,
+                    "trigger": "level-up",
                     "min_level": candidate.get("min_level_from_previous"),
+                    "required_item": None,
                     "introduced_generation": candidate.get("introduced_generation"),
                 }
             )
@@ -134,6 +146,8 @@ def normalize_species_for_level(
     evolution_rules: dict[str, list[dict[str, Any]]] | None,
     target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = False,
+    item_evolution_default_level: int = 1,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Normalize a species to the highest legal level-up evolution at the given level."""
     current = normalize_key_part(species)
@@ -167,14 +181,21 @@ def normalize_species_for_level(
             if target_generation is not None and introduced_generation is not None and introduced_generation > target_generation:
                 continue
             trigger = _normalize_trigger(option.get("trigger") or option.get("evolution_trigger"))
-            if trigger in _SPECIAL_TRIGGERS and not (allow_trade_evolutions and trigger == "trade"):
-                continue
             min_level = _parse_level(option.get("min_level") or option.get("min_level_from_previous") or option.get("level"))
             if trigger == "level-up":
                 if min_level is None or level_cap < min_level:
                     continue
             elif trigger == "trade" and allow_trade_evolutions:
                 min_level = min_level or 1
+            elif trigger in {"use-item", "item"}:
+                required_item = normalize_key_part(option.get("required_item") or option.get("item"))
+                if not (allow_item_evolutions and required_item):
+                    continue
+                fallback_level = _parse_level(item_evolution_default_level) or 1
+                # Item evolutions have no fixed min_level in PokeAPI; use the current team level cap.
+                min_level = level_cap or fallback_level
+            elif trigger in _SPECIAL_TRIGGERS:
+                continue
             else:
                 continue
             eligible.append((min_level or 0, target, option))
@@ -205,6 +226,8 @@ def normalize_candidate_pool_for_level(
     legal_species: set[str] | None,
     target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = False,
+    item_evolution_default_level: int = 1,
 ) -> tuple[list[tuple[str, int, int, int]], dict[str, int]]:
     """Apply level-up normalization and deduplicate the candidate pool."""
     normalized_rows: dict[str, tuple[str, int, int, int]] = {}
@@ -220,6 +243,8 @@ def normalize_candidate_pool_for_level(
             evolution_rules=evolution_rules,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         if applied:
             transformed += 1
@@ -258,6 +283,8 @@ def legal_species_pool_for_level(
     evolution_rules: dict[str, list[dict[str, Any]]] | None,
     target_generation: int | None = None,
     allow_trade_evolutions: bool = False,
+    allow_item_evolutions: bool = False,
+    item_evolution_default_level: int = 1,
 ) -> set[str]:
     """Return the species set that remains legal after forced evolutions at the given level."""
     legal_species: set[str] = set()
@@ -270,6 +297,8 @@ def legal_species_pool_for_level(
             evolution_rules=evolution_rules,
             target_generation=target_generation,
             allow_trade_evolutions=allow_trade_evolutions,
+            allow_item_evolutions=allow_item_evolutions,
+            item_evolution_default_level=item_evolution_default_level,
         )
         if normalized_species:
             legal_species.add(normalized_species)
