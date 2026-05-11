@@ -3094,6 +3094,24 @@ def build_team_battle_simulations(
     if incompatible_rows:
         raise ValueError("Incompatible cross-version simulation rows detected; strict compatibility contract violated")
 
+    # Filter out rows with null/empty team IDs to prevent downstream inconsistencies
+    # This is especially important for local simulations which don't run _normalize_result_row
+    valid_simulations = []
+    for row in simulations:
+        attacker_id = _safe_string(row.get("team_id_attacker"))
+        defender_id = _safe_string(row.get("team_id_defender"))
+        if attacker_id is not None and defender_id is not None:
+            valid_simulations.append(row)
+    
+    if len(valid_simulations) < len(simulations):
+        logger.warning(
+            "[type_matchups] filtered out rows with null team IDs: input=%s output=%s",
+            len(simulations),
+            len(valid_simulations),
+        )
+    
+    simulations = valid_simulations
+
     aggregate_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
     boss_fight_counts: dict[str, int] = {}

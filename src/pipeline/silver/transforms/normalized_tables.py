@@ -321,3 +321,9 @@ def build_learnable_moves_table(move_data: dict[str, Any]) -> list[dict[str, Any
                 }
             )
     return rows
+"""Legacy normalization helpers.
+
+These helpers are retained for backward compatibility with historical scripts.
+The active Silver pipeline writes normalized references/simulation shards via
+orchestration/build_silver.py directly.
+"""

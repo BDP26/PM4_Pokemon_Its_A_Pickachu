@@ -1,9 +1,20 @@
+from __future__ import annotations
+
 import json
 import shutil
 from pathlib import Path
 from typing import Iterable
 
-import pandas as pd
+_PANDAS = None
+
+
+def _pd():
+    global _PANDAS
+    if _PANDAS is None:
+        import pandas as _pandas
+
+        _PANDAS = _pandas
+    return _PANDAS
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -26,10 +37,12 @@ def write_jsonl(path: Path, records: Iterable[dict]) -> None:
 
 
 def _to_dataframe(records: Iterable[dict] | pd.DataFrame) -> pd.DataFrame:
+    pd = _pd()
     return records if isinstance(records, pd.DataFrame) else pd.DataFrame(list(records))
 
 
 def _normalize_parquet_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    pd = _pd()
     normalized = dataframe.copy()
     for column in normalized.columns:
         series = normalized[column]
@@ -105,10 +118,12 @@ def write_parquet(
 
 
 def read_jsonl(path: Path) -> pd.DataFrame:
+    pd = _pd()
     return pd.read_json(path, lines=True)
 
 
 def read_parquet(path: Path) -> pd.DataFrame:
+    pd = _pd()
     try:
         return pd.read_parquet(path)
     except ImportError as exc:
@@ -118,12 +133,38 @@ def read_parquet(path: Path) -> pd.DataFrame:
 
 
 def read_many_parquet(paths: list[Path]) -> pd.DataFrame:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     existing_paths = [path for path in paths if path.exists()]
     if not existing_paths:
-        return pd.DataFrame()
+        _pd()  # keep lazy-import side-effect consistent
+        return _pd().DataFrame()
 
-    frames = [read_parquet(path) for path in existing_paths]
-    if not frames:
-        return pd.DataFrame()
+    tables: list[pa.Table] = [pq.read_table(path) for path in existing_paths]
 
-    return pd.concat(frames, ignore_index=True)
+    # Unify schema: if a column is float64 (all-NA default) in some shards
+    # but a richer type in others, promote to the richer type.
+    field_types: dict[str, pa.DataType] = {}
+    for table in tables:
+        for field in table.schema:
+            current = field_types.get(field.name)
+            if current is None or (current == pa.float64() and field.type != pa.float64()):
+                field_types[field.name] = field.type
+
+    unified_schema = pa.schema([pa.field(n, t) for n, t in field_types.items()])
+
+    aligned: list[pa.Table] = []
+    for table in tables:
+        cols: dict[str, pa.ChunkedArray] = {}
+        for field in unified_schema:
+            if table.schema.get_field_index(field.name) >= 0:
+                col = table.column(field.name)
+                if col.type != field.type:
+                    col = col.cast(field.type, safe=False)
+                cols[field.name] = col
+            else:
+                cols[field.name] = pa.array([None] * len(table), type=field.type)
+        aligned.append(pa.table(cols, schema=unified_schema))
+
+    return pa.concat_tables(aligned).to_pandas()

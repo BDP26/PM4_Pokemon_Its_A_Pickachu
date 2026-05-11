@@ -89,50 +89,6 @@ class TeamMemberContract:
 
 
 @dataclass(frozen=True)
-class MoveDataContract:
-    pokemon_instance_id: str
-    team_id: str
-    species: str
-    level: int
-    game_version: str
-    provided_moves: list[str]
-    learnable_moves: list[str]
-    move_details: dict[str, dict[str, Any]]
-    slot_index: int
-
-    def validate(self) -> None:
-        if not self.pokemon_instance_id:
-            raise ValueError("pokemon_instance_id is required")
-        if not self.team_id:
-            raise ValueError(f"team_id is required for pokemon_instance_id={self.pokemon_instance_id}")
-        if not self.species:
-            raise ValueError(f"species is required for pokemon_instance_id={self.pokemon_instance_id}")
-        if not self.game_version:
-            raise ValueError(f"game_version is required for pokemon_instance_id={self.pokemon_instance_id}")
-        if self.level <= 0:
-            raise ValueError(f"level must be positive for pokemon_instance_id={self.pokemon_instance_id}")
-        if self.slot_index <= 0:
-            raise ValueError(f"slot_index must be positive for pokemon_instance_id={self.pokemon_instance_id}")
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "MoveDataContract":
-        return cls(
-            pokemon_instance_id=str(payload.get("pokemon_instance_id") or "").strip(),
-            team_id=str(payload.get("team_id") or "").strip(),
-            species=normalize_key_part(payload.get("species")),
-            level=int(payload.get("level") or 0),
-            game_version=str(payload.get("game_version") or "").strip().lower(),
-            provided_moves=[normalize_key_part(move) for move in payload.get("provided_moves", []) if str(move).strip()],
-            learnable_moves=[normalize_key_part(move) for move in payload.get("learnable_moves", []) if str(move).strip()],
-            move_details=dict(payload.get("move_details") or {}),
-            slot_index=int(payload.get("slot_index") or 0),
-        )
-
-
-@dataclass(frozen=True)
 class TeamContract:
     team_id: str
     game_version: str
@@ -222,12 +178,4 @@ def validate_team_payloads(records: list[dict[str, Any]]) -> list[dict[str, Any]
         validated.append(team.as_dict())
     return validated
 
-
-def validate_move_payloads(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    validated: list[dict[str, Any]] = []
-    for record in records:
-        move = MoveDataContract.from_payload(record)
-        move.validate()
-        validated.append(move.as_dict())
-    return validated
 

@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from src.pipeline.common.io import write_json
-from src.pipeline.silver.simulation import type_matchups
-from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, build_team_battle_simulations, filter_simulation_teams
+from src.pipeline.gold.simulation import team_battle_simulations as type_matchups
+from src.pipeline.gold.simulation.team_battle_simulations import BattleSimulationConfig, build_team_battle_simulations, filter_simulation_teams
 
 
 def _install_test_profiles() -> None:

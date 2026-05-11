@@ -8,7 +8,7 @@ Bronze collects raw source data and stores it reproducibly. It does not apply bu
 
 - Runner: `fetch_bronze_sources`
 - File: `src/pipeline/bronze/orchestration/fetch_sources.py`
-- CLI: `PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze`
+- CLI: `PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers bronze`
 
 ## Inputs
 
@@ -40,4 +40,4 @@ Bronze collects raw source data and stores it reproducibly. It does not apply bu
 - Bronze fails fast when `location_pokemon_snapshot.json` cannot be built with non-empty `location_pokemon_map`.
 - Missing walkthrough roots are skipped, not fatal to full Bronze execution.
 - Kaggle export (`data/bronze/kagglehub/gym_leaders_elite_four.csv`) is mandatory for Silver and must be present after Bronze.
-- Gold does not read Bronze directly; data must flow through Silver contracts.
+- Gold does not read Bronze directly; data must flow through Silver contracts and `data/silver/manifest.json`.

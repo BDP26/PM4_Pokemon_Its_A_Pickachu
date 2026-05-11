@@ -959,6 +959,11 @@
       if (rate <= 0 || rate > 255) return null;
       return rate;
     }
+    function normalizeTypeToken(v) {
+      const token = String(v || "").trim().toLowerCase();
+      if (!token || token === "nan" || token === "none" || token === "null" || token === "<na>") return "";
+      return token;
+    }
     function cap(v) { return String(v || "").split(/[_-]+/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join(" "); }
     function prettyLocation(v) { return cap(String(v || "").replace(/^pokemon-/, "")); }
 
@@ -1394,13 +1399,16 @@
       const monId = registerMon(mon);
       const insights = moveInsights(mon);
       const dex = num(mon && mon.pokeid);
+      const types = [normalizeTypeToken(mon && mon.type_1), normalizeTypeToken(mon && mon.type_2)].filter(Boolean);
+      const typeLabel = types.length ? types.map((t) => cap(t)).join(" / ") : "Unknown";
       return `
         <button class="pokemon-card" type="button" data-mon-id="${monId}" title="${safeText(pokemonName(mon))}">
           <img class="pokemon-sprite" src="${spriteFor(mon)}" alt="${safeText(pokemonName(mon))}" onerror="this.src='${placeholderSprite()}'" />
           <div class="pokemon-name">${safeText(cap(pokemonName(mon)))}</div>
           <div class="pokemon-level">${num(mon && mon.level) !== null ? `Lv ${num(mon.level)}` : "—"}</div>
-          <div class="pokemon-meta">${dex !== null ? `Dex #${dex}` : "Dex ?"} · ${insights.totalMoves} Moves</div>
+          <div class="pokemon-meta">${dex !== null ? `Dex #${dex}` : "Dex ?"} · ${typeLabel}</div>
           <div class="pokemon-chips">
+            ${types.map((t) => `<span class="badge ${safeText(t)}">${cap(t)}</span>`).join("")}
             <span class="pokemon-chip">Dmg ${insights.damagingMoves}</span>
             <span class="pokemon-chip">Status ${insights.statusMoves}</span>
           </div>

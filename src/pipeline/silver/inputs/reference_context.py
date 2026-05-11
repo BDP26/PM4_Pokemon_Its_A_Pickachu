@@ -7,6 +7,7 @@ This module is intentionally connector-free:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ from src.pipeline.common.normalize import normalize_slug, normalize_text
 from src.pipeline.silver.config.team_config import GAME_TO_VERSION_GROUP, SPECIES_SLUG_ALIASES
 from src.pipeline.silver.move_power import normalize_move_power_name, resolve_effective_power
 from src.pipeline.settings import SILVER_DIR
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_key(value: Any) -> str:
@@ -175,8 +178,10 @@ def load_move_reference_tables(
     if not learnable_path.exists():
         raise FileNotFoundError(f"Missing learnable moves parquet: {learnable_path}")
 
+    logger.info("[silver/reference_context] loading move reference data path=%s", move_reference_path)
+    move_reference_df = read_parquet(move_reference_path)
     move_profiles: dict[str, dict[str, Any]] = {}
-    for row in read_parquet(move_reference_path).to_dict(orient="records"):
+    for row in move_reference_df.to_dict(orient="records"):
         move_name = normalize_move_name(row.get("move_name"))
         if not move_name:
             continue
@@ -208,9 +213,16 @@ def load_move_reference_tables(
             "is_damage_move": row.get("is_damage_move", effective_power > 0),
             "is_null_power": row.get("is_null_power", raw_power is None),
         }
+    logger.info(
+        "[silver/reference_context] loaded move reference data rows=%s move_profiles=%s",
+        len(move_reference_df),
+        len(move_profiles),
+    )
 
+    logger.info("[silver/reference_context] loading learnable move data path=%s", learnable_path)
+    learnable_df = read_parquet(learnable_path)
     learnable_by_game_species: dict[tuple[str, str], dict[str, int]] = {}
-    for row in read_parquet(learnable_path).to_dict(orient="records"):
+    for row in learnable_df.to_dict(orient="records"):
         game_version = str(row.get("game_version") or "").strip().lower()
         species = normalize_species_slug(row.get("pokemon_species") or "")
         move_name = normalize_move_name(row.get("move_name"))
@@ -222,6 +234,11 @@ def load_move_reference_tables(
             learned_level = 1
         slot = learnable_by_game_species.setdefault((game_version, species), {})
         slot[move_name] = min(slot.get(move_name, learned_level), learned_level)
+    logger.info(
+        "[silver/reference_context] loaded learnable move data rows=%s game_species_pairs=%s",
+        len(learnable_df),
+        len(learnable_by_game_species),
+    )
 
     return move_profiles, learnable_by_game_species
 

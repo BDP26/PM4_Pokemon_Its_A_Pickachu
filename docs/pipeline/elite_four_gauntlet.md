@@ -44,30 +44,39 @@ Falls keine Simulationsdaten für eine bestimmte Matchup vorhanden sind, wird ei
 
 ## Output-Format
 
-`elite_four_gauntlet_results.parquet` enthält:
+Die Gauntlet-Auswertung wird aktuell ueber Gold-Rankings persistiert (kein separates
+`elite_four_gauntlet_results.parquet` als primaerer Output).
+
+Wichtige Gold-Outputs:
+
+- `data/gold/team_rankings_e4_champion_sequence_by_version_starter.parquet`
+- `data/gold/best_team_by_e4_champion_sequence_version_starter.parquet`
+- `data/gold/simulation/monte_carlo_results.parquet`
+
+Typische Felder in den Sequence-Rankings:
 
 | Spalte | Beschreibung |
 |--------|------------|
-| `gauntlet_id` | Eindeutige ID (player_team_id + gauntlet + game + starter) |
+| `effective_game_version` | Spiel-Version (z.B. `red`) |
+| `starter_base` | Starter-Pokemon (z.B. `bulbasaur`) |
 | `player_team_id` | Player-Team ID |
-| `game_version` | Spiel-Version (z.B. "red") |
-| `starter_base` | Starter-Pokémon (z.B. "bulbasaur") |
-| `elite_four_count` | Anzahl Elite Four Trainer (normalerweise 4) |
-| `elite_four_team_ids` | Komma-getrennte IDs der E4 Teams |
-| `champion_team_id` | ID des Champion-Teams |
-| `elite_four_win_prob_1` bis `elite_four_win_prob_4` | Einzelne Gewinnchancen pro E4 Trainer |
-| `champion_win_prob` | Gewinnchance gegen Champion |
-| `cumulative_gauntlet_win_probability` | **Finale Gewinnchance für komplette Sequenz** |
-| `is_viable` | True wenn mindestens eine theoretische Gewinnchance > 0 |
+| `sequence_completion_prob` | Geschlossene Wahrscheinlichkeit fuer komplette Sequenz |
+| `sequence_expected_wins` | Erwartete Siege ueber die Sequenz |
+| `strict_clear_rate` | Strikter Clear-Rate-Indikator |
+| `rank_in_sequence` | Rang innerhalb `(version, starter)` |
 
 ## Verwendung
 
-```python
-from src.pipeline.silver.simulation.elite_four_gauntlet import build_elite_four_gauntlet_results
+Die Berechnung erfolgt im Gold-Layer waehrend des normalen Pipeline-Runs:
 
-# Berechne Gauntlet-Wahrscheinlichkeiten
-rows_written = build_elite_four_gauntlet_results()
-print(f"Calculated gauntlet scenarios for {rows_written} teams")
+```bash
+PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers gold
+```
+
+Optional lokal ohne Spark:
+
+```bash
+PIPELINE_USE_PYSPARK=0 PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers gold
 ```
 
 ## Datenquelle und Layer-Grenze

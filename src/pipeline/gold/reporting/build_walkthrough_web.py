@@ -134,6 +134,9 @@ def _with_sprite_fields(pokemon_entry: Any, pokemon_reference: dict[str, dict[st
     enriched["sprite_source_url"] = source_url
     enriched["pokeid"] = pokeid
     enriched["species_slug"] = species_slug
+    if isinstance(ref_entry, dict):
+        enriched["type_1"] = str(ref_entry.get("type_1") or "").strip().lower() or None
+        enriched["type_2"] = str(ref_entry.get("type_2") or "").strip().lower() or None
     return enriched
 
 
@@ -195,16 +198,32 @@ def _load_pokemon_reference(silver_dir: Path, silver_manifest: dict[str, Any]) -
             dataset="pokemon_reference",
             path=reference_path,
         )
-
     normalized: dict[str, dict[str, Any]] = {}
+    types_by_species: dict[str, tuple[str | None, str | None]] = {}
+    try:
+        pokemon_data_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "pokemon_data")
+        pokemon_data = read_parquet(pokemon_data_path)
+        for row in pokemon_data.to_dict(orient="records"):
+            species = str(row.get("pokemon_species") or row.get("name") or "").strip().lower()
+            key = _species_slug(species)
+            if not key:
+                continue
+            type_1 = str(row.get("type_1") or "").strip().lower() or None
+            type_2 = str(row.get("type_2") or "").strip().lower() or None
+            types_by_species[key] = (type_1, type_2)
+    except Exception:
+        types_by_species = {}
     for row in frame.to_dict(orient="records"):
         species = str(row.get("pokemon_species") or row.get("name") or "").strip().lower()
         key = _species_slug(species)
         if not key:
             continue
+        type_1, type_2 = types_by_species.get(key, (None, None))
         normalized[key] = {
             "url": str(row.get("url") or "").strip() or None,
             "name": str(row.get("name") or species).strip().lower(),
+            "type_1": type_1,
+            "type_2": type_2,
         }
     return normalized
 
@@ -284,7 +303,10 @@ def _load_move_reference(silver_dir: Path, silver_manifest: dict[str, Any]) -> d
 
 
 def _load_evolution_index(silver_dir: Path, silver_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    evolution_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "evolution_rules")
+    try:
+        evolution_path = _dataset_path_from_manifest(silver_dir, silver_manifest, "evolution_rules")
+    except GoldWebContractError:
+        return {}
     try:
         frame = read_parquet(evolution_path)
     except Exception as exc:

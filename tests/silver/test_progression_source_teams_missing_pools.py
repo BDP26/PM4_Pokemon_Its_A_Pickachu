@@ -3,7 +3,6 @@ from __future__ import annotations
 import pandas as pd
 
 from src.pipeline.silver.inputs.builders.player_teams import (
-    build_progression_source_teams,
     build_progression_source_teams_from_encounters,
 )
 from src.pipeline.silver.transforms.progression_depth import build_progression_depth_context
@@ -168,74 +167,6 @@ def test_build_progression_source_teams_filters_species_above_level_cap_by_obtai
         encounters_df=encounters_df,
         bosses_df=bosses_df,
         progression_depth_context=progression_depth_context,
-        catch_pool_size=3,
-        evolution_rules_by_game={
-            "diamond": {
-                "magikarp": [{"to_species": "gyarados", "trigger": "level-up", "min_level": 20}],
-                "goldeen": [{"to_species": "seaking", "trigger": "level-up", "min_level": 33}],
-            }
-        },
-    )
-
-    all_species = {species for team in teams for species in list(team.get("pokemon") or [])}
-    assert "magikarp" in all_species
-    assert "goldeen" in all_species
-    assert "gyarados" not in all_species
-    assert "seaking" not in all_species
-
-
-def test_legacy_build_progression_source_teams_filters_species_above_level_cap_by_obtainable_level() -> None:
-    progression_records = [
-        {
-            "game": "diamond",
-            "boss_name": "roark",
-            "part": "order-1",
-            "reachable_locations": ["route-203"],
-            "reachable_location_encounters": {
-                "route-203": [
-                    {
-                        "species": "magikarp",
-                        "level_min": 3,
-                        "level_max": 25,
-                        "encounter_chance_max": 60,
-                        "capture_rate": 255,
-                    },
-                    {
-                        "species": "gyarados",
-                        "level_min": 30,
-                        "level_max": 55,
-                        "encounter_chance_max": 40,
-                        "capture_rate": 45,
-                    },
-                    {
-                        "species": "goldeen",
-                        "level_min": 10,
-                        "level_max": 25,
-                        "encounter_chance_max": 40,
-                        "capture_rate": 225,
-                    },
-                    {
-                        "species": "seaking",
-                        "level_min": 20,
-                        "level_max": 50,
-                        "encounter_chance_max": 40,
-                        "capture_rate": 60,
-                    },
-                ]
-            },
-        }
-    ]
-    boss_teams = [
-        {
-            "game_version": "diamond",
-            "boss_name": "roark",
-            "avg_level": 12,
-        }
-    ]
-
-    teams = build_progression_source_teams(
-        progression_records=progression_records,
-        boss_teams=boss_teams,
         catch_pool_size=3,
         evolution_rules_by_game={
             "diamond": {

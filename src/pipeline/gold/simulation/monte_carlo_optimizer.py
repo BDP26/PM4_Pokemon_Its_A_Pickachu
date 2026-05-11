@@ -182,6 +182,14 @@ def run_monte_carlo_team_optimizer(
     records: list[dict[str, Any]] = []
     for row in result_df.to_dict(orient="records"):
         player_team_id, boss_team_id = row_player_boss_ids(row)
+        # Fallback to attacker/defender if player/boss IDs not available
+        if not player_team_id:
+            player_team_id = str(row.get("team_id_attacker") or "").strip()
+        if not boss_team_id:
+            boss_team_id = str(row.get("team_id_defender") or "").strip()
+        # Skip rows with null or empty team IDs to match battle_seeds.py filtering
+        if not player_team_id or not boss_team_id:
+            continue
         scenario_id = canonical_scenario_context_id(
             player_team_id,
             boss_team_id,

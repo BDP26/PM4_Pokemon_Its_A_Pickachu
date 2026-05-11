@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pipeline.common.io import read_parquet
 from src.pipeline.silver.inputs.reference_context import normalize_species_slug
+from src.pipeline.silver.validation.contract_utils import load_simulation_shards
 
 POKEMON_REQUIRED_COLUMNS = [
     "pokemon_species",
@@ -39,10 +40,7 @@ def _read(path: Path) -> pd.DataFrame:
 
 
 def _load_sharded(simulation_dir: Path, prefix: str) -> pd.DataFrame:
-    shards = sorted(simulation_dir.glob(f"{prefix}_*.parquet"))
-    if not shards:
-        return pd.DataFrame()
-    return pd.concat([_read(path) for path in shards], ignore_index=True)
+    return load_simulation_shards(simulation_dir, prefix)
 
 
 def validate(silver_dir: Path) -> list[str]:

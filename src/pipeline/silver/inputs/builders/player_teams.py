@@ -7,6 +7,7 @@ Concrete move-set expansion is deferred to Gold/simulation.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from itertools import combinations, islice
 from typing import Any
@@ -28,6 +29,7 @@ from src.pipeline.silver.config.team_config import (
     DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
     DEFAULT_SOURCE_TEAM_POOL_SIZE,
     DEFAULT_TEAM_MEMBER_LIMIT,
+    DEFAULT_TEAM_TYPE_WEIGHT_CAP,
     ITEM_EVOLUTION_DEFAULT_LEVEL,
     MOVESET_WIDTH,
 )
@@ -40,6 +42,7 @@ from src.pipeline.silver.inputs.builders.evolution_normalization import (
 )
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
 from src.pipeline.silver.inputs.species_classification import is_restricted_encounter_species
+from src.pipeline.common.type_chart import build_type_chart
 from src.pipeline.silver.transforms.keys import (
     make_moveset_combo_id,
     make_pokemon_instance_id,
@@ -49,7 +52,6 @@ from src.pipeline.silver.transforms.keys import (
 )
 from src.pipeline.silver.transforms.progression_depth import (
     ProgressionDepthContext,
-    build_progression_depth_context,
 )
 
 
@@ -74,6 +76,8 @@ GAME_VERSION_TO_GENERATION = {
     "y": 6,
 }
 _EXCLUDED_ENCOUNTER_METHODS = {"only one", "gift", "npc trade"}
+_TYPE_CHART = build_type_chart()
+_TYPE_WEIGHT_CAP_EPSILON = 1e-9
 
 
 def _normalize_nullable_key_part(value: Any) -> str | None:
@@ -361,124 +365,6 @@ def _filter_candidates_by_obtainable_level_cap(
     return [row for row in raw_candidates if _min_obtainable_level(row[0]) <= cap]
 
 
-def _legacy_progression_depth_context_from_boss_teams(
-    *,
-    encounters_df: pd.DataFrame,
-    bosses_df: pd.DataFrame,
-    boss_teams: list[dict[str, Any]],
-) -> ProgressionDepthContext:
-    bosses = bosses_df.copy()
-    bosses["game_version"] = bosses["game_version"].map(normalize_key_part)
-    bosses["boss_id"] = bosses["boss_id"].map(normalize_key_part)
-    bosses["boss_name"] = bosses["boss_name_canonical"].map(normalize_key_part)
-    bosses["boss_order"] = pd.to_numeric(bosses["boss_order"], errors="coerce").fillna(0).astype(int)
-    bosses = bosses[(bosses["game_version"] != "") & (bosses["boss_id"] != "") & (bosses["boss_name"] != "")]
-
-    encounters = encounters_df.copy()
-    encounters["game_version"] = encounters["game"].map(normalize_key_part)
-    encounters["boss_id"] = encounters["boss_id"].map(_normalize_boss_id)
-    encounters["pokemon"] = encounters["pokemon"].map(normalize_key_part)
-    encounters = encounters[
-        (encounters["game_version"] != "")
-        & (encounters["boss_id"] != "")
-        & (encounters["pokemon"] != "")
-    ]
-
-    progression_rows: list[dict[str, Any]] = []
-    for game_version, bosses_game in bosses.groupby("game_version", sort=True):
-        bosses_sorted = bosses_game.sort_values(["boss_order", "boss_id"]).reset_index(drop=True)
-        max_boss_index = len(bosses_sorted)
-        species_by_boss = {
-            str(boss_id): set(group["pokemon"].tolist())
-            for boss_id, group in encounters[encounters["game_version"] == game_version].groupby("boss_id")
-        }
-        max_species_count = len({species for values in species_by_boss.values() for species in values}) or 1
-        seen_species: set[str] = set()
-        for boss_index, boss in enumerate(bosses_sorted.itertuples(index=False), start=1):
-            boss_species = species_by_boss.get(str(boss.boss_id), set())
-            seen_species.update(boss_species)
-            available_species_count = len(seen_species) if seen_species else len(boss_species)
-            progression_rows.append(
-                {
-                    "game_version": game_version,
-                    "boss_id": str(boss.boss_id),
-                    "boss_name": str(boss.boss_name),
-                    "boss_index": boss_index,
-                    "max_boss_index": max_boss_index,
-                    "available_species_count": available_species_count,
-                    "max_species_count": max_species_count,
-                    "progression_depth": (0.6 * (boss_index / max_boss_index)) + (0.4 * (available_species_count / max_species_count)),
-                }
-            )
-
-    progression_depth_df = pd.DataFrame(progression_rows)
-
-    boss_level_rows: list[dict[str, Any]] = []
-    for team in boss_teams:
-        game_version = normalize_key_part(team.get("game_version"))
-        boss_name = normalize_key_part(team.get("boss_name") or team.get("gym"))
-        if not game_version or not boss_name:
-            continue
-        levels = [int(level) for level in list(team.get("levels") or []) if int(level or 0) > 0]
-        if not levels:
-            fallback = int(team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
-            levels = [fallback]
-        boss_level_rows.append(
-            {
-                "game_version": game_version,
-                "boss_name": boss_name,
-                "boss_ace_level": max(levels),
-                "boss_avg_level": int(round(sum(levels) / len(levels))),
-            }
-        )
-
-    boss_level_df = pd.DataFrame(boss_level_rows)
-    if boss_level_df.empty:
-        raise ValueError("boss_teams is empty; cannot derive fallback progression depth context")
-    boss_level_df = (
-        boss_level_df.groupby(["game_version", "boss_name"], as_index=False)
-        .agg(boss_ace_level=("boss_ace_level", "max"), boss_avg_level=("boss_avg_level", "max"))
-        .sort_values(["game_version", "boss_name"])
-    )
-    return build_progression_depth_context(
-        progression_depth_df=progression_depth_df,
-        boss_level_df=boss_level_df,
-    )
-
-
-def _extract_species_candidates(record: dict[str, Any]) -> list[tuple[str, int, int, int]]:
-    def _safe_int(value: Any) -> int:
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    by_species: dict[str, dict[str, int]] = {}
-    location_to_encounters = record.get("reachable_location_encounters", {})
-    if isinstance(location_to_encounters, dict):
-        for encounters in location_to_encounters.values():
-            if not isinstance(encounters, list):
-                continue
-            for encounter in encounters:
-                if not isinstance(encounter, dict):
-                    continue
-                if _has_excluded_encounter_method(encounter.get("encounter_methods") or encounter.get("methods")):
-                    continue
-                species = normalize_key_part(encounter.get("species"))
-                if not species or is_restricted_encounter_species(species):
-                    continue
-                slot = by_species.setdefault(species, {"level_max": 0, "chance_max": 0, "capture_rate": 0})
-                slot["level_max"] = max(slot["level_max"], _safe_int(encounter.get("level_max")))
-                slot["chance_max"] = max(slot["chance_max"], _safe_int(encounter.get("encounter_chance_max")))
-                slot["capture_rate"] = max(slot["capture_rate"], _safe_int(encounter.get("capture_rate")))
-
-    candidates = [
-        (species, payload["chance_max"], payload["level_max"], payload["capture_rate"])
-        for species, payload in by_species.items()
-    ]
-    candidates.sort(key=lambda item: (-item[1], -item[2], -item[3], item[0]))
-    return candidates
-
 
 def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> list[tuple[str, int, int, int]]:
     seen_roots: set[str] = set()
@@ -490,6 +376,141 @@ def _dedupe_species_by_family(candidates: list[tuple[str, int, int, int]]) -> li
         seen_roots.add(root)
         result.append((species, chance_max, level_max, capture_rate))
     return result
+
+
+def _normalize_type_name(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _species_type_weights(
+    species: str,
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+) -> dict[str, float]:
+    type_1, type_2 = pokemon_types_by_species.get(normalize_key_part(species), (None, None))
+    t1 = _normalize_type_name(type_1)
+    t2 = _normalize_type_name(type_2)
+    if t1 and t2:
+        return {t1: 0.5, t2: 0.5}
+    if t1:
+        return {t1: 1.0}
+    if t2:
+        return {t2: 1.0}
+    return {}
+
+
+def _primary_type_of_species(
+    species: str,
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+) -> str:
+    type_1, _ = pokemon_types_by_species.get(normalize_key_part(species), (None, None))
+    return _normalize_type_name(type_1)
+
+
+def _species_team_cap_type_weights(
+    species: str,
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+) -> dict[str, float]:
+    type_1, type_2 = pokemon_types_by_species.get(normalize_key_part(species), (None, None))
+    t1 = _normalize_type_name(type_1)
+    t2 = _normalize_type_name(type_2)
+    if t1 and t2:
+        if t1 == t2:
+            return {t1: 1.5}
+        return {t1: 0.75, t2: 0.75}
+    if t1:
+        return {t1: 1.0}
+    if t2:
+        return {t2: 1.0}
+    return {}
+
+
+def _type_multiplier(attacking_type: str, defending_type: str) -> float:
+    attacking = str(attacking_type or "").strip().title()
+    defending = str(defending_type or "").strip().title()
+    return float(_TYPE_CHART.get(attacking, {}).get(defending, 1.0))
+
+
+def _team_fractional_distribution(
+    species_list: list[str],
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+) -> dict[str, float]:
+    counts: dict[str, float] = {}
+    for species in species_list:
+        for type_name, weight in _species_type_weights(species, pokemon_types_by_species=pokemon_types_by_species).items():
+            counts[type_name] = counts.get(type_name, 0.0) + float(weight)
+    total = sum(counts.values())
+    if total <= 0:
+        return {}
+    return {type_name: value / total for type_name, value in counts.items()}
+
+
+def _distribution_distance_l1(left: dict[str, float], right: dict[str, float]) -> float:
+    keys = set(left) | set(right)
+    return sum(abs(float(left.get(key, 0.0)) - float(right.get(key, 0.0))) for key in keys)
+
+
+def _boss_counter_score(
+    species_list: list[str],
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+    boss_type_profile: dict[str, float],
+) -> float:
+    if not boss_type_profile:
+        return 1.0
+    per_member: list[float] = []
+    for species in species_list:
+        member_weights = _species_type_weights(species, pokemon_types_by_species=pokemon_types_by_species)
+        if not member_weights:
+            continue
+        best_vs_boss = 1.0
+        for attacker_type in member_weights:
+            weighted = sum(_type_multiplier(attacker_type, defender_type) * float(weight) for defender_type, weight in boss_type_profile.items())
+            best_vs_boss = max(best_vs_boss, weighted)
+        per_member.append(best_vs_boss)
+    if not per_member:
+        return 1.0
+    return sum(per_member) / float(len(per_member))
+
+
+def _team_type_weight_cap(progression_depth: float | None) -> float:
+    _ = progression_depth
+    return max(0.0, float(DEFAULT_TEAM_TYPE_WEIGHT_CAP))
+
+
+def _team_type_weight_totals(
+    species_list: list[str],
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+    ) -> dict[str, float]:
+    counts: dict[str, float] = {}
+    for species in species_list:
+        for type_name, weight in _species_team_cap_type_weights(
+            species,
+            pokemon_types_by_species=pokemon_types_by_species,
+        ).items():
+            counts[type_name] = counts.get(type_name, 0.0) + float(weight)
+    return counts
+
+
+def _respects_team_type_weight_cap(
+    species_list: list[str],
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+    cap: float,
+) -> bool:
+    if cap <= 0:
+        return True
+    for weight in _team_type_weight_totals(
+        species_list,
+        pokemon_types_by_species=pokemon_types_by_species,
+    ).values():
+        if weight - float(cap) > _TYPE_WEIGHT_CAP_EPSILON:
+            return False
+    return True
 
 
 def _rank_candidate_pool(
@@ -557,89 +578,6 @@ def _filter_candidates_with_damaging_moves(
     return filtered, {"removed_no_damaging_moves": removed}
 
 
-def build_boss_progression_pools(progression_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build cumulative boss pools with incremental deltas."""
-    pools: list[dict[str, Any]] = []
-    seen_locations_by_game: dict[str, set[str]] = {}
-    cumulative_candidates_by_game: dict[str, dict[str, tuple[str, int, int, int]]] = {}
-    direct_level_min_by_game: dict[str, dict[str, int]] = {}
-    candidate_sources_by_game: dict[str, dict[str, set[str]]] = {}
-
-    for record in progression_records:
-        game_version = normalize_key_part(record.get("game") or record.get("version"))
-        boss_name = normalize_key_part(record.get("boss_name"))
-        if not game_version or not boss_name:
-            continue
-
-        location_to_encounters = record.get("reachable_location_encounters", {})
-        known_locations = seen_locations_by_game.setdefault(game_version, set())
-        cumulative_candidates = cumulative_candidates_by_game.setdefault(game_version, {})
-        direct_level_min = direct_level_min_by_game.setdefault(game_version, {})
-        candidate_sources = candidate_sources_by_game.setdefault(game_version, {})
-
-        delta_locations: list[str] = []
-        for location_slug in record.get("reachable_locations", []):
-            location = normalize_key_part(location_slug)
-            if not location or location in known_locations:
-                continue
-            delta_locations.append(location)
-
-        delta_species_count = 0
-        for location in delta_locations:
-            encounters = location_to_encounters.get(location, [])
-            if not isinstance(encounters, list):
-                continue
-            for encounter in encounters:
-                if not isinstance(encounter, dict):
-                    continue
-                if _has_excluded_encounter_method(encounter.get("encounter_methods") or encounter.get("methods")):
-                    continue
-                species = normalize_key_part(encounter.get("species"))
-                if not species or is_restricted_encounter_species(species):
-                    continue
-                chance_max = int(encounter.get("encounter_chance_max") or 0)
-                level_max = int(encounter.get("level_max") or 0)
-                level_min = int(encounter.get("level_min") or 0)
-                capture_rate = int(encounter.get("capture_rate") or 0)
-                prior = cumulative_candidates.get(species)
-                updated = (
-                    species,
-                    max((prior[1] if prior else 0), chance_max),
-                    max((prior[2] if prior else 0), level_max),
-                    max((prior[3] if prior else 0), capture_rate),
-                )
-                if prior is None:
-                    delta_species_count += 1
-                cumulative_candidates[species] = updated
-                if species not in direct_level_min:
-                    direct_level_min[species] = level_min
-                else:
-                    direct_level_min[species] = min(int(direct_level_min[species]), level_min)
-                candidate_sources.setdefault(species, set()).add(location)
-
-        known_locations.update(delta_locations)
-        pool_candidates = sorted(
-            cumulative_candidates.values(),
-            key=lambda item: (-item[1], -item[2], -item[3], item[0]),
-        )
-
-        pools.append(
-            {
-                "progression_pool_id": f"pool:{game_version}:{stable_digest(game_version, boss_name, record.get('part'))}",
-                "game_version": game_version,
-                "boss_name": boss_name,
-                "part": normalize_key_part(record.get("part")),
-                "pool_candidates": pool_candidates,
-                "pool_species_count": len(pool_candidates),
-                "delta_location_count": len(delta_locations),
-                "delta_species_count": delta_species_count,
-                "pool_delta_added": [species for species, _, _, _ in pool_candidates][-delta_species_count:] if delta_species_count else [],
-                "direct_level_min_by_species": dict(direct_level_min),
-                "candidate_sources": {k: sorted(v) for k, v in candidate_sources.items()},
-            }
-        )
-
-    return pools
 
 
 def _base_team_diversity_score(species_combo: tuple[tuple[str, int, int, int], ...]) -> tuple[int, int, int, str]:
@@ -650,10 +588,33 @@ def _base_team_diversity_score(species_combo: tuple[tuple[str, int, int, int], .
     return (chance_sum, level_sum, capture_sum, signature)
 
 
+def _primary_type_signature(
+    species_list: list[str],
+    *,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+) -> str:
+    primary_types = sorted(
+        {
+            primary_type
+            for primary_type in (
+                _primary_type_of_species(species, pokemon_types_by_species=pokemon_types_by_species)
+                for species in species_list
+            )
+            if primary_type
+        }
+    )
+    return "|".join(primary_types)
+
+
 def _generate_diverse_species_combos(
     candidates: list[tuple[str, int, int, int]],
     team_fill_size: int,
     combo_limit: int,
+    *,
+    progression_depth: float | None,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+    game_type_target_distribution: dict[str, float],
+    boss_type_profile: dict[str, float],
 ) -> list[list[str]]:
     if team_fill_size <= 0:
         return [[]]
@@ -664,182 +625,244 @@ def _generate_diverse_species_combos(
     if len(unique_family_candidates) < team_fill_size:
         return []
 
-    raw_combos = combinations(unique_family_candidates, team_fill_size)
-    scored: list[tuple[tuple[int, int, int, str], list[str]]] = []
-    for combo in islice(raw_combos, max(combo_limit * 20, combo_limit)):
-        scored.append((_base_team_diversity_score(combo), [item[0] for item in combo]))
+    def _species_types(species_name: str) -> set[str]:
+        return {
+            type_name
+            for type_name in _species_team_cap_type_weights(
+                species_name,
+                pokemon_types_by_species=pokemon_types_by_species,
+            ).keys()
+            if type_name
+        }
 
-    scored.sort(key=lambda item: (-item[0][0], -item[0][1], -item[0][2], item[0][3]))
+    def _target_type_count_for_team(*, size: int, depth: float | None) -> int:
+        # Early game: fewer anchor types; late game: broader type spread.
+        clamped = _clamp_progression_depth(0.5 if depth is None else depth)
+        desired = 2 + int(round(clamped * 2.0))
+        return max(2, min(size, desired))
+
+    def _weighted_distinct_types(
+        *,
+        type_weights: dict[str, float],
+        n_types: int,
+        rng: random.Random,
+    ) -> list[str]:
+        available = {k: float(v) for k, v in type_weights.items() if float(v) > 0.0}
+        selected: list[str] = []
+        for _ in range(max(0, n_types)):
+            if not available:
+                break
+            items = list(available.items())
+            total = sum(weight for _, weight in items)
+            if total <= 0:
+                break
+            pick = rng.random() * total
+            cursor = 0.0
+            chosen = items[-1][0]
+            for type_name, weight in items:
+                cursor += float(weight)
+                if cursor >= pick:
+                    chosen = type_name
+                    break
+            selected.append(chosen)
+            available.pop(chosen, None)
+        return selected
+
+    def _candidate_orders() -> list[list[tuple[str, int, int, int]]]:
+        if not unique_family_candidates:
+            return []
+        orders: list[list[tuple[str, int, int, int]]] = [list(unique_family_candidates)]
+        n_types = _target_type_count_for_team(size=team_fill_size, depth=progression_depth)
+        order_seed = stable_digest(
+            "|".join(f"{species}:{chance}:{level}:{capture}" for species, chance, level, capture in unique_family_candidates)
+            + f"|fill={team_fill_size}|limit={combo_limit}|depth={_clamp_progression_depth(0.5 if progression_depth is None else progression_depth):.4f}"
+        )
+        rng = random.Random(int(order_seed[:12], 16))
+
+        # Build type weights from encounter distribution, fallback to uniform over observed candidate types.
+        observed_type_counts: dict[str, float] = {}
+        for species, *_ in unique_family_candidates:
+            for type_name in _species_types(species):
+                observed_type_counts[type_name] = observed_type_counts.get(type_name, 0.0) + 1.0
+        weighted_types = {
+            type_name: float(game_type_target_distribution.get(type_name, 0.0))
+            for type_name in observed_type_counts
+        }
+        if not any(weighted_types.values()):
+            weighted_types = observed_type_counts
+
+        for _ in range(4):
+            selected_types = _weighted_distinct_types(type_weights=weighted_types, n_types=n_types, rng=rng)
+            if not selected_types:
+                continue
+            selected_set = set(selected_types)
+            prioritized = sorted(
+                unique_family_candidates,
+                key=lambda row: (
+                    -len(_species_types(row[0]) & selected_set),
+                    -max((weighted_types.get(t, 0.0) for t in _species_types(row[0]) & selected_set), default=0.0),
+                    -row[1],
+                    -row[2],
+                    -row[3],
+                    row[0],
+                ),
+            )
+            orders.append(prioritized)
+        return orders
+
+    scored: list[tuple[tuple[float, int, float, int, int, int, str], list[str]]] = []
+    cap = _team_type_weight_cap(progression_depth)
+    search_budget_per_order = max(combo_limit * 20, combo_limit)
+    for ordered_candidates in _candidate_orders():
+        raw_combos = combinations(ordered_candidates, team_fill_size)
+        for combo in islice(raw_combos, search_budget_per_order):
+            species_list = [item[0] for item in combo]
+            if not _respects_team_type_weight_cap(
+                species_list,
+                pokemon_types_by_species=pokemon_types_by_species,
+                cap=cap,
+            ):
+                continue
+            type_distribution = _team_fractional_distribution(
+                species_list,
+                pokemon_types_by_species=pokemon_types_by_species,
+            )
+            realism_distance = _distribution_distance_l1(type_distribution, game_type_target_distribution)
+            counter_score = _boss_counter_score(
+                species_list,
+                pokemon_types_by_species=pokemon_types_by_species,
+                boss_type_profile=boss_type_profile,
+            )
+            unique_primary_types = len(
+                {
+                    _primary_type_of_species(species, pokemon_types_by_species=pokemon_types_by_species)
+                    for species in species_list
+                    if _primary_type_of_species(species, pokemon_types_by_species=pokemon_types_by_species)
+                }
+            )
+            chance_sum, level_sum, capture_sum, signature = _base_team_diversity_score(combo)
+            scored.append(((-realism_distance, unique_primary_types, counter_score, chance_sum, level_sum, capture_sum, signature), species_list))
+
+    scored.sort(key=lambda item: (-item[0][0], -item[0][1], -item[0][2], -item[0][3], -item[0][4], -item[0][5], item[0][6]))
     seen: set[str] = set()
+    seen_primary_type_signatures: set[str] = set()
+    deferred: list[list[str]] = []
     out: list[list[str]] = []
     for _, species_list in scored:
         signature = _stable_species_signature(species_list)
         if signature in seen:
             continue
         seen.add(signature)
-        out.append(species_list)
+        primary_signature = _primary_type_signature(
+            species_list,
+            pokemon_types_by_species=pokemon_types_by_species,
+        )
+        if primary_signature and primary_signature not in seen_primary_type_signatures:
+            seen_primary_type_signatures.add(primary_signature)
+            out.append(species_list)
+        else:
+            deferred.append(species_list)
         if len(out) >= combo_limit:
             break
-    return out
+    if len(out) < combo_limit:
+        for species_list in deferred:
+            out.append(species_list)
+            if len(out) >= combo_limit:
+                break
+    if out:
+        return out
 
-
-def _boss_level_lookup(boss_teams: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
-    lookup: dict[tuple[str, str], int] = {}
-    for team in boss_teams:
-        game_version = normalize_key_part(team.get("game_version"))
-        boss_name = normalize_key_part(team.get("boss_name"))
-        if not game_version or not boss_name:
-            continue
-        lookup[(game_version, boss_name)] = int(team.get("avg_level") or DEFAULT_MEMBER_LEVEL)
-    return lookup
-
-
-def build_progression_source_teams(
-    progression_records: list[dict[str, Any]],
-    boss_teams: list[dict[str, Any]],
-    catch_pool_size: int = DEFAULT_CATCH_POOL_SIZE,
-    evolution_rules_by_game: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
-    reference_context: MoveReferenceContext | None = None,
-    allow_trade_evolutions: bool = False,
-    allow_item_evolutions: bool = ALLOW_ITEM_EVOLUTIONS,
-    item_evolution_default_level: int = ITEM_EVOLUTION_DEFAULT_LEVEL,
-) -> list[dict[str, Any]]:
-    sources: list[dict[str, Any]] = []
-    level_by_boss = _boss_level_lookup(boss_teams)
-    progression_pools = build_boss_progression_pools(progression_records)
-
-    evolution_rules_by_game = evolution_rules_by_game or {}
-
-    max_team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
-    candidate_pool_size = max(max_team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
-
-    for pool in progression_pools:
-        game_version = pool["game_version"]
-        boss_name = pool["boss_name"]
-        pool_progression_depth = _safe_float(pool.get("progression_depth"))
-        team_fill_size = _target_team_fill_size(
-            progression_depth=pool_progression_depth,
-            catch_pool_size=max_team_fill_size,
-        )
-        boss_level = level_by_boss.get((game_version, boss_name), DEFAULT_MEMBER_LEVEL)
-        target_generation = _generation_for_game_version(game_version)
-        raw_candidates = list(pool["pool_candidates"])
-        direct_level_min_by_species = {
-            normalize_key_part(species): int(level_min)
-            for species, level_min in dict(pool.get("direct_level_min_by_species") or {}).items()
-            if normalize_key_part(species)
-        }
-        evolution_rules = evolution_rules_by_game.get(game_version, {})
-        raw_candidates = _filter_candidates_by_obtainable_level_cap(
-            raw_candidates,
-            direct_level_min_by_species=direct_level_min_by_species,
-            level_cap=boss_level,
-            evolution_rules=evolution_rules,
-            allow_trade_evolutions=allow_trade_evolutions,
-            allow_item_evolutions=allow_item_evolutions,
-            item_evolution_default_level=item_evolution_default_level,
-        )
-        legal_species = legal_species_pool_for_level(
-            raw_candidates,
-            member_level=boss_level,
-            evolution_rules=evolution_rules,
-            target_generation=target_generation,
-            allow_trade_evolutions=allow_trade_evolutions,
-            allow_item_evolutions=allow_item_evolutions,
-            item_evolution_default_level=item_evolution_default_level,
-        )
-        normalized_candidates, normalization_diag = normalize_candidate_pool_for_level(
-            raw_candidates,
-            member_level=boss_level,
-            evolution_rules=evolution_rules,
-            legal_species=legal_species if legal_species else None,
-            target_generation=target_generation,
-            allow_trade_evolutions=allow_trade_evolutions,
-            allow_item_evolutions=allow_item_evolutions,
-            item_evolution_default_level=item_evolution_default_level,
-        )
-        if legal_species:
-            validate_candidate_pool(normalized_candidates, legal_species=legal_species, game_version=game_version)
-
-        normalized_candidates, move_diag = _filter_candidates_with_damaging_moves(
-            normalized_candidates,
-            level_cap=boss_level,
-            game_version=game_version,
-            reference_context=reference_context,
-        )
-
-        candidate_pool, rank_diag = _rank_candidate_pool(
-            normalized_candidates,
-            boss_level=boss_level,
-            pool_size=candidate_pool_size,
-            progression_depth=None,
-        )
-        logger.debug(
-            "[silver/teams] candidate pool diagnostics game=%s boss=%s raw=%s game_filtered_removed=%s progression_filtered_removed=%s evolved=%s post_validation_removed=%s no_damage_removed=%s final=%s rank_pruned=%s",
-            game_version,
-            boss_name,
-            len(raw_candidates),
-            0,
-            0,
-            normalization_diag.get("transformed", 0),
-            normalization_diag.get("removed_after_validation", 0),
-            move_diag.get("removed_no_damaging_moves", 0),
-            len(candidate_pool),
-            rank_diag.get("pruned", 0),
-        )
-        species_combos = _generate_diverse_species_combos(
-            candidates=candidate_pool,
-            team_fill_size=team_fill_size,
-            combo_limit=DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
-        )
-        if not species_combos:
-            fallback = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
-            if fallback:
-                species_combos = [fallback]
-        level_by_species = {
-            species: _effective_member_level(level_cap=boss_level, encounter_level_max=level_max)
-            for species, _, level_max, _ in candidate_pool
-        }
-
-        part = pool.get("part")
-        for combo_index, selected_species in enumerate(species_combos, start=1):
-            if legal_species:
-                validate_generated_team(
-                    selected_species,
-                    legal_species=legal_species,
-                    game_version=game_version,
-                    boss_name=boss_name,
-                )
-            source_team_id = make_team_id(
-                "progression",
-                game_version,
-                boss_name,
-                variant=f"{part or 'na'}:{combo_index}:{_stable_species_signature(selected_species)}",
-            )
-            sources.append(
-                {
-                    "team_id": source_team_id,
-                    "game_version": game_version,
-                    "team_role": "player",
-                    "origin": "generated",
-                    "is_player_candidate": True,
-                    "boss_name": boss_name,
-                    "gym": str(boss_name).strip() or None,
-                    "avg_level": boss_level,
-                    "player_max_level": boss_level,
-                    "pokemon": selected_species,
-                    "levels": [level_by_species.get(species, boss_level) for species in selected_species],
-                    "progression_pool_id": pool["progression_pool_id"],
-                    "part": part,
-                }
-            )
-
-    logger.info(
-        "[silver/teams] built compact progression source teams pools=%s source_teams=%s",
-        len(progression_pools),
-        len(sources),
+    # Enumeration frontier can miss feasible teams on certain ranked-order prefixes.
+    # Run a constructive type-weighted search before upstream fallback.
+    constructed: list[list[str]] = []
+    seen_constructed: set[str] = set()
+    clamped_depth = _clamp_progression_depth(0.5 if progression_depth is None else progression_depth)
+    n_types = max(2, min(team_fill_size, 2 + int(round(clamped_depth * 2.0))))
+    observed_type_counts: dict[str, float] = {}
+    for species, *_ in unique_family_candidates:
+        for type_name in _species_team_cap_type_weights(
+            species,
+            pokemon_types_by_species=pokemon_types_by_species,
+        ).keys():
+            if type_name:
+                observed_type_counts[type_name] = observed_type_counts.get(type_name, 0.0) + 1.0
+    weighted_types = {
+        type_name: float(game_type_target_distribution.get(type_name, 0.0))
+        for type_name in observed_type_counts
+    }
+    if not any(weighted_types.values()):
+        weighted_types = observed_type_counts
+    rng_seed = stable_digest(
+        "|".join(f"{species}:{chance}:{level}:{capture}" for species, chance, level, capture in unique_family_candidates)
+        + f"|constructive|fill={team_fill_size}|limit={combo_limit}"
     )
-    return sources
+    rng = random.Random(int(rng_seed[:12], 16))
+    trials = max(combo_limit * 50, 500)
+    cap = _team_type_weight_cap(progression_depth)
+    for _ in range(trials):
+        selected_types = _weighted_distinct_types(type_weights=weighted_types, n_types=n_types, rng=rng)
+        if not selected_types:
+            continue
+        selected_type_set = set(selected_types)
+        bucket = [
+            row for row in unique_family_candidates
+            if _species_team_cap_type_weights(row[0], pokemon_types_by_species=pokemon_types_by_species).keys() & selected_type_set
+        ]
+        if len(bucket) < team_fill_size:
+            continue
+        rng.shuffle(bucket)
+        team: list[str] = []
+        type_totals: dict[str, float] = {}
+        for species, *_ in bucket:
+            if species in team:
+                continue
+            weights = _species_team_cap_type_weights(species, pokemon_types_by_species=pokemon_types_by_species)
+            if any((type_totals.get(t, 0.0) + w) - float(cap) > _TYPE_WEIGHT_CAP_EPSILON for t, w in weights.items()):
+                continue
+            team.append(species)
+            for t, w in weights.items():
+                type_totals[t] = type_totals.get(t, 0.0) + float(w)
+            if len(team) >= team_fill_size:
+                break
+        if len(team) < team_fill_size:
+            continue
+        signature = _stable_species_signature(team)
+        if signature in seen_constructed:
+            continue
+        seen_constructed.add(signature)
+        constructed.append(team)
+        if len(constructed) >= combo_limit:
+            break
+    return constructed
+
+
+def _fallback_team_with_type_weight_cap(
+    candidates: list[tuple[str, int, int, int]],
+    *,
+    team_fill_size: int,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]],
+    cap: float,
+) -> list[str]:
+    selected: list[str] = []
+    type_weights: dict[str, float] = {}
+    for species, _, _, _ in candidates:
+        weights = _species_team_cap_type_weights(species, pokemon_types_by_species=pokemon_types_by_species)
+        if any(
+            (type_weights.get(type_name, 0.0) + weight) - float(cap) > _TYPE_WEIGHT_CAP_EPSILON
+            for type_name, weight in weights.items()
+        ):
+            continue
+        selected.append(species)
+        for type_name, weight in weights.items():
+            type_weights[type_name] = type_weights.get(type_name, 0.0) + float(weight)
+        if len(selected) >= team_fill_size:
+            break
+    if len(selected) >= team_fill_size:
+        return selected
+    # Strict mode: do not backfill with cap-violating species.
+    return selected
+
+
 
 
 def build_progression_source_teams_from_encounters(
@@ -853,6 +876,8 @@ def build_progression_source_teams_from_encounters(
     allow_trade_evolutions: bool = False,
     allow_item_evolutions: bool = ALLOW_ITEM_EVOLUTIONS,
     item_evolution_default_level: int = ITEM_EVOLUTION_DEFAULT_LEVEL,
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]] | None = None,
+    boss_type_profile_by_key: dict[tuple[str, str], dict[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build player source teams using persisted Silver references only."""
     required_encounter_columns = {
@@ -919,7 +944,7 @@ def build_progression_source_teams_from_encounters(
         len(encounters),
         len(bosses),
     )
-    per_game_rows = encounters.groupby("game_version", dropna=False).size().to_dict()
+    per_game_rows = encounters.groupby("game_version", dropna=False, observed=False).size().to_dict()
     logger.info("[silver/teams] per-game encounter rows=%s", per_game_rows)
 
     boss_id_by_game_slug = {
@@ -937,20 +962,42 @@ def build_progression_source_teams_from_encounters(
         for row in encounters[["game_version", "boss_id"]].drop_duplicates().itertuples(index=False)
     }
     if progression_depth_context is None:
-        if boss_teams is None:
-            raise ValueError("progression_depth_context is required when boss_teams fallback is not supplied")
-        progression_depth_context = _legacy_progression_depth_context_from_boss_teams(
-            encounters_df=encounters_df,
-            bosses_df=bosses_df,
-            boss_teams=boss_teams,
-        )
+        raise ValueError("progression_depth_context is required")
     evolution_rules_by_game = evolution_rules_by_game or {}
     max_team_fill_size = max(1, min(catch_pool_size, MAX_SOURCE_TEAM_SIZE))
     candidate_pool_size = max(max_team_fill_size, DEFAULT_SOURCE_TEAM_POOL_SIZE)
     sources: list[dict[str, Any]] = []
+    pokemon_types_by_species = pokemon_types_by_species or {}
+    boss_type_profile_by_key = boss_type_profile_by_key or {}
+
+    game_type_target_distribution: dict[str, dict[str, float]] = {}
+    for game_version, game_rows in encounters.groupby("game_version", observed=False):
+        counts: dict[str, float] = {}
+        total = 0.0
+        grouped_species = (
+            game_rows.groupby("pokemon_species", as_index=False)
+            .agg(encounter_chance_max=("encounter_chance_max", "max"))
+            .itertuples(index=False)
+        )
+        for row in grouped_species:
+            species = str(row.pokemon_species)
+            chance_weight = max(1.0, float(row.encounter_chance_max or 0.0))
+            species_weights = _species_type_weights(species, pokemon_types_by_species=pokemon_types_by_species)
+            for type_name, type_weight in species_weights.items():
+                weighted = chance_weight * float(type_weight)
+                counts[type_name] = counts.get(type_name, 0.0) + weighted
+                total += weighted
+        if total > 0:
+            game_type_target_distribution[str(game_version)] = {
+                type_name: value / total
+                for type_name, value in counts.items()
+            }
 
     dropped_missing_boss = 0
-    for boss in bosses.sort_values(["game_version", "boss_order", "boss_id"]).itertuples(index=False):
+    processed_bosses = 0
+    boss_rows_sorted = list(bosses.sort_values(["game_version", "boss_order", "boss_id"]).itertuples(index=False))
+    for boss in boss_rows_sorted:
+        processed_bosses += 1
         game_version = str(boss.game_version)
         boss_id = str(boss.boss_id)
         boss_name = normalize_key_part(getattr(boss, "boss_name", None) or boss_id)
@@ -1086,11 +1133,40 @@ def build_progression_source_teams_from_encounters(
             candidates=candidate_pool,
             team_fill_size=team_fill_size,
             combo_limit=DEFAULT_SOURCE_TEAM_COMBO_LIMIT,
+            progression_depth=progression.progression_depth,
+            pokemon_types_by_species=pokemon_types_by_species,
+            game_type_target_distribution=game_type_target_distribution.get(game_version, {}),
+            boss_type_profile=boss_type_profile_by_key.get((game_version, boss_id), {}),
         )
         if not species_combos:
-            fallback = [species for species, _, _, _ in candidate_pool[:team_fill_size]]
+            fallback = _fallback_team_with_type_weight_cap(
+                candidate_pool,
+                team_fill_size=team_fill_size,
+                pokemon_types_by_species=pokemon_types_by_species,
+                cap=_team_type_weight_cap(progression.progression_depth),
+            )
             if fallback:
                 species_combos = [fallback]
+                if len(fallback) < team_fill_size:
+                    logger.warning(
+                        "[silver/teams] strict type-cap fallback produced reduced team game=%s boss_id=%s boss_name=%s "
+                        "target_size=%s fallback_size=%s",
+                        game_version,
+                        boss_id,
+                        boss_name,
+                        team_fill_size,
+                        len(fallback),
+                    )
+            else:
+                logger.warning(
+                    "[silver/teams] strict type-cap fallback could not form full team game=%s boss_id=%s boss_name=%s "
+                    "target_size=%s fallback_size=%s",
+                    game_version,
+                    boss_id,
+                    boss_name,
+                    team_fill_size,
+                    len(fallback),
+                )
         level_by_species = {
             species: _effective_member_level(level_cap=player_level_cap, encounter_level_max=level_max)
             for species, _, level_max, _ in candidate_pool
@@ -1118,6 +1194,18 @@ def build_progression_source_teams_from_encounters(
                 game_version=game_version,
                 boss_name=boss_name,
             )
+            type_weights = _team_type_weight_totals(
+                selected_species,
+                pokemon_types_by_species=pokemon_types_by_species,
+            )
+            type_cap = _team_type_weight_cap(progression.progression_depth)
+            violating = {t: w for t, w in type_weights.items() if w - float(type_cap) > _TYPE_WEIGHT_CAP_EPSILON}
+            if violating:
+                raise ValueError(
+                    "Generated team violates weighted type cap "
+                    f"game_version={game_version} boss_id={boss_id} boss_name={boss_name} "
+                    f"cap={type_cap} offending={violating} species={selected_species}"
+                )
             source_team_id = make_team_id(
                 "progression",
                 game_version,
@@ -1153,17 +1241,10 @@ def build_progression_source_teams_from_encounters(
                     "level_cap_offset": _progression_level_offset(progression.progression_depth),
                 }
             )
-        logger.info(
-            "[silver/teams] source teams generated game=%s boss_id=%s boss_name=%s teams=%s",
-            game_version,
-            boss_id,
-            boss_name,
-            len(species_combos),
-        )
-
     logger.info(
-        "[silver/teams] built progression source teams from encounters source_teams=%s dropped_missing_boss=%s",
+        "[silver/teams] built progression source teams from encounters source_teams=%s processed_bosses=%s dropped_missing_boss=%s",
         len(sources),
+        processed_bosses,
         dropped_missing_boss,
     )
     return sources

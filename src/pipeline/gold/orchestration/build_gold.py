@@ -36,7 +36,6 @@ class GoldContractError(ValueError):
 
 _REQUIRED_MANIFEST_DATASET_FILES = (
     "pokemon_data",
-    "move_data",
     "simulation_inputs_teams",
     "source_team_members",
     "member_moveset_combos",

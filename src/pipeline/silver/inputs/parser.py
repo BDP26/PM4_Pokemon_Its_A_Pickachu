@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
@@ -9,6 +10,7 @@ from src.pipeline.silver.inputs.location_mapper import LocationMapper
 def normalize_text(value: str) -> str:
     value = value.replace("[ edit source ]", " ")
     value = value.replace("[edit source]", " ")
+    value = re.sub(r"\[\s*edit(?:\s+source)?\s*\]", " ", value, flags=re.IGNORECASE)
     value = value.replace("\xa0", " ")
     return " ".join(value.split()).strip()
 

@@ -8,7 +8,7 @@ from src.pipeline.common.io import write_json
 from src.pipeline.silver.enrichment.location_pokemon_enrichment import get_location_area_and_pokemon_maps
 from src.pipeline.silver.config.boss_config import BOSS_ALIASES
 from src.pipeline.silver.config.game_config import BASE_GAME_GROUPS
-from src.pipeline.silver.inputs.parser import enforce_parser_coverage, extract_game_data
+from src.pipeline.silver.inputs.parser import enforce_parser_coverage, extract_game_data, normalize_text
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
 
 
@@ -85,6 +85,12 @@ def test_parser_regression_with_frozen_html_snapshot() -> None:
     assert len(records) == 1
     assert records[0]["boss_name"] == "Brock"
     assert "kanto-route-2" in records[0]["reachable_locations"]
+
+
+def test_normalize_text_strips_edit_markers() -> None:
+    assert normalize_text("Lostlorn Forest[edit]") == "Lostlorn Forest"
+    assert normalize_text("Lostlorn Forest [ edit ]") == "Lostlorn Forest"
+    assert normalize_text("Lostlorn Forest [edit source]") == "Lostlorn Forest"
 
 
 def test_parser_maps_kaggle_blue_variant_heading_to_blue() -> None:

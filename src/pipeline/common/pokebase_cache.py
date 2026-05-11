@@ -32,20 +32,30 @@ def _cache_uri_for_resource(
     if not resolve_name_via_listing:
         return direct_uri
 
-    listing = cache.get(f"{endpoint_key}/")
-    results = listing.get("results", []) if isinstance(listing, dict) else []
-    for row in results:
-        if str(row.get("name") or "").strip().lower() != resource_key:
-            continue
-        url = str(row.get("url") or "")
-        parts = [part for part in url.split("/") if part]
-        if not parts:
-            continue
-        try:
-            resource_id = int(parts[-1])
-        except ValueError:
-            continue
-        return f"{endpoint_key}/{resource_id}/"
+    listing_keys = [f"{endpoint_key}/"]
+    listing_keys.extend(
+        sorted(
+            key
+            for key in cache.keys()
+            if isinstance(key, str) and key.startswith(f"{endpoint_key}/?") and "offset=" in key and "limit=" in key
+        )
+    )
+
+    for listing_key in listing_keys:
+        listing = cache.get(listing_key)
+        results = listing.get("results", []) if isinstance(listing, dict) else []
+        for row in results:
+            if str(row.get("name") or "").strip().lower() != resource_key:
+                continue
+            url = str(row.get("url") or "")
+            parts = [part for part in url.split("/") if part]
+            if not parts:
+                continue
+            try:
+                resource_id = int(parts[-1])
+            except ValueError:
+                continue
+            return f"{endpoint_key}/{resource_id}/"
     return None
 
 

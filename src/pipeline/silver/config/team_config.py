@@ -90,9 +90,9 @@ GENERIC_FORM_SUFFIXES: tuple[str, ...] = ("male", "female", "average", "normal")
 # Override with environment variables when needed.
 
 # Species / source-team diversity controls.
-DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 14, minimum=1)
-DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 32, minimum=1)
-DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 60, minimum=1)
+DEFAULT_CATCH_POOL_SIZE = _env_int("PM4_CATCH_POOL_SIZE", 10, minimum=1)
+DEFAULT_SOURCE_TEAM_POOL_SIZE = _env_int("PM4_SOURCE_TEAM_POOL_SIZE", 100, minimum=1)
+DEFAULT_SOURCE_TEAM_COMBO_LIMIT = _env_int("PM4_SOURCE_TEAM_COMBO_LIMIT", 40, minimum=1)
 
 # Compact Silver move option controls.
 DEFAULT_MEMBER_MOVE_OPTION_LIMIT = _env_int("PM4_MEMBER_MOVE_OPTION_LIMIT", 6, minimum=1)
@@ -110,22 +110,12 @@ DEFAULT_SIMULATION_ENUMERATION_THRESHOLD = _env_int("PM4_SIMULATION_ENUMERATION_
 # Team structure.
 # Pokémon battle teams are capped at six members in core games.
 DEFAULT_TEAM_MEMBER_LIMIT = _env_int("PM4_TEAM_MEMBER_LIMIT", 6, minimum=1)
+DEFAULT_TEAM_TYPE_WEIGHT_CAP = _env_float("PM4_TEAM_TYPE_WEIGHT_CAP", 2.0, minimum=0.0, maximum=999.0)
 DEFAULT_MEMBER_LEVEL = _env_int("PM4_MEMBER_LEVEL", 20, minimum=1)
 
 
-# =========================
-# DEPRECATED COMPATIBILITY CONTROLS
-# =========================
-#
-# Silver now stores compact logical teams/members. Full-team expansion/sampling
-# belongs in Gold/simulation. These names remain so older callers do not break.
-
-DEFAULT_TEAM_VARIANT_LIMIT = _env_int("PM4_TEAM_VARIANT_LIMIT", 100, minimum=0)
-TEAM_VARIANT_CONFIRMATION_THRESHOLD = _env_int("PM4_TEAM_VARIANT_CONFIRMATION_THRESHOLD", 8000, minimum=1)
-ALLOW_LARGE_TEAM_VARIANTS = _env_bool("PM4_ALLOW_LARGE_TEAM_VARIANTS", True)
 ALLOW_ITEM_EVOLUTIONS = _env_bool("PM4_ALLOW_ITEM_EVOLUTIONS", True)
 ITEM_EVOLUTION_DEFAULT_LEVEL = _env_int("PM4_ITEM_EVOLUTION_DEFAULT_LEVEL", 1, minimum=1)
-DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM = _env_int("PM4_MOVESET_VARIANT_LIMIT_PER_TEAM", 30, minimum=0)
 SIMULATION_POLICY_PROFILE = os.getenv("PM4_SIM_POLICY_PROFILE", "strict").strip().lower() or "strict"
 
 
@@ -160,7 +150,6 @@ def resolve_runtime_team_config() -> dict[str, object]:
     """Return effective team-generation settings for logging/debugging.
 
     Active Silver controls define compact team generation and move options.
-    Deprecated controls are kept only so older callers/config snapshots do not break.
     Gold simulation sampling should use simulation_team_sample_limit and
     simulation_enumeration_threshold.
     """
@@ -177,6 +166,7 @@ def resolve_runtime_team_config() -> dict[str, object]:
 
         # Active team structure controls.
         "team_member_limit": DEFAULT_TEAM_MEMBER_LIMIT,
+        "team_type_weight_cap": DEFAULT_TEAM_TYPE_WEIGHT_CAP,
         "member_level": DEFAULT_MEMBER_LEVEL,
         "moveset_width": MOVESET_WIDTH,
 
@@ -187,13 +177,6 @@ def resolve_runtime_team_config() -> dict[str, object]:
         # Parser / data quality controls.
         "parser_min_boss_coverage": PARSER_MIN_BOSS_COVERAGE,
         "simulation_policy_profile": SIMULATION_POLICY_PROFILE,
-
-        # Deprecated compatibility controls.
-        # Silver now stores compact logical teams; full expansion/sampling belongs in Gold.
-        "deprecated_team_variant_limit": DEFAULT_TEAM_VARIANT_LIMIT,
-        "deprecated_moveset_variant_limit_per_team": DEFAULT_MOVESET_VARIANT_LIMIT_PER_TEAM,
-        "deprecated_team_variant_confirmation_threshold": TEAM_VARIANT_CONFIRMATION_THRESHOLD,
-        "deprecated_allow_large_team_variants": ALLOW_LARGE_TEAM_VARIANTS,
         "allow_item_evolutions": ALLOW_ITEM_EVOLUTIONS,
         "item_evolution_default_level": ITEM_EVOLUTION_DEFAULT_LEVEL,
     }

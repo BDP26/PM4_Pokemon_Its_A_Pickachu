@@ -2,6 +2,7 @@ import re
 import time
 import hashlib
 import logging
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, cast
@@ -23,9 +24,6 @@ from src.pipeline.settings import (
     ensure_medallion_dirs,
 )
 from src.pipeline.silver.config.game_config import get_games_config
-
-import kagglehub
-from kagglehub import KaggleDatasetAdapter
 
 _TITLE_EXISTS_CACHE: dict[str, bool] = {}
 logger = logging.getLogger(__name__)
@@ -407,6 +405,15 @@ def fetch_kaggle_gym_leaders_dataset(
     dataset_handle: str = KAGGLE_GYM_LEADERS_DATASET,
     file_path: str = KAGGLE_GYM_LEADERS_FILE_PATH,
 ) -> None:
+    try:
+        import kagglehub
+        from kagglehub import KaggleDatasetAdapter
+    except Exception as exc:
+        raise RuntimeError(
+            "Kaggle dependency import failed. Reinstall a healthy IPython + kagglehub in this venv, e.g. "
+            "`python -m pip install --force-reinstall ipython kagglehub`."
+        ) from exc
+
     logger.info("[bronze][kaggle] start dataset_handle=%s file_path=%s", dataset_handle, file_path or "<auto>")
     kaggle_output_dir = (output_dir or BRONZE_DIR) / "kagglehub"
     kaggle_output_dir.mkdir(parents=True, exist_ok=True)
@@ -431,22 +438,36 @@ def fetch_kaggle_gym_leaders_dataset(
     columns = None
     if selected_file:
         logger.info("[bronze][kaggle] loading file=%s", selected_file)
-        dataset_loader = getattr(kagglehub, "dataset_load", None)
-        if dataset_loader is None:
-            dataset_loader = getattr(kagglehub, "load_dataset", None)
-        if dataset_loader is None:
-            raise AttributeError("kagglehub is missing dataset_load/load_dataset")
-
-        dataframe = dataset_loader(
-            KaggleDatasetAdapter.PANDAS,
-            dataset_handle,
-            selected_file,
-        )
         table_output_path = kaggle_output_dir / "gym_leaders_elite_four.csv"
-        dataframe.to_csv(table_output_path, index=False)
-        row_count = int(len(dataframe))
-        columns = list(dataframe.columns)
-        logger.info("[bronze][kaggle] loaded rows=%s columns=%s", row_count, len(columns))
+        source_file = dataset_dir / selected_file
+        if source_file.suffix.lower() == ".csv":
+            with source_file.open("r", encoding="utf-8", newline="") as handle:
+                first_line = handle.readline()
+                if first_line:
+                    columns = [column.strip() for column in first_line.rstrip("\n\r").split(",")]
+                row_count = sum(1 for _ in handle)
+            shutil.copy2(source_file, table_output_path)
+            logger.info(
+                "[bronze][kaggle] copied csv rows=%s columns=%s",
+                row_count,
+                0 if columns is None else len(columns),
+            )
+        else:
+            dataset_loader = getattr(kagglehub, "dataset_load", None)
+            if dataset_loader is None:
+                dataset_loader = getattr(kagglehub, "load_dataset", None)
+            if dataset_loader is None:
+                raise AttributeError("kagglehub is missing dataset_load/load_dataset")
+
+            dataframe = dataset_loader(
+                KaggleDatasetAdapter.PANDAS,
+                dataset_handle,
+                selected_file,
+            )
+            dataframe.to_csv(table_output_path, index=False)
+            row_count = int(len(dataframe))
+            columns = list(dataframe.columns)
+            logger.info("[bronze][kaggle] loaded rows=%s columns=%s", row_count, len(columns))
     else:
         logger.warning("[bronze][kaggle] no tabular file detected; skipped dataframe export")
 

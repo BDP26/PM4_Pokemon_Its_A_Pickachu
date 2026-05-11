@@ -10,13 +10,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
-import pandas as pd
-import pokebase as pb
-
 from src.pipeline.common.type_chart import build_type_chart, save_as_json
 from src.pipeline.common.cast import to_bool, to_list
 from src.pipeline.common.http import build_session
-from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet
+from src.pipeline.common.io import read_json, read_jsonl, read_parquet, write_json, write_parquet, _remove_path_if_exists
 from src.pipeline.common.simulation_config import load_runtime_battle_policy_config
 from src.pipeline.settings import BRONZE_DIR, SILVER_DIR, ensure_medallion_dirs, get_silver_subdirs
 from src.pipeline.silver.config.boss_config import BOSS_ALIASES, STRIATON_CONDITIONAL_BOSSES, boss_id
@@ -35,96 +32,72 @@ from src.pipeline.silver.enrichment.schema_normalizer import (
     create_pokemon_reference_index,
     write_normalized_silver,
 )
-from src.pipeline.silver.inputs.builders.player_teams import (
-    build_player_team_compact_tables,
-    build_progression_source_teams_from_encounters,
-)
-from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
-    bootstrap_move_reference_cache,
-    persist_move_reference_cache,
-)
-from src.pipeline.silver.inputs.kaggle_boss_mapping import load_kaggle_rows_by_game
 from src.pipeline.silver.inputs.location_mapper import LocationMapper
 from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
 from src.pipeline.silver.inputs.reference_context import load_reference_context, normalize_move_name, normalize_species_slug
 from src.pipeline.silver.move_power import resolve_effective_power
-from src.pipeline.silver.inputs.sources.boss_teams import (
-    load_kaggle_boss_rows_by_game,
-)
-from src.pipeline.silver.orchestration.stages import run_parse_stage
-from src.pipeline.silver.references.boss_harmonization import (
-    build_and_write_boss_references,
-    build_boss_team_members_reference_rows,
-    build_boss_team_payloads,
-)
-from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
-from src.pipeline.silver.schemas.relational_checks import validate_normalized_silver_tables
 from src.pipeline.silver.transforms.keys import make_pokemon_instance_id, normalize_key_part, stable_digest
-from src.pipeline.silver.transforms.normalized_tables import build_games_table, build_locations_table
-from src.pipeline.silver.transforms.progression_depth import (
-    ProgressionDepthContext,
-    build_boss_level_table_with_mapping,
-    build_progression_depth_context,
-    build_progression_depth_table,
-)
 from src.pipeline.silver.writers.outputs import (
     build_input_signature,
     fingerprint_path,
     fingerprint_python_files,
     load_state,
     save_state,
-    write_validated_move_data,
+)
+from src.pipeline.silver.inputs.builders.pokemon_profiles import (
+    INVALID_NORMALIZED_POKEMON_TOKENS,
+    POKEMON_COMBAT_REQUIRED_COLUMNS,
+    POKEMON_RESOLUTION_ALIAS_FALLBACKS,
+    STAT_NAME_TO_COLUMN,
+    _build_enriched_pokemon_profiles,
+    _extract_pokeapi_id_from_source_url,
+    _has_complete_pokemon_profile_payload,
+    _normalize_pokebase_payload,
+    _normalize_requested_pokemon_name,
+    _profile_from_pokemon_payload,
+    _resolve_requested_pokemon_profile,
+    _species_classification_from_payload,
+    _species_resolution_candidates,
+    _validate_and_persist_pokemon_data_contract,
+    pokebase_get_data,
+)
+from src.pipeline.silver.transforms.encounter_transforms import (
+    _canonicalize_boss_teams_to_references,
+    _canonicalize_encounter_boss_ids,
+    _coerce_alias_values,
+    _collect_kaggle_boss_species_and_moves,
+    _expand_striaton_encounters,
+    _filter_bosses_with_encounter_pools,
+    _normalize_boss_teams_with_conditional_striaton,
+    _validation_profile,
+)
+from src.pipeline.silver.inputs.builders.bootstrap_moves import (
+    _all_starter_family_bootstrap_entries,
+    _build_boss_species_bootstrap_entries,
+    _build_evolution_rules_by_game_from_encounters,
+    _build_kaggle_bootstrap_entries,
+    _build_progression_bootstrap_entries,
+    _collect_missing_bootstrap_move_hints,
+    _collect_missing_learnable_species_pairs,
+    _collect_starter_chain_species_by_game,
+    _dedupe_bootstrap_entries,
+    _diagnose_player_missing_damaging_moves,
+    _ensure_moves_in_combat_profiles,
+    _evolution_rules_map_from_rows,
+    _evolution_rules_rows_from_map,
+    _expand_bootstrap_entries_with_evolution_lines,
+    _move_profiles_from_reference,
+    _species_by_game_from_bootstrap_entries,
+    _starter_chain_bootstrap_entries,
+    _validate_kaggle_moves_in_move_reference,
+    _validate_starter_chain_move_coverage,
+    _validate_universal_starter_family_move_coverage,
+    _build_bootstrap_move_entries,
 )
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
-
-
-def pokebase_get_data(endpoint: str, resource_name_or_id: str | int):
-    loader = getattr(pb, str(endpoint).strip().lower().replace("-", "_"), None)
-    if not callable(loader):
-        raise ValueError(f"Unsupported pokebase endpoint: {endpoint}")
-    return loader(resource_name_or_id)
-
-
-STAT_NAME_TO_COLUMN = {
-    "hp": "base_hp",
-    "attack": "base_attack",
-    "defense": "base_defense",
-    "special-attack": "base_special_attack",
-    "special-defense": "base_special_defense",
-    "speed": "base_speed",
-}
-
-POKEMON_COMBAT_REQUIRED_COLUMNS = [
-    "pokemon_species",
-    "name",
-    "type_1",
-    "base_hp",
-    "base_attack",
-    "base_defense",
-    "base_special_attack",
-    "base_special_defense",
-    "base_speed",
-]
-
-POKEMON_RESOLUTION_ALIAS_FALLBACKS: dict[str, str] = {
-    "aegislash": "aegislash-shield",
-    "gourgeist": "gourgeist-average",
-    "meowstic": "meowstic-male",
-    "pyroar": "pyroar-male",
-    "pumpkaboo-small": "pumpkaboo",
-    "pumpkaboo-large": "pumpkaboo",
-    "pumpkaboo-super": "pumpkaboo",
-    "raichu-alola": "raichu",
-    "frillish-male": "frillish",
-    "jellicent-male": "jellicent",
-}
-
-INVALID_NORMALIZED_POKEMON_TOKENS = {"", "nan", "none", "null", "<na>", "na"}
-
-
-def _coerce_alias_values(value: Any) -> list[Any]:
-    return to_list(value, drop_nullish=True)
 
 
 def summarize_unmapped_locations(misses: list[dict]) -> dict:
@@ -153,14 +126,6 @@ def summarize_unmapped_locations(misses: list[dict]) -> dict:
         "examples_by_reason": dict(examples_by_reason),
     }
 
-
-def _remove_if_exists(path: Path) -> None:
-    if not path.exists():
-        return
-    if path.is_dir():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
 
 
 def _validate_bronze_inputs_or_raise(*, bronze_dir: Path, location_index_path: Path, bulbapedia_dir: Path, kaggle_csv_path: Path) -> None:
@@ -205,758 +170,6 @@ def _game_output_paths(simulation_dir: Path, game_key: str) -> dict[str, Path]:
     }
 
 
-def _validation_profile(values_by_column: dict[str, set[str]], row_count: int) -> dict[str, Any]:
-    return {"row_count": row_count, "columns": {column: sorted(values) for column, values in values_by_column.items()}}
-
-
-def _collect_kaggle_boss_species_and_moves(boss_teams: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
-    species: set[str] = set()
-    moves: set[str] = set()
-    for team in boss_teams:
-        pokemon_entries = team.get("pokemon")
-        if isinstance(pokemon_entries, list):
-            for pokemon in pokemon_entries:
-                species_slug = normalize_species_slug(pokemon)
-                if species_slug:
-                    species.add(species_slug)
-        move_entries = team.get("moves")
-        if isinstance(move_entries, list):
-            for member_moves in move_entries:
-                if not isinstance(member_moves, list):
-                    continue
-                for move in member_moves:
-                    move_slug = normalize_move_name(move)
-                    if move_slug:
-                        moves.add(move_slug)
-    return species, moves
-
-
-def _expand_striaton_encounters(encounters_df: pd.DataFrame) -> pd.DataFrame:
-    if encounters_df.empty:
-        return encounters_df
-
-    required = {"game", "boss_id", "location", "pokemon"}
-    if not required.issubset(encounters_df.columns):
-        return encounters_df
-
-    cloned_rows: list[dict[str, Any]] = []
-    striaton_boss_ids = {
-        normalize_key_part(str(conditional_boss["boss_name"]))
-        for conditional_boss in STRIATON_CONDITIONAL_BOSSES
-    }
-    for game_version in ("black", "white"):
-        source_rows = encounters_df[
-            encounters_df["game"].astype(str).str.strip().str.lower().eq(game_version)
-            & encounters_df["boss_id"].astype(str).str.strip().str.lower().isin(
-                {f"{game_version}:{boss_name}" for boss_name in striaton_boss_ids}
-            )
-        ].copy()
-        if source_rows.empty:
-            continue
-        seed_row = source_rows.sort_values("boss_id").iloc[0].to_dict()
-        for conditional_boss in STRIATON_CONDITIONAL_BOSSES:
-            cloned = dict(seed_row)
-            cloned["game"] = game_version
-            cloned["boss_id"] = boss_id(game_version, str(conditional_boss["boss_name"]))
-            cloned_rows.append(cloned)
-
-    if not cloned_rows:
-        return encounters_df
-
-    expanded = pd.concat([encounters_df, pd.DataFrame(cloned_rows)], ignore_index=True)
-
-    def _freeze_value(value: Any) -> Any:
-        if isinstance(value, list):
-            return tuple(_freeze_value(item) for item in value)
-        if isinstance(value, dict):
-            return tuple(sorted((str(key), _freeze_value(item)) for key, item in value.items()))
-        return value
-
-    seen: set[tuple[Any, ...]] = set()
-    deduped_rows: list[dict[str, Any]] = []
-    for row in expanded.to_dict(orient="records"):
-        identity = tuple((column, _freeze_value(value)) for column, value in sorted(row.items()))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped_rows.append(row)
-
-    return pd.DataFrame(deduped_rows).reset_index(drop=True)
-
-
-def _canonicalize_encounter_boss_ids(
-    encounters_df: pd.DataFrame,
-    bosses_reference_df: pd.DataFrame,
-) -> pd.DataFrame:
-    if encounters_df.empty or bosses_reference_df.empty:
-        return encounters_df
-    required_encounter_columns = {"game", "boss_id"}
-    required_boss_columns = {"game_version", "boss_id", "boss_name_canonical"}
-    if not required_encounter_columns.issubset(encounters_df.columns):
-        return encounters_df
-    if not required_boss_columns.issubset(bosses_reference_df.columns):
-        return encounters_df
-
-    bosses = bosses_reference_df.copy()
-    bosses["game_version"] = bosses["game_version"].astype(str).str.strip().str.lower()
-    bosses["boss_id"] = bosses["boss_id"].astype(str).str.strip().str.lower()
-    bosses["boss_slug"] = bosses["boss_name_canonical"].map(normalize_key_part)
-    bosses = bosses[(bosses["game_version"] != "") & (bosses["boss_id"] != "") & (bosses["boss_slug"] != "")]
-    if bosses.empty:
-        return encounters_df
-
-    boss_id_by_game_slug: dict[tuple[str, str], str] = {}
-    for row in bosses[["game_version", "boss_slug", "boss_id"]].drop_duplicates().itertuples(index=False):
-        boss_id_by_game_slug[(str(row.game_version), str(row.boss_slug))] = str(row.boss_id)
-
-    out = encounters_df.copy()
-    out["game"] = out["game"].astype(str).str.strip().str.lower()
-    out["boss_id"] = out["boss_id"].astype(str).str.strip().str.lower()
-    out["boss_slug"] = out["boss_id"].map(lambda value: normalize_key_part(str(value).split(":")[-1]))
-    out["canonical_boss_id"] = out.apply(
-        lambda row: boss_id_by_game_slug.get((str(row["game"]), str(row["boss_slug"]))),
-        axis=1,
-    )
-    out["boss_id"] = out["canonical_boss_id"].fillna(out["boss_id"])
-    out = out.drop(columns=["boss_slug", "canonical_boss_id"], errors="ignore")
-    return out
-
-
-def _filter_bosses_with_encounter_pools(
-    bosses_df: pd.DataFrame,
-    encounters_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """Keep only boss rows that have at least one encounter row in the same game."""
-    if bosses_df.empty or encounters_df.empty:
-        return bosses_df
-
-    required_boss_columns = {"game_version", "boss_id"}
-    required_encounter_columns = {"game", "boss_id"}
-    if not required_boss_columns.issubset(bosses_df.columns):
-        return bosses_df
-    if not required_encounter_columns.issubset(encounters_df.columns):
-        return bosses_df
-
-    encounter_pairs = {
-        (str(row.game).strip().lower(), str(row.boss_id).strip().lower())
-        for row in encounters_df[["game", "boss_id"]].drop_duplicates().itertuples(index=False)
-        if str(row.game).strip() and str(row.boss_id).strip()
-    }
-    if not encounter_pairs:
-        return bosses_df
-
-    normalized_pairs = [
-        (str(game_version).strip().lower(), str(boss_id).strip().lower())
-        for game_version, boss_id in bosses_df[["game_version", "boss_id"]].itertuples(index=False, name=None)
-    ]
-    keep_mask = [pair in encounter_pairs for pair in normalized_pairs]
-    filtered = bosses_df.loc[keep_mask].copy()
-
-    dropped = bosses_df.loc[[not keep for keep in keep_mask]].copy()
-    if not dropped.empty:
-        sample = [
-            {
-                "game_version": str(row.get("game_version") or "").strip().lower(),
-                "boss_id": str(row.get("boss_id") or "").strip().lower(),
-                "boss_name": str(row.get("boss_name_canonical") or row.get("boss_name") or "").strip().lower() or None,
-            }
-            for row in dropped.head(10).to_dict(orient="records")
-        ]
-        logger.warning(
-            "[silver/bosses] dropping bosses without encounter pools count=%s sample=%s",
-            len(dropped),
-            sample,
-        )
-
-    return filtered
-
-
-def _normalize_boss_teams_with_conditional_striaton(
-    boss_teams: list[dict[str, Any]],
-    boss_move_data: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not boss_teams:
-        return boss_teams, boss_move_data
-
-    normalized_teams: list[dict[str, Any]] = []
-
-    def _source_priority(team: dict[str, Any]) -> tuple[int, str]:
-        game_version = str(team.get("game_version") or "").strip().lower()
-        priority = 0 if game_version == "black" else 1 if game_version == "white" else 2
-        return (priority, str(team.get("team_id") or ""))
-
-    striaton_candidates: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for team in boss_teams:
-        game_version = str(team.get("game_version") or "").strip().lower()
-        boss_name = normalize_key_part(team.get("boss_name") or team.get("gym"))
-        if game_version in {"black", "white"} and boss_name in {"chili", "cilan", "cress"}:
-            striaton_candidates[boss_name].append(team)
-            continue
-        cloned = dict(team)
-        if boss_name and game_version:
-            cloned["boss_id"] = boss_id(game_version, boss_name)
-        normalized_teams.append(cloned)
-
-    condition_by_boss = {
-        normalize_key_part(entry["boss_name"]): str(entry["starter_condition"])
-        for entry in STRIATON_CONDITIONAL_BOSSES
-    }
-    for boss_name, candidates in sorted(striaton_candidates.items()):
-        chosen = min(candidates, key=_source_priority)
-        cloned = dict(chosen)
-        cloned["team_id"] = boss_id("black-white", boss_name)
-        cloned["boss_id"] = cloned["team_id"]
-        cloned["game_version"] = "black-white"
-        cloned["boss_name"] = boss_name
-        cloned["gym"] = boss_name
-        cloned["starter_condition"] = condition_by_boss.get(boss_name)
-        original_member_ids = list(chosen.get("pokemon_instance_ids") or []) if isinstance(chosen.get("pokemon_instance_ids"), list) else []
-        member_ids = []
-        for slot, species in enumerate(list(cloned.get("pokemon") or []), start=1):
-            member_ids.append(make_pokemon_instance_id(cloned["team_id"], slot, normalize_species_slug(species)))
-        cloned["pokemon_instance_ids"] = member_ids
-        move_map = list(zip(original_member_ids, member_ids, strict=False))
-        cloned["_original_member_id_map"] = move_map
-        normalized_teams.append(cloned)
-
-    filtered_move_data: dict[str, Any] = {}
-    for team in normalized_teams:
-        member_ids = team.get("pokemon_instance_ids", [])
-        if not isinstance(member_ids, list):
-            continue
-        original_map = team.pop("_original_member_id_map", [])
-        if isinstance(original_map, list) and original_map:
-            for original_id, cloned_id in original_map:
-                payload = boss_move_data.get(str(original_id))
-                if payload is None:
-                    continue
-                remapped_payload = dict(payload)
-                remapped_payload["pokemon_instance_id"] = str(cloned_id)
-                remapped_payload["team_id"] = str(team.get("team_id") or "")
-                filtered_move_data[str(cloned_id)] = remapped_payload
-            continue
-        for member_id in member_ids:
-            payload = boss_move_data.get(str(member_id))
-            if payload is not None:
-                filtered_move_data[str(member_id)] = payload
-
-    return normalized_teams, filtered_move_data
-
-
-def _canonicalize_boss_teams_to_references(
-    boss_teams: list[dict[str, Any]],
-    boss_move_data: dict[str, Any],
-    bosses_reference_df: pd.DataFrame,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not boss_teams or bosses_reference_df.empty:
-        return boss_teams, boss_move_data
-
-    required_columns = {"game_version", "boss_name_canonical", "boss_name_kaggle"}
-    missing_columns = required_columns - set(bosses_reference_df.columns)
-    if missing_columns:
-        raise ValueError(f"bosses reference missing required columns for boss team canonicalization: {sorted(missing_columns)}")
-
-    reference_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    alias_to_reference_key: dict[tuple[str, str], tuple[str, str]] = {}
-
-    for row in bosses_reference_df.to_dict(orient="records"):
-        game_version = normalize_key_part(row.get("game_version"))
-        canonical_name_raw = str(row.get("boss_name_canonical") or "").strip()
-        canonical_name = normalize_key_part(canonical_name_raw)
-        if not game_version or not canonical_name:
-            continue
-
-        ref_key = (game_version, canonical_name)
-        reference_by_key[ref_key] = row
-
-        alias_values = _coerce_alias_values(row.get("boss_name_aliases"))
-        aliases = {
-            canonical_name,
-            normalize_key_part(row.get("boss_name_kaggle")),
-            *(normalize_key_part(alias) for alias in alias_values),
-            *(normalize_key_part(alias) for alias in BOSS_ALIASES.get(game_version, {}).get(canonical_name_raw, [])),
-        }
-        for alias in aliases:
-            if alias:
-                alias_to_reference_key[(game_version, alias)] = ref_key
-
-    selected_by_team_id: dict[str, dict[str, Any]] = {}
-    dropped_team_ids: set[str] = set()
-    unmatched_teams: list[dict[str, Any]] = []
-    grouped_candidates: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for team in boss_teams:
-        team_id = str(team.get("team_id") or "").strip()
-        game_version = normalize_key_part(team.get("game_version"))
-        boss_label = normalize_key_part(team.get("boss_name") or team.get("gym"))
-        reference_key = alias_to_reference_key.get((game_version, boss_label))
-        team_copy = dict(team)
-        team_copy["_raw_boss_label"] = boss_label
-        if reference_key is None:
-            unmatched_teams.append(team_copy)
-            continue
-
-        canonical_name = reference_key[1]
-        ref_row = reference_by_key[reference_key]
-        team_copy["boss_name"] = canonical_name
-        team_copy["boss_id"] = str(ref_row.get("boss_id") or team_copy.get("boss_id") or "").strip().lower()
-        grouped_candidates[reference_key].append(team_copy)
-
-    for reference_key, candidates in grouped_candidates.items():
-        ref_row = reference_by_key[reference_key]
-        alias_values = _coerce_alias_values(ref_row.get("boss_name_aliases"))
-        preferred_aliases = [
-            normalize_key_part(ref_row.get("boss_name_kaggle")),
-            reference_key[1],
-            *(normalize_key_part(alias) for alias in alias_values),
-            *(normalize_key_part(alias) for alias in BOSS_ALIASES.get(reference_key[0], {}).get(str(ref_row.get("boss_name_canonical") or "").strip(), [])),
-        ]
-
-        def _candidate_rank(team: dict[str, Any]) -> tuple[int, str]:
-            label = normalize_key_part(team.get("_raw_boss_label"))
-            try:
-                alias_rank = preferred_aliases.index(label)
-            except ValueError:
-                alias_rank = len(preferred_aliases)
-            return (alias_rank, str(team.get("team_id") or ""))
-
-        selected_team = min(candidates, key=_candidate_rank)
-        selected_team_id = str(selected_team.get("team_id") or "").strip()
-        if selected_team_id:
-            selected_by_team_id[selected_team_id] = selected_team
-
-        if len(candidates) > 1:
-            duplicate_ids = [str(team.get("team_id") or "").strip() for team in candidates if str(team.get("team_id") or "").strip()]
-            dropped_ids = [team_id for team_id in duplicate_ids if team_id != selected_team_id]
-            dropped_team_ids.update(dropped_ids)
-            logger.warning(
-                "[silver/teams] collapsed duplicate boss variants game=%s canonical_boss=%s kept_team_id=%s dropped_team_ids=%s",
-                reference_key[0],
-                reference_key[1],
-                selected_team_id,
-                dropped_ids,
-            )
-
-    canonicalized_teams: list[dict[str, Any]] = []
-    for team in boss_teams:
-        team_id = str(team.get("team_id") or "").strip()
-        if not team_id or team_id in dropped_team_ids:
-            continue
-        selected = selected_by_team_id.get(team_id)
-        if selected is not None:
-            selected.pop("_raw_boss_label", None)
-            canonicalized_teams.append(selected)
-
-    if unmatched_teams:
-        logger.warning(
-            "[silver/teams] dropped boss teams without matching boss reference rows count=%s sample=%s",
-            len(unmatched_teams),
-            [
-                {
-                    "game_version": str(team.get("game_version") or "").strip().lower(),
-                    "boss_id": str(team.get("boss_id") or "").strip().lower(),
-                    "boss_name": str(team.get("boss_name") or team.get("gym") or "").strip().lower(),
-                }
-                for team in unmatched_teams[:10]
-            ],
-        )
-
-    selected_member_ids = {
-        str(member_id).strip()
-        for team in canonicalized_teams
-        for member_id in (team.get("pokemon_instance_ids", []) if isinstance(team.get("pokemon_instance_ids"), list) else [])
-        if str(member_id).strip()
-    }
-    filtered_move_data = {
-        member_id: payload
-        for member_id, payload in boss_move_data.items()
-        if member_id in selected_member_ids
-    }
-
-    return canonicalized_teams, filtered_move_data
-
-
-def _extract_pokeapi_id_from_source_url(source_url: str) -> int | None:
-    normalized = str(source_url or "").strip().lower()
-    match = re.search(r"(?:/pokemon/|pokebase://pokemon/)(\d+)/?$", normalized)
-    if match is None:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_requested_pokemon_name(value: Any) -> str:
-    normalized = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
-    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
-    if normalized in INVALID_NORMALIZED_POKEMON_TOKENS:
-        return ""
-    return normalized
-
-
-def _species_resolution_candidates(normalized_name: str) -> list[str]:
-    parts = [part for part in normalized_name.split("-") if part]
-    candidates: list[str] = []
-    for length in range(len(parts), 0, -1):
-        candidate = "-".join(parts[:length]).strip("-")
-        if candidate:
-            candidates.append(candidate)
-    return list(dict.fromkeys(candidates))
-
-
-def _normalize_pokebase_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _normalize_pokebase_payload(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_normalize_pokebase_payload(item) for item in value]
-    if isinstance(value, tuple):
-        return [_normalize_pokebase_payload(item) for item in value]
-    if hasattr(value, "__dict__"):
-        raw = dict(getattr(value, "__dict__", {}) or {})
-        return {key: _normalize_pokebase_payload(item) for key, item in raw.items()}
-    return value
-
-
-def _profile_from_pokemon_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    types_sorted = sorted(
-        (
-            entry for entry in payload.get("types", [])
-            if isinstance(entry, dict)
-        ),
-        key=lambda entry: int(entry.get("slot") or 999),
-    )
-    type_names = [
-        str((entry.get("type") or {}).get("name") or "").strip().lower()
-        for entry in types_sorted
-        if str((entry.get("type") or {}).get("name") or "").strip()
-    ]
-
-    stats_payload = {
-        column: None
-        for column in STAT_NAME_TO_COLUMN.values()
-    }
-    for stat_entry in payload.get("stats", []):
-        if not isinstance(stat_entry, dict):
-            continue
-        stat_name = str((stat_entry.get("stat") or {}).get("name") or "").strip().lower()
-        column_name = STAT_NAME_TO_COLUMN.get(stat_name)
-        if column_name is None:
-            continue
-        try:
-            stats_payload[column_name] = int(stat_entry.get("base_stat"))
-        except (TypeError, ValueError):
-            stats_payload[column_name] = None
-
-    pokeapi_id = payload.get("id")
-    try:
-        pokeapi_id_value = int(pokeapi_id)
-    except (TypeError, ValueError):
-        pokeapi_id_value = None
-
-    species_name = str(((payload.get("species") or {}).get("name")) or payload.get("name") or "").strip().lower()
-    species_slug = normalize_species_slug(species_name)
-    profile_name = str(payload.get("name") or species_slug).strip().lower()
-
-    return {
-        "name": profile_name,
-        "pokemon_species": species_slug or profile_name,
-        "pokeapi_id": pokeapi_id_value,
-        "source_url": f"pokebase://pokemon/{pokeapi_id_value}" if pokeapi_id_value is not None else None,
-        "type_1": type_names[0] if type_names else None,
-        "type_2": type_names[1] if len(type_names) > 1 else None,
-        **stats_payload,
-        "height": payload.get("height"),
-        "weight": payload.get("weight"),
-        "base_experience": payload.get("base_experience"),
-        "is_default": payload.get("is_default"),
-    }
-
-
-def _species_classification_from_payload(payload: dict[str, Any] | None) -> dict[str, bool | None]:
-    if not isinstance(payload, dict):
-        return {
-            "is_legendary": None,
-            "is_mythical": None,
-        }
-    return {
-        "is_legendary": bool(payload.get("is_legendary")),
-        "is_mythical": bool(payload.get("is_mythical")),
-    }
-
-
-def _has_complete_pokemon_profile_payload(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    try:
-        int(payload.get("id"))
-    except (TypeError, ValueError):
-        return False
-    types = payload.get("types")
-    stats = payload.get("stats")
-    if not isinstance(types, list) or not types:
-        return False
-    if not isinstance(stats, list) or not stats:
-        return False
-    return True
-
-
-def _resolve_requested_pokemon_profile(
-    requested_name: str,
-    fetch_resource: Callable[[str, str | int], dict[str, Any] | None],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    normalized_requested_name = _normalize_requested_pokemon_name(requested_name)
-    lineage_base: dict[str, Any] = {
-        "requested_pokemon_name": str(requested_name or "").strip(),
-        "normalized_requested_name": normalized_requested_name,
-        "normalized_species": None,
-        "resolved_pokemon_name": None,
-        "resolved_pokeapi_id": None,
-        "is_default_variety": None,
-        "resolution_method": None,
-        "resolution_warning": None,
-    }
-    if not normalized_requested_name:
-        lineage = dict(lineage_base)
-        lineage["resolution_warning"] = "empty_requested_name"
-        return None, lineage
-
-    pokemon_payload = fetch_resource("pokemon", normalized_requested_name)
-    if _has_complete_pokemon_profile_payload(pokemon_payload):
-        profile = _profile_from_pokemon_payload(pokemon_payload)
-        species_payload = None
-        species_name = _normalize_requested_pokemon_name(((pokemon_payload.get("species") or {}).get("name")) or "")
-        if species_name:
-            species_payload = fetch_resource("pokemon-species", species_name)
-        normalized_species = normalize_species_slug(((pokemon_payload.get("species") or {}).get("name")) or profile.get("pokemon_species") or "")
-        profile.update(
-            {
-                "pokemon_species": normalized_requested_name,
-                "name": normalized_requested_name,
-                "requested_pokemon_name": lineage_base["requested_pokemon_name"],
-                "normalized_requested_name": normalized_requested_name,
-                "normalized_species": normalized_species or normalize_species_slug(normalized_requested_name),
-                "resolved_pokemon_name": str(profile.get("name") or "").strip().lower() or normalized_requested_name,
-                "resolved_pokeapi_id": profile.get("pokeapi_id"),
-                "is_default_variety": bool(pokemon_payload.get("is_default")),
-                **_species_classification_from_payload(species_payload),
-                "resolution_method": "pokemon_exact",
-                "resolution_warning": None,
-            }
-        )
-        return profile, None
-
-    species_payload: dict[str, Any] | None = None
-    species_candidate: str | None = None
-    for candidate in _species_resolution_candidates(normalized_requested_name):
-        species_payload = fetch_resource("pokemon-species", candidate)
-        if species_payload is not None:
-            species_candidate = candidate
-            break
-    used_alias_fallback = False
-    if species_payload is None:
-        alias_candidate = POKEMON_RESOLUTION_ALIAS_FALLBACKS.get(normalized_requested_name)
-        if alias_candidate:
-            species_payload = fetch_resource("pokemon-species", alias_candidate)
-            if species_payload is not None:
-                species_candidate = alias_candidate
-                used_alias_fallback = True
-
-    if species_payload is None:
-        lineage = dict(lineage_base)
-        lineage["resolution_warning"] = "unresolved_after_pokemon_species_alias_fallback"
-        return None, lineage
-
-    normalized_species = normalize_species_slug(species_payload.get("name") or species_candidate or normalized_requested_name)
-    default_variety_name: str | None = None
-    for variety in species_payload.get("varieties", []):
-        if not isinstance(variety, dict):
-            continue
-        if bool(variety.get("is_default")):
-            default_variety_name = _normalize_requested_pokemon_name(((variety.get("pokemon") or {}).get("name")) or "")
-            break
-    if not default_variety_name:
-        lineage = dict(lineage_base)
-        lineage.update(
-            {
-                "normalized_species": normalized_species,
-                "resolution_method": "species_default_variety",
-                "resolution_warning": "species_without_default_variety",
-            }
-        )
-        return None, lineage
-
-    default_payload = fetch_resource("pokemon", default_variety_name)
-    if default_payload is None:
-        lineage = dict(lineage_base)
-        lineage.update(
-            {
-                "normalized_species": normalized_species,
-                "resolved_pokemon_name": default_variety_name,
-                "resolution_method": "species_default_variety",
-                "resolution_warning": "default_variety_profile_lookup_failed",
-            }
-        )
-        return None, lineage
-
-    profile = _profile_from_pokemon_payload(default_payload)
-    profile.update(
-        {
-            "pokemon_species": normalized_requested_name,
-            "name": normalized_requested_name,
-            "requested_pokemon_name": lineage_base["requested_pokemon_name"],
-            "normalized_requested_name": normalized_requested_name,
-            "normalized_species": normalized_species or normalize_species_slug(default_variety_name),
-            "resolved_pokemon_name": str(profile.get("name") or "").strip().lower() or default_variety_name,
-            "resolved_pokeapi_id": profile.get("pokeapi_id"),
-            "is_default_variety": bool(default_payload.get("is_default")),
-            **_species_classification_from_payload(species_payload),
-            "resolution_method": "alias_species_default_variety" if used_alias_fallback else "species_default_variety",
-            "resolution_warning": None,
-        }
-    )
-    return profile, None
-
-
-def _build_enriched_pokemon_profiles(
-    all_pokemon_references: dict[str, Any],
-    required_species: set[str],
-    silver_dir: Path = SILVER_DIR,
-) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    profiles_by_requested: dict[str, dict[str, Any]] = {}
-    diagnostics: list[dict[str, Any]] = []
-    normalized_required_species = sorted(
-        {
-            normalized
-            for species in required_species
-            if species is not None and not pd.isna(species)
-            for normalized in [_normalize_requested_pokemon_name(species)]
-            if normalized
-        }
-    )
-    def _fetch_resource(endpoint: str, resource_name_or_id: str | int) -> dict[str, Any] | None:
-        endpoint_name = str(endpoint or "").strip().lower()
-        if not endpoint_name:
-            return None
-        try:
-            payload = pokebase_get_data(endpoint_name, resource_name_or_id)
-        except Exception:
-            return None
-        normalized = _normalize_pokebase_payload(payload)
-        return normalized if isinstance(normalized, dict) and normalized else None
-
-    for species in normalized_required_species:
-        requested_species = _normalize_requested_pokemon_name(species)
-        if not requested_species:
-            continue
-        payload = all_pokemon_references.get(requested_species, {}) if isinstance(all_pokemon_references.get(requested_species), dict) else {}
-        source_url = str(payload.get("url") or payload.get("source_url") or "").strip()
-        reference_name = _normalize_requested_pokemon_name(payload.get("name") or requested_species)
-        profile, failure = _resolve_requested_pokemon_profile(
-            reference_name or requested_species,
-            fetch_resource=_fetch_resource,
-        )
-        if profile is None:
-            diagnostics.append(
-                {
-                    "requested_pokemon_name": requested_species,
-                    "normalized_requested_name": requested_species,
-                    "source_url": source_url or None,
-                    **(failure or {"resolution_warning": "unknown_resolution_failure"}),
-                }
-            )
-            continue
-        profiles_by_requested[requested_species] = profile
-
-    return pd.DataFrame(list(profiles_by_requested.values())), diagnostics
-
-
-def _validate_and_persist_pokemon_data_contract(
-    pokemon_data_df: pd.DataFrame,
-    diagnostics_dir: Path,
-    required_species: set[str],
-) -> None:
-    normalized_required_species = {
-        normalized
-        for species in required_species
-        if species is not None and not pd.isna(species)
-        for normalized in [normalize_species_slug(species)]
-        if normalized not in INVALID_NORMALIZED_POKEMON_TOKENS
-    }
-    present_species = {
-        normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
-        for row in pokemon_data_df.to_dict(orient="records")
-        if normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
-    }
-    missing_species = sorted(species for species in normalized_required_species if species not in present_species)
-    if missing_species:
-        missing_frame = pd.DataFrame(
-            [
-                {
-                    "pokemon_species": species,
-                    "requested_pokemon_name": species,
-                    "normalized_requested_name": species,
-                    "resolution_warning": "missing_profile",
-                    "error": "missing_profile",
-                }
-                for species in missing_species
-            ]
-        )
-        pokemon_data_df = pd.concat([pokemon_data_df, missing_frame], ignore_index=True)
-
-    for column in (
-        "requested_pokemon_name",
-        "normalized_requested_name",
-        "normalized_species",
-        "resolved_pokemon_name",
-        "resolved_pokeapi_id",
-        "is_default_variety",
-        "resolution_method",
-        "resolution_warning",
-    ):
-        if column not in pokemon_data_df.columns:
-            pokemon_data_df[column] = None
-
-    unresolved_default_species = pokemon_data_df[
-        pokemon_data_df["resolution_warning"].astype("string").fillna("").eq("species_without_default_variety")
-    ]
-    if not unresolved_default_species.empty:
-        unresolved = ",".join(sorted(unresolved_default_species["normalized_requested_name"].astype("string").dropna().tolist())[:20])
-        raise ValueError(
-            "Silver pokemon profile resolution failed: species had no default variety "
-            f"count={len(unresolved_default_species)} first_20=[{unresolved}]"
-        )
-
-    incomplete_mask = pd.Series(False, index=pokemon_data_df.index)
-    for column in POKEMON_COMBAT_REQUIRED_COLUMNS:
-        if column not in pokemon_data_df.columns:
-            incomplete_mask = pd.Series(True, index=pokemon_data_df.index)
-            continue
-        incomplete_mask = incomplete_mask | pokemon_data_df[column].isna()
-        if pd.api.types.is_object_dtype(pokemon_data_df[column]) or pd.api.types.is_string_dtype(pokemon_data_df[column]):
-            stripped = pokemon_data_df[column].astype("string").str.strip()
-            incomplete_mask = incomplete_mask | stripped.eq("")
-    incomplete_mask = incomplete_mask | pokemon_data_df["resolved_pokeapi_id"].isna()
-    incomplete_mask = incomplete_mask | pokemon_data_df["resolved_pokemon_name"].astype("string").str.strip().eq("")
-
-    incomplete_rows = pokemon_data_df[incomplete_mask].copy()
-    diagnostics_path = diagnostics_dir / "incomplete_pokemon_profiles.csv"
-    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    incomplete_rows.to_csv(diagnostics_path, index=False)
-
-    if incomplete_rows.empty:
-        return
-
-    impacted_species = [
-        normalize_species_slug(value)
-        for value in incomplete_rows.get("pokemon_species", pd.Series([], dtype="object")).fillna("")
-        if normalize_species_slug(value)
-    ]
-    preview = ",".join(sorted(dict.fromkeys(impacted_species))[:20])
-    raise ValueError(
-        "Silver pokemon_data contract violation: "
-        f"incomplete_rows={len(incomplete_rows)} first_20_species=[{preview}] "
-        f"diagnostics={diagnostics_path}"
-    )
 
 
 def _validate_progression_source_team_boss_targets(
@@ -1021,683 +234,11 @@ def _validate_boss_team_targets(
     )
 
 
-def _move_profiles_from_reference(move_reference_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    profiles: dict[str, dict[str, Any]] = {}
-    for row in move_reference_df.to_dict(orient="records"):
-        move_name = normalize_move_name(row.get("move_name"))
-        if not move_name:
-            continue
-        raw_power = row.get("power")
-        if isinstance(raw_power, float) and pd.isna(raw_power):
-            raw_power = None
-        effective_power, power_handling = resolve_effective_power(
-            move_name=move_name,
-            power=raw_power,
-            damage_class=row.get("damage_class"),
-        )
-        stored_effective_power = row.get("effective_power", effective_power)
-        if isinstance(stored_effective_power, float) and pd.isna(stored_effective_power):
-            stored_effective_power = effective_power
-        stored_power_handling = row.get("power_handling", power_handling)
-        if not isinstance(stored_power_handling, str) or not stored_power_handling.strip():
-            stored_power_handling = power_handling
-        profiles[move_name] = {
-            "move_name": move_name,
-            "type": str(row.get("type") or "Normal"),
-            "power": raw_power,
-            "raw_power": raw_power,
-            "damage_class": str(row.get("damage_class") or "status"),
-            "accuracy": row.get("accuracy"),
-            "pp": row.get("pp"),
-            "effective_power": stored_effective_power,
-            "power_handling": stored_power_handling,
-            "is_status_move": row.get("is_status_move", str(row.get("damage_class") or "").strip().lower() == "status"),
-            "is_damage_move": row.get("is_damage_move", effective_power > 0),
-            "is_null_power": row.get("is_null_power", raw_power is None),
-            "level_learned_at": 0,
-            "version_group": "reference",
-        }
-    return profiles
-
-
-def _ensure_moves_in_combat_profiles(
-    move_data: dict[str, dict[str, Any]],
-    required_moves: set[str],
-    move_reference_profiles: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    enriched = {key: dict(value) for key, value in move_data.items()}
-    if not required_moves:
-        return enriched
-
-    available_moves: set[str] = set()
-    for payload in enriched.values():
-        details = payload.get("move_details")
-        if not isinstance(details, dict):
-            continue
-        for move in details.keys():
-            move_name = normalize_move_name(move)
-            if move_name:
-                available_moves.add(move_name)
-
-    missing_moves = sorted(move for move in required_moves if move and move not in available_moves)
-    if not missing_moves:
-        return enriched
-
-    if not enriched:
-        return enriched
-
-    first_key = next(iter(enriched))
-    first_payload = dict(enriched[first_key])
-    move_details = dict(first_payload.get("move_details") or {})
-    for move in missing_moves:
-        profile = move_reference_profiles.get(move)
-        if profile is None:
-            continue
-        move_details[move] = profile
-    first_payload["move_details"] = move_details
-    enriched[first_key] = first_payload
-    return enriched
-
-
-def _build_bootstrap_move_entries(
-    records_with_game_keys: list[tuple[str, list[dict[str, Any]]]],
-) -> list[tuple[str, int, str, list[str]]]:
-    bootstrap_entries: list[tuple[str, int, str, list[str]]] = []
-    for game_key, records in records_with_game_keys:
-        for record in records:
-            reachable_encounters = record.get("reachable_location_encounters", {})
-            if isinstance(reachable_encounters, dict):
-                for encounters in reachable_encounters.values():
-                    if not isinstance(encounters, list):
-                        continue
-                    for encounter in encounters:
-                        if not isinstance(encounter, dict):
-                            continue
-                        species = str(encounter.get("species") or "").strip().lower()
-                        if not species:
-                            continue
-                        try:
-                            level = int(encounter.get("level_max") or encounter.get("level") or record.get("boss_avg_level") or 20)
-                        except (TypeError, ValueError):
-                            level = 20
-                        bootstrap_entries.append((species, max(level, 1), game_key, []))
-
-    deduped_entries: list[tuple[str, int, str, list[str]]] = []
-    seen: set[tuple[str, int, str]] = set()
-    for species, level, game_version, moves in bootstrap_entries:
-        key = (str(species).strip().lower(), int(level), str(game_version).strip().lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped_entries.append((species, level, game_version, moves))
-    return deduped_entries
-
-
-def _collect_starter_chain_species_by_game(
-    games_config: list[dict[str, Any]],
-) -> dict[str, set[str]]:
-    starter_species_by_game: dict[str, set[str]] = {}
-    for game in games_config:
-        game_key = str(game.get("game_key") or "").strip().lower()
-        if not game_key:
-            continue
-        species_set = starter_species_by_game.setdefault(game_key, set())
-        for starter in get_starter_choices(game_key):
-            starter_slug = normalize_species_slug(starter)
-            if starter_slug:
-                species_set.add(starter_slug)
-            try:
-                rules = get_species_evolution_rules(starter_slug)
-            except Exception:  # noqa: BLE001
-                rules = {}
-            if rules:
-                for species_name in rules.keys():
-                    species_slug = normalize_species_slug(species_name)
-                    if species_slug:
-                        species_set.add(species_slug)
-            else:
-                for species_name in get_starter_family_members(starter_slug):
-                    species_slug = normalize_species_slug(species_name)
-                    if species_slug:
-                        species_set.add(species_slug)
-    return starter_species_by_game
-
-
-def _starter_chain_bootstrap_entries(
-    starter_chain_species_by_game: dict[str, set[str]],
-) -> list[tuple[str, int, str, list[str]]]:
-    entries: list[tuple[str, int, str, list[str]]] = []
-    for game_version in sorted(starter_chain_species_by_game):
-        for species in sorted(starter_chain_species_by_game[game_version]):
-            entries.append((species, 100, game_version, []))
-    return entries
-
-
-def _all_starter_family_bootstrap_entries(
-    games_config: list[dict[str, Any]],
-) -> list[tuple[str, int, str, list[str]]]:
-    game_keys = sorted(
-        {
-            str(game.get("game_key") or "").strip().lower()
-            for game in games_config
-            if str(game.get("game_key") or "").strip()
-        }
-    )
-    if not game_keys:
-        return []
-
-    starter_bases = sorted(
-        {
-            normalize_species_slug(starter)
-            for game_key in game_keys
-            for starter in get_starter_choices(game_key)
-            if normalize_species_slug(starter)
-        }
-    )
-    family_species: set[str] = set()
-    for base in starter_bases:
-        family_species.add(base)
-        for species_name in get_starter_family_members(base):
-            species_slug = normalize_species_slug(species_name)
-            if species_slug:
-                family_species.add(species_slug)
-
-    entries: list[tuple[str, int, str, list[str]]] = []
-    for game_version in game_keys:
-        for species in sorted(family_species):
-            entries.append((species, 100, game_version, []))
-    return entries
-
-
-def _species_by_game_from_bootstrap_entries(
-    entries: list[tuple[str, int, str, list[str]]],
-) -> dict[str, set[str]]:
-    species_by_game: dict[str, set[str]] = {}
-    for species, _, game_version, _ in entries:
-        game_key = str(game_version or "").strip().lower()
-        species_slug = normalize_species_slug(species)
-        if not game_key or not species_slug:
-            continue
-        species_by_game.setdefault(game_key, set()).add(species_slug)
-    return species_by_game
-
-
-def _collect_missing_learnable_species_pairs(
-    learnable_moves_df: pd.DataFrame,
-    species_by_game: dict[str, set[str]],
-    *,
-    reason: str,
-) -> list[dict[str, Any]]:
-    observed_pairs = {
-        (
-            str(row.get("game_version") or "").strip().lower(),
-            normalize_species_slug(row.get("pokemon_species") or ""),
-        )
-        for row in learnable_moves_df.to_dict(orient="records")
-        if str(row.get("game_version") or "").strip() and normalize_species_slug(row.get("pokemon_species") or "")
-    }
-
-    missing_rows: list[dict[str, Any]] = []
-    for game_version in sorted(species_by_game):
-        for species in sorted(species_by_game[game_version]):
-            if (game_version, species) not in observed_pairs:
-                missing_rows.append(
-                    {
-                        "species_name": species,
-                        "game_version": game_version,
-                        "reason": reason,
-                    }
-                )
-    return missing_rows
-
-
-def _validate_starter_chain_move_coverage(
-    learnable_moves_df: pd.DataFrame,
-    starter_chain_species_by_game: dict[str, set[str]],
-    diagnostics_dir: Path,
-) -> list[dict[str, Any]]:
-    missing_rows = _collect_missing_learnable_species_pairs(
-        learnable_moves_df,
-        starter_chain_species_by_game,
-        reason="starter_chain_missing_moves",
-    )
-
-    diagnostics_path = diagnostics_dir / "starter_chain_move_gaps.csv"
-    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
-
-    if missing_rows:
-        preview = ", ".join(
-            f"{row['game_version']}:{row['species_name']}"
-            for row in missing_rows[:20]
-        )
-        raise ValueError(
-            "Starter-chain move reference validation failed: "
-            f"missing_species_count={len(missing_rows)} "
-            f"first_20=[{preview}] "
-            f"diagnostics={diagnostics_path}"
-        )
-
-    return missing_rows
-
-
-def _validate_universal_starter_family_move_coverage(
-    learnable_moves_df: pd.DataFrame,
-    universal_starter_species_by_game: dict[str, set[str]],
-    diagnostics_dir: Path,
-) -> list[dict[str, Any]]:
-    missing_rows = _collect_missing_learnable_species_pairs(
-        learnable_moves_df,
-        universal_starter_species_by_game,
-        reason="universal_starter_family_missing_moves",
-    )
-
-    diagnostics_path = diagnostics_dir / "starter_family_move_gaps.csv"
-    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(missing_rows).to_csv(diagnostics_path, index=False)
-
-    if missing_rows:
-        logger.warning(
-            "[silver/moves] universal starter-family coverage gaps detected; non-blocking check "
-            "missing_species_count=%s diagnostics=%s",
-            len(missing_rows),
-            diagnostics_path,
-        )
-
-    return missing_rows
-
-
-def _diagnose_player_missing_damaging_moves(
-    progression_source_teams: list[dict[str, Any]],
-    reference_context: Any,
-    diagnostics_dir: Path,
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for team in progression_source_teams:
-        game_version = str(team.get("game_version") or "").strip().lower()
-        boss_id = str(team.get("boss_id") or "").strip().lower()
-        source_team_id = str(team.get("source_team_id") or "").strip().lower()
-        pokemon = team.get("pokemon")
-        levels = team.get("levels")
-        if not game_version or not isinstance(pokemon, list):
-            continue
-
-        for idx, species in enumerate(pokemon, start=1):
-            species_slug = normalize_species_slug(species)
-            if not species_slug:
-                continue
-            raw_level = 1
-            if isinstance(levels, list) and idx - 1 < len(levels):
-                raw_level = levels[idx - 1]
-            try:
-                level = max(1, int(raw_level or 1))
-            except (TypeError, ValueError):
-                level = 1
-
-            damaging_moves = reference_context.damaging_moves(species_slug, level, game_version)
-            if damaging_moves:
-                continue
-
-            learnable_levels = reference_context.learnable_levels(species_slug, game_version)
-            moves_by_level = [
-                move_name
-                for move_name, learned_level in learnable_levels.items()
-                if int(learned_level) <= level
-            ]
-            if not learnable_levels:
-                reason = "missing_learnable_reference"
-            elif not moves_by_level:
-                reason = "no_learnable_moves_within_level_cap"
-            else:
-                reason = "learnable_moves_without_damage_profile"
-
-            rows.append(
-                {
-                    "game_version": game_version,
-                    "boss_id": boss_id or None,
-                    "source_team_id": source_team_id or None,
-                    "slot": idx,
-                    "pokemon_species": species_slug,
-                    "level": level,
-                    "learnable_move_count": len(learnable_levels),
-                    "learnable_within_level_cap": len(moves_by_level),
-                    "damaging_move_count": 0,
-                    "reason": reason,
-                }
-            )
-
-    diagnostics_path = diagnostics_dir / "player_no_damaging_move_gaps.csv"
-    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    diagnostics_df = pd.DataFrame(
-        rows,
-        columns=[
-            "game_version",
-            "boss_id",
-            "source_team_id",
-            "slot",
-            "pokemon_species",
-            "level",
-            "learnable_move_count",
-            "learnable_within_level_cap",
-            "damaging_move_count",
-            "reason",
-        ],
-    )
-    diagnostics_df.to_csv(diagnostics_path, index=False)
-
-    if not diagnostics_df.empty:
-        summary_df = (
-            diagnostics_df.groupby(["game_version", "pokemon_species", "level", "reason"], dropna=False)
-            .agg(
-                affected_team_count=("source_team_id", "nunique"),
-                affected_member_slots=("slot", "count"),
-                learnable_move_count_max=("learnable_move_count", "max"),
-                learnable_within_level_cap_max=("learnable_within_level_cap", "max"),
-            )
-            .reset_index()
-            .sort_values(
-                ["affected_member_slots", "affected_team_count", "game_version", "pokemon_species", "level"],
-                ascending=[False, False, True, True, True],
-            )
-        )
-    else:
-        summary_df = pd.DataFrame(
-            columns=[
-                "game_version",
-                "pokemon_species",
-                "level",
-                "reason",
-                "affected_team_count",
-                "affected_member_slots",
-                "learnable_move_count_max",
-                "learnable_within_level_cap_max",
-            ]
-        )
-    summary_df.to_csv(diagnostics_dir / "player_no_damaging_move_gaps_summary.csv", index=False)
-    return diagnostics_df
-
-
-def _build_progression_bootstrap_entries(
-    progression_source_teams: list[dict[str, Any]],
-) -> list[tuple[str, int, str, list[str]]]:
-    entries: list[tuple[str, int, str, list[str]]] = []
-    for team in progression_source_teams:
-        game_version = str(team.get("game_version") or "").strip().lower()
-        pokemon = team.get("pokemon")
-        levels = team.get("levels")
-        if not game_version or not isinstance(pokemon, list):
-            continue
-        for idx, species in enumerate(pokemon):
-            species_slug = normalize_species_slug(species)
-            if not species_slug:
-                continue
-            raw_level = 1
-            if isinstance(levels, list) and idx < len(levels):
-                raw_level = levels[idx]
-            try:
-                level = max(1, int(raw_level or 1))
-            except (TypeError, ValueError):
-                level = 1
-            entries.append((species_slug, level, game_version, []))
-    return entries
-
-
-def _build_evolution_rules_by_game_from_encounters(
-    encounters_df: pd.DataFrame,
-) -> dict[str, dict[str, dict[str, Any]]]:
-    rules_by_game: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    if encounters_df.empty:
-        return rules_by_game
-
-    required_columns = {"game", "pokemon"}
-    if not required_columns.issubset(encounters_df.columns):
-        return rules_by_game
-
-    normalized = encounters_df[list(required_columns)].copy()
-    normalized["game"] = normalized["game"].map(lambda value: str(value or "").strip().lower())
-    normalized["pokemon"] = normalized["pokemon"].map(normalize_species_slug)
-    normalized = normalized[(normalized["game"] != "") & (normalized["pokemon"] != "")]
-
-    for game_version, game_rows in normalized.groupby("game", dropna=False):
-        species_seen: set[str] = set()
-        for species in sorted(game_rows["pokemon"].dropna().unique().tolist()):
-            if not species or species in species_seen:
-                continue
-            species_seen.add(species)
-            try:
-                species_rules = get_species_evolution_rules(species)
-            except Exception:  # noqa: BLE001
-                species_rules = {}
-            if not isinstance(species_rules, dict):
-                continue
-            for species_name, payload in species_rules.items():
-                species_slug = normalize_species_slug(species_name)
-                if species_slug and isinstance(payload, dict):
-                    rules_by_game[str(game_version)][species_slug] = payload
-
-    return rules_by_game
-
-
-def _evolution_rules_rows_from_map(
-    evolution_rules_by_game: dict[str, dict[str, dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for game_version, species_map in evolution_rules_by_game.items():
-        game_key = normalize_key_part(game_version)
-        if not game_key or not isinstance(species_map, dict):
-            continue
-        for species_name, payload in species_map.items():
-            species_slug = normalize_species_slug(species_name)
-            if not species_slug or not isinstance(payload, dict):
-                continue
-            special_conditions = payload.get("special_evolution_conditions")
-            if isinstance(special_conditions, list):
-                serialized_conditions = special_conditions
-            elif special_conditions is None:
-                serialized_conditions = []
-            elif hasattr(special_conditions, "tolist"):
-                converted = special_conditions.tolist()
-                serialized_conditions = converted if isinstance(converted, list) else [converted]
-            else:
-                serialized_conditions = [special_conditions]
-            rows.append(
-                {
-                    "game_version": game_key,
-                    "species_name": species_slug,
-                    "base_species": normalize_species_slug(payload.get("base_species") or species_slug),
-                    "evolution_stage": int(payload.get("evolution_stage") or 1),
-                    "min_valid_level": payload.get("min_valid_level"),
-                    "min_level_from_previous": payload.get("min_level_from_previous"),
-                    "special_evolution_conditions_json": json.dumps(serialized_conditions, ensure_ascii=True),
-                }
-            )
-    return rows
-
-
-def _evolution_rules_map_from_rows(
-    evolution_rules_df: pd.DataFrame,
-) -> dict[str, dict[str, dict[str, Any]]]:
-    rules_by_game: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    if evolution_rules_df.empty:
-        return rules_by_game
-    required_columns = {
-        "game_version",
-        "species_name",
-        "base_species",
-        "evolution_stage",
-        "min_valid_level",
-        "min_level_from_previous",
-        "special_evolution_conditions_json",
-    }
-    if not required_columns.issubset(evolution_rules_df.columns):
-        return rules_by_game
-    for row in evolution_rules_df[list(required_columns)].to_dict(orient="records"):
-        game_version = normalize_key_part(row.get("game_version"))
-        species_name = normalize_species_slug(row.get("species_name"))
-        if not game_version or not species_name:
-            continue
-        raw_conditions = row.get("special_evolution_conditions_json")
-        try:
-            parsed_conditions = json.loads(str(raw_conditions or "[]"))
-            if not isinstance(parsed_conditions, list):
-                parsed_conditions = []
-        except Exception:  # noqa: BLE001
-            parsed_conditions = []
-        rules_by_game[game_version][species_name] = {
-            "species_name": species_name,
-            "base_species": normalize_species_slug(row.get("base_species") or species_name),
-            "evolution_stage": int(row.get("evolution_stage") or 1),
-            "min_valid_level": row.get("min_valid_level"),
-            "min_level_from_previous": row.get("min_level_from_previous"),
-            "special_evolution_conditions": parsed_conditions,
-        }
-    return rules_by_game
-
-
-def _dedupe_bootstrap_entries(
-    entries: list[tuple[str, int, str, list[str]]],
-) -> list[tuple[str, int, str, list[str]]]:
-    merged: dict[tuple[str, int, str], list[str]] = {}
-    for species, level, game_version, moves in entries:
-        key = (normalize_species_slug(species), max(1, int(level)), str(game_version).strip().lower())
-        if not key[0] or not key[2]:
-            continue
-        slot = merged.setdefault(key, [])
-        for move in moves:
-            normalized_move = normalize_move_name(move)
-            if normalized_move and normalized_move not in slot:
-                slot.append(normalized_move)
-
-    return [
-        (species, level, game_version, moves)
-        for (species, level, game_version), moves in merged.items()
-    ]
-
-
-def _build_kaggle_bootstrap_entries(
-    kaggle_rows_by_game: dict[str, list[dict[str, Any]]],
-    learnable_moves_df: pd.DataFrame | None = None,
-    move_reference_df: pd.DataFrame | None = None,
-) -> list[tuple[str, int, str, list[str]]]:
-    existing_pairs: set[tuple[str, str]] = set()
-    existing_moves: set[str] = set()
-    if learnable_moves_df is not None and not learnable_moves_df.empty:
-        required_columns = {"game_version", "pokemon_species"}
-        if required_columns.issubset(learnable_moves_df.columns):
-            for row in learnable_moves_df.to_dict(orient="records"):
-                game_version = str(row.get("game_version") or "").strip().lower()
-                species = normalize_species_slug(row.get("pokemon_species"))
-                if game_version and species:
-                    existing_pairs.add((game_version, species))
-    if move_reference_df is not None and not move_reference_df.empty and "move_name" in move_reference_df.columns:
-        existing_moves = {
-            normalize_move_name(row.get("move_name"))
-            for row in move_reference_df.to_dict(orient="records")
-            if normalize_move_name(row.get("move_name"))
-        }
-
-    entries: list[tuple[str, int, str, list[str]]] = []
-    for game_key, rows in kaggle_rows_by_game.items():
-        game_norm = str(game_key or "").strip().lower()
-        if not game_norm:
-            continue
-        for row in rows:
-            species = normalize_species_slug(row.get("Pokemon") or "")
-            if not species:
-                continue
-            try:
-                level = int(row.get("Level") or 20)
-            except (TypeError, ValueError):
-                level = 20
-            moves = [
-                normalize_move_name(row.get("Move 1", "")),
-                normalize_move_name(row.get("Move 2", "")),
-                normalize_move_name(row.get("Move 3", "")),
-                normalize_move_name(row.get("Move 4", "")),
-            ]
-            normalized_moves = [move for move in moves if move]
-            if (game_norm, species) in existing_pairs and all(move in existing_moves for move in normalized_moves):
-                continue
-            entries.append((species, max(level, 1), game_norm, normalized_moves))
-    return entries
-
-
-def _validate_kaggle_moves_in_move_reference(
-    kaggle_rows_by_game: dict[str, list[dict[str, Any]]],
-    move_reference_df: pd.DataFrame,
-    diagnostics_dir: Path,
-) -> None:
-    move_reference_moves = {
-        normalize_move_name(row.get("move_name"))
-        for row in move_reference_df.to_dict(orient="records")
-        if normalize_move_name(row.get("move_name"))
-    }
-
-    missing_rows: list[dict[str, Any]] = []
-    move_columns = ("Move 1", "Move 2", "Move 3", "Move 4")
-    for game_key, rows in sorted(kaggle_rows_by_game.items()):
-        game_norm = str(game_key or "").strip().lower()
-        for row in rows:
-            species_slug = normalize_species_slug(row.get("Pokemon") or "")
-            for move_column in move_columns:
-                normalized_move = normalize_move_name(row.get(move_column) or "")
-                if not normalized_move:
-                    continue
-                if normalized_move in move_reference_moves:
-                    continue
-                missing_rows.append(
-                    {
-                        "game_version": game_norm,
-                        "pokemon_species": species_slug,
-                        "move_name": normalized_move,
-                        "source_column": move_column,
-                        "reason": "kaggle_move_missing_from_move_reference",
-                    }
-                )
-
-    diagnostics_path = diagnostics_dir / "kaggle_move_reference_gaps.csv"
-    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        missing_rows,
-        columns=["game_version", "pokemon_species", "move_name", "source_column", "reason"],
-    ).to_csv(diagnostics_path, index=False)
-
-    if missing_rows:
-        preview = ", ".join(
-            f"{row['game_version']}:{row['pokemon_species']}:{row['move_name']}"
-            for row in missing_rows[:20]
-        )
-        raise ValueError(
-            "Kaggle move reference validation failed: "
-            f"missing_moves={len(missing_rows)} "
-            f"first_20=[{preview}] "
-            f"diagnostics={diagnostics_path}"
-        )
-
-
-def _collect_missing_bootstrap_move_hints(
-    entries: list[tuple[str, int, str, list[str]]],
-    move_reference_df: pd.DataFrame,
-) -> set[str]:
-    present_moves = {
-        normalize_move_name(row.get("move_name"))
-        for row in move_reference_df.to_dict(orient="records")
-        if normalize_move_name(row.get("move_name"))
-    }
-    required_moves = {
-        normalize_move_name(move)
-        for _, _, _, moves in entries
-        for move in moves
-        if normalize_move_name(move)
-    }
-    return {move for move in required_moves if move not in present_moves}
-
-
 def _build_boss_compact_tables(
     boss_teams: list[dict[str, Any]],
     move_data: dict[str, Any],
     *,
-    progression_depth_context: ProgressionDepthContext | None = None,
+    progression_depth_context: Any | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     del move_data
 
@@ -1959,6 +500,35 @@ def build_silver_from_bronze(
 ) -> None:
     started_at = time.perf_counter()
     stage_durations: dict[str, float] = {}
+
+    def _stage_checkpoint(stage: str, **details: Any) -> None:
+        elapsed = time.perf_counter() - started_at
+        payload = " ".join(f"{key}={value}" for key, value in details.items())
+        logger.info("[silver/progress] stage=%s elapsed_s=%.2f %s", stage, elapsed, payload)
+
+    _stage_checkpoint("init", hard_cleanup=int(bool(hard_cleanup)))
+    from src.pipeline.silver.inputs.builders.team_compaction import (
+        build_player_team_compact_tables,
+    )
+    from src.pipeline.silver.inputs.builders.team_selection import (
+        build_progression_source_teams_from_encounters,
+    )
+    from src.pipeline.silver.inputs.connectors.pokeapi_moves import (
+        bootstrap_move_reference_cache,
+        persist_move_reference_cache,
+    )
+    from src.pipeline.silver.inputs.kaggle_boss_mapping import load_kaggle_rows_by_game
+    from src.pipeline.silver.inputs.sources.boss_teams import load_kaggle_boss_rows_by_game
+    from src.pipeline.silver.orchestration.stages import run_parse_stage
+    from src.pipeline.silver.orchestration.references_stage import cleanup_simulation_shards
+    from src.pipeline.silver.orchestration.teams_stage import group_teams_by_game
+    from src.pipeline.silver.transforms.normalized_tables import build_games_table, build_locations_table
+    from src.pipeline.silver.transforms.progression_depth import (
+        build_boss_level_table_with_mapping,
+        build_progression_depth_context,
+        build_progression_depth_table,
+    )
+
     ensure_medallion_dirs()
 
     type_chart_path = bronze_dir / "type_chart.json"
@@ -1978,8 +548,9 @@ def build_silver_from_bronze(
 
     if hard_cleanup:
         for cleanup_path in (snapshots_dir, mappings_dir, references_dir, diagnostics_dir, simulation_dir):
-            _remove_if_exists(cleanup_path)
+            _remove_path_if_exists(cleanup_path)
             cleanup_path.mkdir(parents=True, exist_ok=True)
+        _stage_checkpoint("hard_cleanup_done")
 
     location_index_path = bronze_dir / "pokeapi" / "location_index.json"
     bulbapedia_dir = bronze_dir / "bulbapedia"
@@ -1990,6 +561,7 @@ def build_silver_from_bronze(
         bulbapedia_dir=bulbapedia_dir,
         kaggle_csv_path=kaggle_csv_path,
     )
+    _stage_checkpoint("inputs_validated")
 
     games_config = get_games_config()
     allowed_versions = {game["game_key"] for game in games_config}
@@ -2048,6 +620,7 @@ def build_silver_from_bronze(
         logger.info("[silver] incremental skip; input signature unchanged")
         return
 
+    _stage_checkpoint("parse_start")
     location_index = cast(dict[str, Any], read_json(location_index_path))
     mapper = LocationMapper(location_index)
     kaggle_rows_by_game = load_kaggle_rows_by_game(bronze_dir)
@@ -2056,6 +629,7 @@ def build_silver_from_bronze(
     parse_started_at = time.perf_counter()
     parse_output = run_parse_stage(game_files=sorted(bulbapedia_dir.glob("*.json")), mapper=mapper, kaggle_rows_by_game=kaggle_rows_by_game)
     stage_durations["parse_stage_s"] = time.perf_counter() - parse_started_at
+    _stage_checkpoint("parse_done", records=len(parse_output.all_records), games=len(parse_output.records_with_game_keys))
 
     all_records = parse_output.all_records
     all_slugs = parse_output.all_slugs
@@ -2065,6 +639,7 @@ def build_silver_from_bronze(
     mapping_started_at = time.perf_counter()
     area_map, location_pokemon_map = get_location_area_and_pokemon_maps(all_slugs, allowed_versions=allowed_versions, silver_dir=silver_dir, bronze_dir=bronze_dir)
     stage_durations["mapping_stage_s"] = time.perf_counter() - mapping_started_at
+    _stage_checkpoint("mapping_done", location_slugs=len(all_slugs))
     write_json(mappings_dir / "location_to_area_map.json", area_map)
     write_json(mappings_dir / "location_to_pokemon_map.json", location_pokemon_map)
 
@@ -2087,13 +662,20 @@ def build_silver_from_bronze(
 
     games_table = build_games_table(games_config)
     locations_table = build_locations_table(all_records, area_map, mapper.misses)
-    write_parquet(references_dir / "games.parquet", games_table, partition_cols=["region"])
-    write_parquet(references_dir / "locations.parquet", locations_table, partition_cols=["game_version", "mapping_status"])
+    write_parquet(references_dir / "games.parquet", games_table)
+    write_parquet(references_dir / "locations.parquet", locations_table)
+    from src.pipeline.silver.references.boss_harmonization import (
+        build_and_write_boss_references,
+        build_boss_team_members_reference_rows,
+        build_boss_team_payloads,
+    )
     boss_reference_result = build_and_write_boss_references(
         bronze_dir=bronze_dir,
         references_dir=references_dir,
         diagnostics_dir=diagnostics_dir,
     )
+    boss_teams_df = boss_reference_result.boss_teams.copy()
+    _stage_checkpoint("boss_references_done")
 
     encounters_frame = pd.DataFrame()
     bosses_reference_df = read_parquet(references_dir / "bosses.parquet") if (references_dir / "bosses.parquet").exists() else pd.DataFrame()
@@ -2101,7 +683,17 @@ def build_silver_from_bronze(
         encounters_frame = read_jsonl(encounters_file)
         encounters_frame = _expand_striaton_encounters(encounters_frame)
         encounters_frame = _canonicalize_encounter_boss_ids(encounters_frame, bosses_reference_df)
-        write_parquet(references_dir / "encounters.parquet", encounters_frame, partition_cols=["game"])
+        # Deduplicate: Striaton expansion can produce duplicate rows when the
+        # same encounter exists both in the original JSONL and the expanded clone.
+        _encounter_key_cols = [
+            "game", "boss_id", "location", "pokemon",
+            "level_min", "level_max", "encounter_chance_min", "encounter_chance_max",
+        ]
+        existing_key_cols = [c for c in _encounter_key_cols if c in encounters_frame.columns]
+        if existing_key_cols:
+            encounters_frame = encounters_frame.drop_duplicates(subset=existing_key_cols).reset_index(drop=True)
+            logger.info("[silver/encounters] dedup done rows=%s", len(encounters_frame))
+        write_parquet(references_dir / "encounters.parquet", encounters_frame)
     encounters_reference_path = references_dir / "encounters.parquet"
     encounters_reference_df = read_parquet(encounters_reference_path) if encounters_reference_path.exists() else pd.DataFrame()
     progression_bosses_reference_df = _filter_bosses_with_encounter_pools(bosses_reference_df, encounters_reference_df)
@@ -2112,7 +704,6 @@ def build_silver_from_bronze(
     write_parquet(
         references_dir / "progression_depth.parquet",
         progression_depth_df,
-        partition_cols=["game_version"],
     )
 
     write_json(diagnostics_dir / "unmapped_locations_detailed.json", mapper.misses)
@@ -2132,16 +723,28 @@ def build_silver_from_bronze(
     starter_bootstrap_entries = _dedupe_bootstrap_entries(starter_chain_entries + universal_starter_entries)
     universal_starter_species_by_game = {game: set(species) for game, species in starter_chain_species_by_game.items()}
     base_bootstrap_entries = _build_bootstrap_move_entries(records_with_game_keys)
+    boss_species_bootstrap_entries = _build_boss_species_bootstrap_entries(boss_teams_df)
     kaggle_bootstrap_entries = _build_kaggle_bootstrap_entries(
         kaggle_boss_rows_by_game,
         learnable_moves_df=existing_learnable_moves_df,
         move_reference_df=existing_move_reference_df,
     )
     bootstrap_entries = _dedupe_bootstrap_entries(
-        base_bootstrap_entries + starter_bootstrap_entries + kaggle_bootstrap_entries
+        base_bootstrap_entries + starter_bootstrap_entries + boss_species_bootstrap_entries + kaggle_bootstrap_entries
     )
+    bootstrap_entries = _expand_bootstrap_entries_with_evolution_lines(bootstrap_entries)
     missing_bootstrap_moves = _collect_missing_bootstrap_move_hints(bootstrap_entries, existing_move_reference_df)
-    if (not move_reference_path.exists() or not learnable_moves_path.exists()) or missing_bootstrap_moves:
+    move_reference_missing = not move_reference_path.exists()
+    learnable_moves_missing = not learnable_moves_path.exists()
+    should_bootstrap = move_reference_missing or learnable_moves_missing or bool(missing_bootstrap_moves)
+    logger.info(
+        "[silver/moves] bootstrap decision entries=%s move_reference_missing=%s learnable_moves_missing=%s missing_move_hints=%s",
+        len(bootstrap_entries),
+        move_reference_missing,
+        learnable_moves_missing,
+        len(missing_bootstrap_moves),
+    )
+    if should_bootstrap:
         bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
         logger.info(
             "[silver] bootstrap move refs entries=%s missing_move_hints=%s",
@@ -2149,7 +752,9 @@ def build_silver_from_bronze(
             len(missing_bootstrap_moves),
         )
     if bootstrap_entries:
+        logger.info("[silver/moves] persisting move reference cache entries=%s", len(bootstrap_entries))
         persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
+        logger.info("[silver/moves] persisted move reference cache entries=%s", len(bootstrap_entries))
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
     missing_starter_pairs = _collect_missing_learnable_species_pairs(
         learnable_reference_df,
@@ -2169,41 +774,6 @@ def build_silver_from_bronze(
         missing_universal_starter_pairs,
         columns=["game_version", "species_name", "reason"],
     ).to_csv(diagnostics_dir / "starter_family_move_gaps.csv", index=False)
-    if missing_starter_pairs or missing_universal_starter_pairs:
-        logger.info(
-            "[silver/moves] starter coverage gaps detected; refreshing starter-only move cache via API starter_chain_missing=%s starter_family_missing=%s",
-            len(missing_starter_pairs),
-            len(missing_universal_starter_pairs),
-        )
-        bootstrap_stats = bootstrap_move_reference_cache(starter_bootstrap_entries, silver_dir=silver_dir)
-        logger.info(
-            "[silver/moves] starter coverage refresh complete entries=%s target_pairs=%s missing_target_pairs=%s learnable_rows=%s",
-            bootstrap_stats.get("entry_count", 0),
-            bootstrap_stats.get("target_pairs", 0),
-            bootstrap_stats.get("missing_target_pairs", 0),
-            bootstrap_stats.get("learnable_rows", 0),
-        )
-        persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
-        learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
-        missing_starter_pairs = _collect_missing_learnable_species_pairs(
-            learnable_reference_df,
-            starter_chain_species_by_game,
-            reason="starter_chain_missing_moves",
-        )
-        missing_universal_starter_pairs = _collect_missing_learnable_species_pairs(
-            learnable_reference_df,
-            universal_starter_species_by_game,
-            reason="universal_starter_family_missing_moves",
-        )
-        pd.DataFrame(
-            missing_starter_pairs,
-            columns=["game_version", "species_name", "reason"],
-        ).to_csv(diagnostics_dir / "starter_chain_move_gaps.csv", index=False)
-        pd.DataFrame(
-            missing_universal_starter_pairs,
-            columns=["game_version", "species_name", "reason"],
-        ).to_csv(diagnostics_dir / "starter_family_move_gaps.csv", index=False)
-
     if missing_starter_pairs:
         preview = ",".join(f"{row['game_version']}:{row['species_name']}" for row in missing_starter_pairs[:20])
         diagnostics_paths = [
@@ -2230,7 +800,6 @@ def build_silver_from_bronze(
     move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
     _validate_kaggle_moves_in_move_reference(kaggle_boss_rows_by_game, move_reference_df, diagnostics_dir)
 
-    boss_teams_df = boss_reference_result.boss_teams.copy()
     boss_teams = build_boss_team_payloads(boss_teams_df)
     boss_move_data: dict[str, Any] = {}
     simulatable_bosses_reference_df = bosses_reference_df
@@ -2249,7 +818,7 @@ def build_silver_from_bronze(
     _validate_kaggle_boss_move_profiles(boss_move_data, diagnostics_dir)
     kaggle_boss_species, kaggle_boss_moves = _collect_kaggle_boss_species_and_moves(boss_teams)
     boss_team_members_rows = build_boss_team_members_reference_rows(boss_teams_df)
-    write_parquet(references_dir / "boss_team_members.parquet", boss_team_members_rows, partition_cols=["game_version", "boss_role"])
+    write_parquet(references_dir / "boss_team_members.parquet", boss_team_members_rows)
     boss_team_members_reference_df = read_parquet(references_dir / "boss_team_members.parquet")
     boss_level_df = build_boss_level_table_with_mapping(
         boss_team_members_reference_df,
@@ -2260,24 +829,15 @@ def build_silver_from_bronze(
         progression_depth_df=progression_depth_df,
         boss_level_df=boss_level_df,
     )
+    _stage_checkpoint("progression_context_done")
 
-    for pattern in [
-        "source_teams_*.parquet",
-        "source_team_members_*.parquet",
-        "member_moveset_combos_*.parquet",
-        "member_move_options_*.parquet",
-        "pokemon_moveset_options_*.parquet",
-        "simulation_sampling_plan_*.parquet",
-        "pokemon_combat_pool_*.parquet",
-    ]:
-        for old_file in simulation_dir.glob(pattern):
-            old_file.unlink()
+    cleanup_simulation_shards(simulation_dir)
 
-    team_values: dict[str, set[str]] = {"team_id": set(), "game_version": set()}
-    member_values: dict[str, set[str]] = {"team_member_id": set(), "team_id": set(), "game_version": set()}
+    team_values: dict[str, set[str]] = {"source_team_id": set(), "game_version": set()}
+    member_values: dict[str, set[str]] = {"team_member_id": set(), "source_team_id": set(), "game_version": set()}
     move_values: dict[str, set[str]] = {
         "team_member_id": set(),
-        "team_id": set(),
+        "source_team_id": set(),
         "move_1": set(),
         "move_2": set(),
         "move_3": set(),
@@ -2291,14 +851,8 @@ def build_silver_from_bronze(
     total_boss_rows_skipped_from_move_options = 0
     total_player_rows_used_for_move_options = 0
     total_fixed_boss_teams_carried_forward = 0
-    required_team_species: set[str] = set()
-    required_team_moves: set[str] = set()
 
-    boss_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for team in boss_teams:
-        game_version = str(team.get("game_version") or "").strip().lower()
-        if game_version:
-            boss_teams_by_game[game_version].append(team)
+    boss_teams_by_game = group_teams_by_game(boss_teams)
 
     evolution_rules_path = references_dir / "evolution_rules.parquet"
     evolution_rules_by_game: dict[str, dict[str, dict[str, Any]]] = (
@@ -2312,7 +866,7 @@ def build_silver_from_bronze(
     if evolution_rules_by_game:
         evolution_rows = _evolution_rules_rows_from_map(evolution_rules_by_game)
         if evolution_rows:
-            write_parquet(evolution_rules_path, evolution_rows, partition_cols=["game_version"])
+            write_parquet(evolution_rules_path, evolution_rows)
             logger.info(
                 "[silver/evolution] persisted canonical evolution rules parquet rows=%s games=%s path=%s",
                 len(evolution_rows),
@@ -2327,40 +881,129 @@ def build_silver_from_bronze(
             len(evolution_rules_by_game),
             evolution_rules_path,
         )
-    progression_source_teams_seed = build_progression_source_teams_from_encounters(
-        encounters_df=encounters_reference_df,
-        bosses_df=progression_simulatable_bosses_reference_df,
-        progression_depth_context=progression_depth_context,
-        evolution_rules_by_game=evolution_rules_by_game,
-        allow_item_evolutions=ALLOW_ITEM_EVOLUTIONS,
-        item_evolution_default_level=ITEM_EVOLUTION_DEFAULT_LEVEL,
+    restricted_encounter_species = {
+        normalize_species_slug(species)
+        for species in all_pokemon_references.keys()
+        if normalize_species_slug(species)
+    }
+    starter_species_required = {
+        normalize_species_slug(species)
+        for species_set in universal_starter_species_by_game.values()
+        for species in species_set
+        if normalize_species_slug(species)
+    }
+    evolution_rule_species_required = {
+        normalize_species_slug(species_name)
+        for species_map in evolution_rules_by_game.values()
+        for species_name in species_map.keys()
+        if normalize_species_slug(species_name)
+    }
+    total_required_species = (
+        restricted_encounter_species
+        | kaggle_boss_species
+        | starter_species_required
+        | evolution_rule_species_required
     )
-    progression_bootstrap_entries = _build_progression_bootstrap_entries(progression_source_teams_seed)
-    expanded_bootstrap_entries = _dedupe_bootstrap_entries(bootstrap_entries + progression_bootstrap_entries)
-    if len(expanded_bootstrap_entries) > len(bootstrap_entries):
-        logger.info(
-            "[silver/moves] expanding bootstrap entries from progression teams before player move generation old=%s new=%s",
-            len(bootstrap_entries),
-            len(expanded_bootstrap_entries),
-        )
-        bootstrap_entries = expanded_bootstrap_entries
-        current_move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
-        missing_progression_moves = _collect_missing_bootstrap_move_hints(bootstrap_entries, current_move_reference_df)
-        if missing_progression_moves:
-            bootstrap_stats = bootstrap_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
-            logger.info(
-                "[silver/moves] progression expansion refresh complete entries=%s target_pairs=%s learnable_rows=%s missing_move_hints=%s",
-                bootstrap_stats.get("entry_count", 0),
-                bootstrap_stats.get("target_pairs", 0),
-                bootstrap_stats.get("learnable_rows", 0),
-                len(missing_progression_moves),
+    # Also require every species that already has learnable moves, so that
+    # pokemon_data and learnable_moves stay in sync.
+    if learnable_moves_path.exists():
+        _lm_df = read_parquet(learnable_moves_path)
+        if not _lm_df.empty and "pokemon_species" in _lm_df.columns:
+            learnable_species_required = {
+                normalize_species_slug(s)
+                for s in _lm_df["pokemon_species"].dropna().unique()
+                if normalize_species_slug(s)
+            }
+            total_required_species = total_required_species | learnable_species_required
+    total_required_moves = kaggle_boss_moves
+    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
+    move_reference_profiles = _move_profiles_from_reference(move_reference_df)
+
+    logger.info(
+        "[silver/reference_enrichment] pre-team restricted_encounter_species=%s kaggle_boss_species=%s total_required_species=%s "
+        "learnable_reference_moves=%s kaggle_boss_moves=%s total_required_moves=%s",
+        len(restricted_encounter_species),
+        len(kaggle_boss_species),
+        len(total_required_species),
+        len(move_reference_profiles),
+        len(kaggle_boss_moves),
+        len(total_required_moves),
+    )
+
+    pokemon_data_path = references_dir / "pokemon_data.parquet"
+    pokemon_data_df, pokemon_diagnostics = _build_enriched_pokemon_profiles(all_pokemon_references, total_required_species)
+    if pokemon_diagnostics:
+        write_parquet(diagnostics_dir / "pokemon_profile_fetch_errors.parquet", pokemon_diagnostics)
+    _validate_and_persist_pokemon_data_contract(pokemon_data_df, diagnostics_dir, total_required_species)
+    write_parquet(pokemon_data_path, pokemon_data_df)
+    create_pokemon_reference_index(
+        {
+            str(row.get("pokemon_species") or "").strip().lower(): {
+                "name": str(row.get("name") or row.get("pokemon_species") or "").strip().lower(),
+                "url": str(row.get("source_url") or "").strip() or None,
+            }
+            for row in pokemon_data_df.to_dict(orient="records")
+            if str(row.get("pokemon_species") or "").strip()
+        },
+        references_dir,
+    )
+
+    pokemon_types_by_species: dict[str, tuple[str | None, str | None]] = {}
+    for row in pokemon_data_df.to_dict(orient="records"):
+        species = str(row.get("pokemon_species") or "").strip().lower()
+        if not species:
+            continue
+        type_1 = str(row.get("type_1") or "").strip().lower() or None
+        type_2 = str(row.get("type_2") or "").strip().lower() or None
+        if type_1 is None and type_2 is None:
+            continue
+        pokemon_types_by_species[species] = (type_1, type_2)
+
+    encounter_species_col = "pokemon_species" if "pokemon_species" in encounters_reference_df.columns else ("pokemon" if "pokemon" in encounters_reference_df.columns else None)
+    if encounter_species_col is not None:
+        encounter_species = {
+            normalize_species_slug(value)
+            for value in encounters_reference_df[encounter_species_col].tolist()
+            if normalize_species_slug(value)
+        }
+        missing_type_species = sorted(species for species in encounter_species if species not in pokemon_types_by_species)
+        if missing_type_species:
+            raise ValueError(
+                "Missing pokemon typing coverage for encounter species before team generation: "
+                f"count={len(missing_type_species)} sample=[{','.join(missing_type_species[:20])}]"
             )
-        persist_move_reference_cache(bootstrap_entries, silver_dir=silver_dir)
-        learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
-        _validate_starter_chain_move_coverage(learnable_reference_df, starter_chain_species_by_game, diagnostics_dir)
+
+    boss_type_profile_by_key: dict[tuple[str, str], dict[str, float]] = {}
+    for team in boss_teams:
+        game_version = str(team.get("game_version") or "").strip().lower()
+        boss_id = str(team.get("boss_id") or "").strip().lower()
+        if not game_version or not boss_id:
+            continue
+        counts: dict[str, float] = {}
+        total = 0.0
+        for species in list(team.get("pokemon") or []):
+            species_key = str(species or "").strip().lower()
+            if not species_key:
+                continue
+            type_1, type_2 = pokemon_types_by_species.get(species_key, (None, None))
+            if type_1 and type_2:
+                counts[type_1] = counts.get(type_1, 0.0) + 0.5
+                counts[type_2] = counts.get(type_2, 0.0) + 0.5
+                total += 1.0
+            elif type_1:
+                counts[type_1] = counts.get(type_1, 0.0) + 1.0
+                total += 1.0
+            elif type_2:
+                counts[type_2] = counts.get(type_2, 0.0) + 1.0
+                total += 1.0
+        if total > 0:
+            boss_type_profile_by_key[(game_version, boss_id)] = {
+                type_name: value / total
+                for type_name, value in counts.items()
+            }
 
     reference_context = load_reference_context(silver_dir=silver_dir)
-    progression_source_teams_all = build_progression_source_teams_from_encounters(
+    progression_source_teams = build_progression_source_teams_from_encounters(
         encounters_df=encounters_reference_df,
         bosses_df=progression_simulatable_bosses_reference_df,
         progression_depth_context=progression_depth_context,
@@ -2368,9 +1011,13 @@ def build_silver_from_bronze(
         reference_context=reference_context,
         allow_item_evolutions=ALLOW_ITEM_EVOLUTIONS,
         item_evolution_default_level=ITEM_EVOLUTION_DEFAULT_LEVEL,
+        pokemon_types_by_species=pokemon_types_by_species,
+        boss_type_profile_by_key=boss_type_profile_by_key,
     )
+    _stage_checkpoint("progression_teams_done", count=len(progression_source_teams))
+    reference_context = load_reference_context(silver_dir=silver_dir)
     player_move_gap_df = _diagnose_player_missing_damaging_moves(
-        progression_source_teams_all,
+        progression_source_teams,
         reference_context,
         diagnostics_dir,
     )
@@ -2382,11 +1029,11 @@ def build_silver_from_bronze(
         )
 
     _validate_progression_source_team_boss_targets(
-        progression_source_teams_all,
+        progression_source_teams,
         simulatable_bosses_reference_df,
     )
     progression_source_teams_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in progression_source_teams_all:
+    for row in progression_source_teams:
         game_version = str(row.get("game_version") or "").strip().lower()
         if game_version:
             progression_source_teams_by_game[game_version].append(row)
@@ -2402,6 +1049,7 @@ def build_silver_from_bronze(
     )
 
     all_move_data = dict(boss_move_data)
+    all_move_data = _ensure_moves_in_combat_profiles(all_move_data, total_required_moves, move_reference_profiles)
 
     for game_key in sharded_game_keys:
         if not game_key:
@@ -2547,11 +1195,11 @@ def build_silver_from_bronze(
                 combat_rows.append({"game_version": gv, "pokemon_species": sp, "level": lv})
         write_parquet(paths["combat_pool"], combat_rows)
 
-        team_values["team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in source_teams_rows if str(row.get("source_team_id") or "").strip())
+        team_values["source_team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in source_teams_rows if str(row.get("source_team_id") or "").strip())
         team_values["game_version"].update(str(row.get("game_version") or "").strip().lower() for row in source_teams_rows if str(row.get("game_version") or "").strip())
 
         member_values["team_member_id"].update(str(row.get("team_member_id") or "").strip().lower() for row in source_member_rows if str(row.get("team_member_id") or "").strip())
-        member_values["team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in source_member_rows if str(row.get("source_team_id") or "").strip())
+        member_values["source_team_id"].update(str(row.get("source_team_id") or "").strip().lower() for row in source_member_rows if str(row.get("source_team_id") or "").strip())
         member_values["game_version"].update(str(row.get("game_version") or "").strip().lower() for row in source_member_rows if str(row.get("game_version") or "").strip())
 
         move_values["team_member_id"].update(
@@ -2559,15 +1207,10 @@ def build_silver_from_bronze(
             for row in member_moveset_combo_rows
             if str(row.get("pokemon_instance_id") or "").strip()
         )
-        move_values["team_id"].update(
+        move_values["source_team_id"].update(
             str(row.get("team_id") or "").strip().lower()
             for row in member_moveset_combo_rows
             if str(row.get("team_id") or "").strip()
-        )
-        required_team_species.update(
-            normalize_species_slug(row.get("pokemon_species") or "")
-            for row in source_member_rows
-            if normalize_species_slug(row.get("pokemon_species") or "")
         )
         for move_col in ("move_1", "move_2", "move_3", "move_4"):
             normalized_moves = {
@@ -2576,7 +1219,6 @@ def build_silver_from_bronze(
                 if normalize_move_name(row.get(move_col) or "")
             }
             move_values[move_col].update(normalized_moves)
-            required_team_moves.update(normalized_moves)
 
         total_source_teams += len(source_teams_rows)
         total_members += len(source_member_rows)
@@ -2615,106 +1257,16 @@ def build_silver_from_bronze(
             player_rows_used,
             len(boss_compact["source_teams"]),
         )
+        _stage_checkpoint(
+            "game_shard_written",
+            game=game_key,
+            source_teams=len(source_teams_rows),
+            members=len(source_member_rows),
+            moveset_combos=len(member_moveset_combo_rows),
+        )
 
         gc.collect()
 
-    restricted_encounter_species = {
-        normalize_species_slug(species)
-        for species in all_pokemon_references.keys()
-        if normalize_species_slug(species)
-    }
-    total_required_species = restricted_encounter_species | kaggle_boss_species | required_team_species
-    total_required_moves = required_team_moves | kaggle_boss_moves
-
-    move_reference_df = read_parquet(move_reference_path) if move_reference_path.exists() else pd.DataFrame()
-    move_reference_profiles = _move_profiles_from_reference(move_reference_df)
-
-    logger.info(
-        "[silver/reference_enrichment] restricted_encounter_species=%s kaggle_boss_species=%s total_required_species=%s "
-        "learnable_reference_moves=%s kaggle_boss_moves=%s total_required_moves=%s",
-        len(restricted_encounter_species),
-        len(kaggle_boss_species),
-        len(total_required_species),
-        len(move_reference_profiles),
-        len(kaggle_boss_moves),
-        len(total_required_moves),
-    )
-
-    pokemon_data_path = references_dir / "pokemon_data.parquet"
-    pokemon_data_df, pokemon_diagnostics = _build_enriched_pokemon_profiles(all_pokemon_references, total_required_species)
-    if pokemon_diagnostics:
-        write_parquet(diagnostics_dir / "pokemon_profile_fetch_errors.parquet", pokemon_diagnostics)
-    exact_matches = 0
-    species_default_matches = 0
-    alias_matches = 0
-    unresolved_names: list[str] = []
-    if not pokemon_data_df.empty and "resolution_method" in pokemon_data_df.columns:
-        resolution_counts = pokemon_data_df["resolution_method"].astype("string").value_counts(dropna=True).to_dict()
-        exact_matches = int(resolution_counts.get("pokemon_exact", 0))
-        species_default_matches = int(resolution_counts.get("species_default_variety", 0))
-        alias_matches = int(resolution_counts.get("alias_species_default_variety", 0))
-    if pokemon_diagnostics:
-        unresolved_names = sorted(
-            {
-                _normalize_requested_pokemon_name(item.get("normalized_requested_name") or item.get("requested_pokemon_name") or "")
-                for item in pokemon_diagnostics
-                if _normalize_requested_pokemon_name(item.get("normalized_requested_name") or item.get("requested_pokemon_name") or "")
-            }
-        )
-    logger.info(
-        "[silver/reference_enrichment] pokemon_resolution_summary exact=%s species_default=%s alias_fallback=%s unresolved=%s unresolved_names=%s",
-        exact_matches,
-        species_default_matches,
-        alias_matches,
-        len(unresolved_names),
-        ",".join(unresolved_names[:20]),
-    )
-    _validate_and_persist_pokemon_data_contract(pokemon_data_df, diagnostics_dir, total_required_species)
-    write_parquet(pokemon_data_path, pokemon_data_df)
-    create_pokemon_reference_index(
-        {
-            str(row.get("pokemon_species") or "").strip().lower(): {
-                "name": str(row.get("name") or row.get("pokemon_species") or "").strip().lower(),
-                "url": str(row.get("source_url") or "").strip() or None,
-            }
-            for row in pokemon_data_df.to_dict(orient="records")
-            if str(row.get("pokemon_species") or "").strip()
-        },
-        references_dir,
-    )
-
-    all_move_data = _ensure_moves_in_combat_profiles(all_move_data, total_required_moves, move_reference_profiles)
-    write_validated_move_data(simulation_dir / "move_data.parquet", all_move_data, chunk_threshold=500_000, chunk_size=40_000)
-
-    available_species = {
-        normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
-        for row in pokemon_data_df.to_dict(orient="records")
-        if normalize_species_slug(row.get("pokemon_species") or row.get("name") or "")
-    }
-    available_moves: set[str] = set()
-    for payload in all_move_data.values():
-        move_details = payload.get("move_details")
-        if not isinstance(move_details, dict):
-            continue
-        for move_name in move_details.keys():
-            move_slug = normalize_move_name(move_name)
-            if move_slug:
-                available_moves.add(move_slug)
-
-    missing_profile_species = sorted(species for species in required_team_species if species not in available_species)
-    missing_profile_moves = sorted(move for move in required_team_moves if move not in available_moves)
-    if missing_profile_species or missing_profile_moves:
-        raise ValueError(
-            "Silver reference enrichment incomplete for local combat profiles: "
-            f"missing_species={len(missing_profile_species)} missing_moves={len(missing_profile_moves)} "
-            f"sample_species=[{','.join(missing_profile_species[:10])}] sample_moves=[{','.join(missing_profile_moves[:10])}]"
-        )
-
-    logger.info(
-        "[silver/reference_enrichment] final_pokemon_profiles=%s final_move_profiles=%s",
-        len(available_species),
-        len(available_moves),
-    )
     learnable_reference_df = read_parquet(learnable_moves_path) if learnable_moves_path.exists() else pd.DataFrame()
     _validate_boss_reference_coverage(
         boss_team_members_df=pd.DataFrame(boss_team_members_rows),
@@ -2725,6 +1277,7 @@ def build_silver_from_bronze(
         diagnostics_dir=diagnostics_dir,
     )
 
+    from src.pipeline.silver.schemas.relational_checks import validate_normalized_silver_tables
     relational_report = validate_normalized_silver_tables(
         {
             "games": pd.DataFrame(games_table),
@@ -2743,8 +1296,11 @@ def build_silver_from_bronze(
     write_json(diagnostics_dir / "relational_validation.json", relational_report.as_dict())
     if not relational_report.is_valid:
         raise ValueError("Silver relational validation failed; see diagnostics/relational_validation.json")
+    _stage_checkpoint("relational_validation_done")
 
+    from src.pipeline.silver.reporting.silver_manifest import create_silver_manifest
     create_silver_manifest(silver_dir)
+    _stage_checkpoint("manifest_written")
 
     save_state(
         state_path,
@@ -2776,6 +1332,7 @@ def build_silver_from_bronze(
             },
         },
     )
+    _stage_checkpoint("performance_summary_written", stages=len(stage_durations))
 
     logger.info(
         "[silver] build finished records=%s source_teams=%s source_team_members=%s member_moveset_combos=%s "

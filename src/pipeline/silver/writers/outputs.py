@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -14,13 +12,9 @@ import pandas as pd
 
 from src.pipeline.common.io import read_json, write_json, write_jsonl, write_parquet
 from src.pipeline.silver.schemas.contracts import (
-    MoveDataContract,
     validate_boss_snapshots,
     validate_team_payloads,
 )
-
-logger = logging.getLogger(__name__)
-
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
@@ -59,7 +53,7 @@ def fingerprint_python_files(paths: list[Path]) -> str:
 def load_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return {}
-    return read_json(state_path) if state_path.exists() else {}
+    return read_json(state_path)
 
 
 def save_state(state_path: Path, payload: dict[str, Any]) -> None:
@@ -77,50 +71,6 @@ def write_validated_teams(path: Path, records: list[dict[str, Any]], *, partitio
     write_parquet(path, pd.DataFrame(validated), partition_cols=partition_cols)
     return validated
 
-
-def write_validated_move_data(
-    path: Path,
-    records: dict[str, dict[str, Any]] | list[dict[str, Any]],
-    *,
-    chunk_threshold: int = 50_000,
-    chunk_size: int = 25_000,
-) -> list[dict[str, Any]]:
-    payload = list(records.values()) if isinstance(records, dict) else list(records)
-    total_records = len(payload)
-    if total_records <= chunk_threshold:
-        validated_rows: list[dict[str, Any]] = []
-        for record in payload:
-            move = MoveDataContract.from_payload(record)
-            move.validate()
-            validated_rows.append(move.as_dict())
-        write_parquet(path, pd.DataFrame(validated_rows))
-        return validated_rows
-
-    logger.info(
-        "[silver] move data exceeds chunk threshold; writing chunked parquet total_records=%s threshold=%s chunk_size=%s",
-        total_records,
-        chunk_threshold,
-        chunk_size,
-    )
-    if path.exists():
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-    path.mkdir(parents=True, exist_ok=True)
-
-    chunk_index = 0
-    for start in range(0, total_records, chunk_size):
-        end = min(start + chunk_size, total_records)
-        chunk_validated: list[dict[str, Any]] = []
-        for record in payload[start:end]:
-            move = MoveDataContract.from_payload(record)
-            move.validate()
-            chunk_validated.append(move.as_dict())
-        write_parquet(path / f"part-{chunk_index:05d}.parquet", pd.DataFrame(chunk_validated))
-        chunk_index += 1
-
-    return []
 
 def write_simulation_run_metadata(
     output_dir: Path,

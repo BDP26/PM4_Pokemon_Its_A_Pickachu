@@ -91,7 +91,7 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
     game_versions = _series_set(games, "game_version")
     boss_ids = _series_set(bosses, "boss_id")
     location_ids = _series_set(locations, "location_id")
-    team_ids = _series_set(teams, "team_id")
+    team_ids = _series_set(teams, "source_team_id")
     team_member_ids = _series_set(team_members, "team_member_id")
     move_names = _series_set(move_reference, "move_name")
     pokemon_names = _series_set(pokemon_data, "name") | _series_set(pokemon_data, "pokemon_species")
@@ -168,9 +168,9 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
             _append_issue(issues, level="error", code="FK_TEAMS_GAME", table="teams", detail="teams.game_version references unknown games", count=len(invalid))
 
     if team_members.row_count > 0:
-        invalid_team_ids = [v for v in _series_set(team_members, "team_id") if v and v not in team_ids]
+        invalid_team_ids = [v for v in _series_set(team_members, "source_team_id") if v and v not in team_ids]
         if invalid_team_ids:
-            _append_issue(issues, level="error", code="FK_TEAM_MEMBERS_TEAM", table="team_members", detail="team_members.team_id references unknown teams", count=len(invalid_team_ids))
+            _append_issue(issues, level="error", code="FK_TEAM_MEMBERS_TEAM", table="team_members", detail="team_members.source_team_id references unknown teams", count=len(invalid_team_ids))
         invalid_game_ids = [v for v in _series_set(team_members, "game_version") if v and v not in game_versions]
         if invalid_game_ids:
             _append_issue(issues, level="error", code="FK_TEAM_MEMBERS_GAME", table="team_members", detail="team_members.game_version references unknown games", count=len(invalid_game_ids))
@@ -179,9 +179,9 @@ def validate_normalized_silver_tables(tables: dict[str, pd.DataFrame | TableVali
         invalid_member_ids = [v for v in _series_set(team_member_moves, "team_member_id") if v and v not in team_member_ids]
         if invalid_member_ids:
             _append_issue(issues, level="error", code="FK_TEAM_MEMBER_MOVES_MEMBER", table="team_member_moves", detail="team_member_moves.team_member_id references unknown team_members", count=len(invalid_member_ids))
-        invalid_team_ids = [v for v in _series_set(team_member_moves, "team_id") if v and v not in team_ids]
+        invalid_team_ids = [v for v in _series_set(team_member_moves, "source_team_id") if v and v not in team_ids]
         if invalid_team_ids:
-            _append_issue(issues, level="error", code="FK_TEAM_MEMBER_MOVES_TEAM", table="team_member_moves", detail="team_member_moves.team_id references unknown teams", count=len(invalid_team_ids))
+            _append_issue(issues, level="error", code="FK_TEAM_MEMBER_MOVES_TEAM", table="team_member_moves", detail="team_member_moves.source_team_id references unknown teams", count=len(invalid_team_ids))
 
     if learnable_moves.row_count > 0:
         invalid_games = [v for v in _series_set(learnable_moves, "game_version") if v and v not in game_versions]
