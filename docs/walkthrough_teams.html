@@ -7,12 +7,12 @@
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Alfa+Slab+One&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg-primary: #0f0e0c;
-      --bg-secondary: #1a1815;
-      --surface-dark: #252220;
-      --surface-light: #2f2c28;
-      --text-primary: #f5f3ef;
-      --text-secondary: #c4bfb5;
+      --bg-primary: #f6f7fb;
+      --bg-secondary: #ffffff;
+      --surface-dark: #e8edf6;
+      --surface-light: #f2f5fb;
+      --text-primary: #1f2a37;
+      --text-secondary: #4b5563;
       --accent-primary: #ff6b35;
       --accent-secondary: #f7b801;
       --accent-water: #4a90e2;
@@ -24,9 +24,28 @@
       --warning: #e67e22;
       --rare: #e74c3c;
       --common: #27ae60;
+      --shadow-sm: 0 4px 12px rgba(17, 24, 39, 0.12);
+      --shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.2);
+      --shadow-glow: 0 0 20px rgba(255, 107, 53, 0.3);
+      --header-overlay: rgba(255, 255, 255, 0.95);
+      --field-focus-shadow: rgba(255, 107, 53, 0.3);
+      --bg-accent-a: rgba(255, 107, 53, 0.08);
+      --bg-accent-b: rgba(74, 144, 226, 0.08);
+    }
+
+    [data-theme="dark"] {
+      --bg-primary: #0f0e0c;
+      --bg-secondary: #1a1815;
+      --surface-dark: #252220;
+      --surface-light: #2f2c28;
+      --text-primary: #f5f3ef;
+      --text-secondary: #c4bfb5;
       --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.4);
       --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
-      --shadow-glow: 0 0 20px rgba(255, 107, 53, 0.3);
+      --header-overlay: rgba(26, 24, 21, 0.95);
+      --field-focus-shadow: rgba(255, 107, 53, 0.4);
+      --bg-accent-a: rgba(255, 107, 53, 0.05);
+      --bg-accent-b: rgba(74, 144, 226, 0.05);
     }
 
     [data-starter-theme="grass"] {
@@ -54,8 +73,8 @@
       font-family: "Fredoka", sans-serif;
       line-height: 1.6;
       background-image:
-        radial-gradient(circle at 20% 50%, rgba(255, 107, 53, 0.05) 0%, transparent 50%),
-        radial-gradient(circle at 80% 80%, rgba(74, 144, 226, 0.05) 0%, transparent 50%);
+        radial-gradient(circle at 20% 50%, var(--bg-accent-a) 0%, transparent 50%),
+        radial-gradient(circle at 80% 80%, var(--bg-accent-b) 0%, transparent 50%);
     }
 
     .shell {
@@ -69,7 +88,7 @@
       position: sticky;
       top: 0;
       z-index: 100;
-      background: linear-gradient(180deg, var(--bg-secondary) 0%, rgba(26, 24, 21, 0.95) 100%);
+      background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--header-overlay) 100%);
       backdrop-filter: blur(12px);
       border-bottom: 2px solid var(--accent-primary);
       padding: 16px 24px;
@@ -215,7 +234,7 @@
     .control-group select:focus,
     .control-group input:focus {
       outline: none;
-      box-shadow: 0 0 12px rgba(255, 107, 53, 0.4);
+      box-shadow: 0 0 12px var(--field-focus-shadow);
       background: var(--surface-dark);
     }
 
@@ -534,6 +553,11 @@
       margin-top: 16px;
     }
 
+    .enemy-squad-grid {
+      margin-top: 0;
+      align-items: stretch;
+    }
+
     .pokemon-card {
       background: linear-gradient(135deg, rgba(255, 107, 53, 0.1), rgba(247, 184, 1, 0.05));
       border: 2px solid var(--accent-primary);
@@ -583,23 +607,40 @@
 
     .pokemon-chips {
       display: flex;
-      gap: 4px;
+      gap: 6px;
       justify-content: center;
       flex-wrap: wrap;
-      margin-top: 6px;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    .pokemon-chips .badge {
+      padding: 4px 10px;
+      font-size: 10px;
+      border-radius: 999px;
+      letter-spacing: 0.45px;
+      line-height: 1.1;
     }
 
     .pokemon-chip {
-      font-size: 9px;
+      font-size: 10px;
       font-weight: 700;
-      padding: 2px 5px;
+      padding: 3px 8px;
       border-radius: 999px;
-      border: 1px solid var(--accent-primary);
-      background: rgba(255, 107, 53, 0.12);
-      color: var(--text-secondary);
+      border: 1px solid rgba(255, 107, 53, 0.6);
+      background: rgba(255, 107, 53, 0.1);
+      color: var(--text-primary);
       text-transform: uppercase;
       letter-spacing: 0.4px;
       line-height: 1.1;
+    }
+
+    .pokemon-chip.metric-chip {
+      border-color: rgba(247, 184, 1, 0.8);
+      background: rgba(247, 184, 1, 0.14);
+      color: var(--accent-secondary);
+      min-width: 64px;
+      text-align: center;
     }
 
     /* Team Matrix */
@@ -1347,10 +1388,17 @@
       });
     }
 
+    function withSequentialBossOrder(rows) {
+      return rows.map((row, idx) => ({ ...row, boss_order: idx + 1 }));
+    }
+
     function buildDisplayRows(rows, gauntletTeamCount) {
-      const nonLeague = rows.filter((row) => !["elite_four", "champion"].includes(String((row.boss_metadata || {}).boss_role || "")));
+      const nonLeague = rows.filter((row) => {
+        const role = String((row.boss_metadata || {}).boss_role || "");
+        return !["elite_four", "champion"].includes(role) && !row._hasNoTeams;
+      });
       const leagueRows = leagueBosses(rows);
-      if (!leagueRows.length) return nonLeague;
+      if (!leagueRows.length) return withSequentialBossOrder(nonLeague);
       const champion = leagueRows.find((row) => String((row.boss_metadata || {}).boss_role || "") === "champion") || leagueRows[leagueRows.length - 1];
       const gauntletLocations = Array.from(new Set(
         leagueRows.flatMap((row) => {
@@ -1378,7 +1426,8 @@
         _leagueRows: leagueRows,
         _hasNoTeams: gauntletTeamCount === 0,
       };
-      return [...nonLeague, synthetic];
+      const outputRows = gauntletTeamCount > 0 ? [...nonLeague, synthetic] : nonLeague;
+      return withSequentialBossOrder(outputRows);
     }
 
     function resolveBossTeam(row, starter) {
@@ -1401,16 +1450,17 @@
       const dex = num(mon && mon.pokeid);
       const types = [normalizeTypeToken(mon && mon.type_1), normalizeTypeToken(mon && mon.type_2)].filter(Boolean);
       const typeLabel = types.length ? types.map((t) => cap(t)).join(" / ") : "Unknown";
+      const cardClass = `pokemon-card ${types.length === 1 ? "monotype" : "dualtype"}`;
       return `
-        <button class="pokemon-card" type="button" data-mon-id="${monId}" title="${safeText(pokemonName(mon))}">
+        <button class="${cardClass}" type="button" data-mon-id="${monId}" title="${safeText(pokemonName(mon))}">
           <img class="pokemon-sprite" src="${spriteFor(mon)}" alt="${safeText(pokemonName(mon))}" onerror="this.src='${placeholderSprite()}'" />
           <div class="pokemon-name">${safeText(cap(pokemonName(mon)))}</div>
           <div class="pokemon-level">${num(mon && mon.level) !== null ? `Lv ${num(mon.level)}` : "—"}</div>
           <div class="pokemon-meta">${dex !== null ? `Dex #${dex}` : "Dex ?"} · ${typeLabel}</div>
           <div class="pokemon-chips">
             ${types.map((t) => `<span class="badge ${safeText(t)}">${cap(t)}</span>`).join("")}
-            <span class="pokemon-chip">Dmg ${insights.damagingMoves}</span>
-            <span class="pokemon-chip">Status ${insights.statusMoves}</span>
+            <span class="pokemon-chip metric-chip">DMG ${insights.damagingMoves}</span>
+            <span class="pokemon-chip metric-chip">STATUS ${insights.statusMoves}</span>
           </div>
         </button>
       `;
@@ -1590,7 +1640,7 @@
               ${bossTeam && !isLeagueStage ? `
                 <div>
                   <h4 style="font-size: 0.75rem; text-transform: uppercase; margin: 0 0 12px 0; color: var(--accent-secondary); letter-spacing: 1px; font-weight: 700;">Enemy Squad</h4>
-                  <div class="pokemon-grid" style="grid-template-columns: repeat(3, 1fr); gap: 12px;">${bossTeam.pokemon.map((mon) => memberButton(mon)).join("")}</div>
+                  <div class="pokemon-grid enemy-squad-grid" style="grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 12px;">${bossTeam.pokemon.map((mon) => memberButton(mon)).join("")}</div>
                 </div>
               ` : ""}
             </div>

@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import sys
 
 import pandas as pd
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.pipeline.common.io import read_parquet
 from src.pipeline.silver.inputs.reference_context import normalize_species_slug
@@ -124,12 +121,15 @@ def validate(silver_dir: Path) -> list[str]:
         _ok("source_team_members species are covered by pokemon_data")
 
     move_reference = _read(move_reference_path)
-    move_data = _read(simulation_dir / "move_data.parquet")
     required_move_cols = {"move_name", "type", "damage_class", "power", "effective_power", "power_handling"}
-    if required_move_cols.issubset(set(move_reference.columns)) and not required_move_cols.issubset(set(move_data.columns)):
-        _ok("move profile loader target is reference schema (not simulation move_data table)")
+    missing_move_reference_cols = sorted(required_move_cols - set(move_reference.columns))
+    if missing_move_reference_cols:
+        errors.append(
+            "move_reference missing required columns for move profile loading: "
+            f"{missing_move_reference_cols}"
+        )
     else:
-        _error("move profile loader target check requires move_reference schema; inspect manually")
+        _ok("move_reference includes required move profile columns")
 
     if normalize_species_slug("mr. mime") != "mr-mime":
         errors.append("species normalization mismatch: mr. mime should normalize to mr-mime")
@@ -157,3 +157,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
