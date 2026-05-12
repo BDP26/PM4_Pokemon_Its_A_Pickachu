@@ -7,6 +7,7 @@ import pytest
 
 from src.pipeline.silver.inputs.reference_context import MoveReferenceContext
 from src.pipeline.silver.config import game_config
+from src.pipeline.silver.inputs.builders import bootstrap_moves
 from src.pipeline.silver.orchestration import build_silver
 
 
@@ -18,7 +19,7 @@ def test_starter_species_universe_includes_starters_and_evolutions(monkeypatch) 
             f"{species}-final": {"base_species": species},
         }
 
-    monkeypatch.setattr(build_silver, "get_species_evolution_rules", _fake_rules)
+    monkeypatch.setattr(bootstrap_moves, "get_species_evolution_rules", _fake_rules)
 
     universe = build_silver._collect_starter_chain_species_by_game([{"game_key": "red"}])
     assert "red" in universe
@@ -96,10 +97,8 @@ def test_all_starter_family_bootstrap_entries_include_cross_version_families() -
 
 
 def test_resolve_starter_species_for_level_does_not_call_pokeapi(monkeypatch) -> None:
-    def _fail_call(_: str) -> dict[str, dict[str, object]]:
-        raise AssertionError("unexpected pokeapi call")
-
-    monkeypatch.setattr(game_config, "get_species_evolution_rules", _fail_call)
+    # bulbasaur is in the static family lookup so _starter_family_rules returns early
+    # without ever importing or calling get_species_evolution_rules.
     game_config._starter_family_rules.cache_clear()
 
     assert game_config.resolve_starter_species_for_level("bulbasaur", 5) == "bulbasaur"

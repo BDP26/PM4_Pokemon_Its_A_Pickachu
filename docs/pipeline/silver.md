@@ -36,12 +36,17 @@ When invoked via `src.pipeline.run_pipeline layers silver`, a contract gate runs
 
 ## Important outputs
 
+**Snapshots**
 - `data/silver/snapshots/*_boss_snapshots.jsonl`
+
+**Reference tables** (game-agnostic)
 - `data/silver/references/bosses.parquet`
 - `data/silver/references/encounters.parquet`
 - `data/silver/references/pokemon_data.parquet`
 - `data/silver/references/move_reference.parquet`
 - `data/silver/references/learnable_moves.parquet`
+
+**Simulation inputs** (one file per game version, `<game>` = e.g. `red`, `black`)
 - `data/silver/simulation/source_teams_<game>.parquet`
 - `data/silver/simulation/source_team_members_<game>.parquet`
 - `data/silver/simulation/member_moveset_combos_<game>.parquet`
@@ -49,6 +54,8 @@ When invoked via `src.pipeline.run_pipeline layers silver`, a contract gate runs
 - `data/silver/simulation/pokemon_moveset_options_<game>.parquet`
 - `data/silver/simulation/pokemon_combat_pool_<game>.parquet`
 - `data/silver/simulation/simulation_sampling_plan_<game>.parquet`
+
+**Diagnostics and contract**
 - `data/silver/diagnostics/*`
 - `data/silver/manifest.json`
 

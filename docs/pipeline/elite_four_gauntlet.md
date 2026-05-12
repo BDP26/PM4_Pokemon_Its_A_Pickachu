@@ -1,28 +1,30 @@
 # Elite Four + Champion Gauntlet Simulation
 
-## Übersicht
+## Overview
 
-Das System berechnet die Wahrscheinlichkeit, dass ein Player-Team die vollständige Elite Four + Champion Sequenz besteht.
+The system computes the probability that a player team completes the full Elite Four + Champion sequence in a single run.
 
-## Funktionsweise
+## How it works
 
-### Sequenz
-Für jedes Spiel (z.B. "red", "blue", "black") gibt es eine feste Reihenfolge:
+### Sequence
+
+For each game version (e.g. `red`, `blue`, `black`) there is a fixed battle order:
+
 1. **Elite Four Trainer 1**
 2. **Elite Four Trainer 2**
 3. **Elite Four Trainer 3**
 4. **Elite Four Trainer 4**
-5. **Champion** (optional: kann je nach Starter unterschiedlich sein)
+5. **Champion** (may vary by starter choice)
 
-### Win-Berechnung
+### Win probability
 
-Die Gewinnwahrscheinlichkeit für die komplette Sequenz ist das **Produkt** aller einzelnen Kampf-Wahrscheinlichkeiten:
+The gauntlet win probability is the **product** of the individual per-battle win rates:
 
 ```
 P(gauntlet) = P(vs E4_1) × P(vs E4_2) × P(vs E4_3) × P(vs E4_4) × P(vs Champion)
 ```
 
-Beispiel:
+Example:
 ```
 P(vs E4_1) = 0.8
 P(vs E4_2) = 0.7
@@ -30,66 +32,64 @@ P(vs E4_3) = 0.6
 P(vs E4_4) = 0.5
 P(vs Champion) = 0.4
 
-P(gauntlet) = 0.8 × 0.7 × 0.6 × 0.5 × 0.4 = 0.0672 = 6.72% Gewinnchance
+P(gauntlet) = 0.8 × 0.7 × 0.6 × 0.5 × 0.4 = 0.0672 → 6.72% completion chance
 ```
 
-### Starter-Abhängigkeit
+### Starter dependency
 
-Für Champions kann es unterschiedliche Teams je nach Starter geben (z.B. in "blue" Version gibt es Champion Blue mit verschiedenen Starters). 
-Das System kalkuliert dies ein und nutzt den Starter des Player-Teams zur Bestimmung des Champion-Gegners.
+Champions can have different teams depending on the player's starter (e.g. Champion Blue in `blue` version). The system resolves the correct Champion opponent using the starter of the player team being evaluated.
 
-### Fehlende Daten
+### Missing data
 
-Falls keine Simulationsdaten für eine bestimmte Matchup vorhanden sind, wird eine neutrale 50% Wahrscheinlichkeit angenommen (conservativ).
+If no simulation data exists for a specific matchup, a neutral 50% win rate is assumed as a conservative fallback.
 
-## Output-Format
+## Outputs
 
-Die Gauntlet-Auswertung wird aktuell ueber Gold-Rankings persistiert (kein separates
-`elite_four_gauntlet_results.parquet` als primaerer Output).
+Gauntlet results are persisted through the standard Gold rankings (there is no separate `elite_four_gauntlet_results.parquet`).
 
-Wichtige Gold-Outputs:
+Relevant Gold outputs:
 
 - `data/gold/team_rankings_e4_champion_sequence_by_version_starter.parquet`
 - `data/gold/best_team_by_e4_champion_sequence_version_starter.parquet`
 - `data/gold/simulation/monte_carlo_results.parquet`
 
-Typische Felder in den Sequence-Rankings:
+Key columns in the sequence ranking tables:
 
-| Spalte | Beschreibung |
-|--------|------------|
-| `effective_game_version` | Spiel-Version (z.B. `red`) |
-| `starter_base` | Starter-Pokemon (z.B. `bulbasaur`) |
-| `player_team_id` | Player-Team ID |
-| `sequence_completion_prob` | Geschlossene Wahrscheinlichkeit fuer komplette Sequenz |
-| `sequence_expected_wins` | Erwartete Siege ueber die Sequenz |
-| `strict_clear_rate` | Strikter Clear-Rate-Indikator |
-| `rank_in_sequence` | Rang innerhalb `(version, starter)` |
+| Column | Description |
+|--------|-------------|
+| `effective_game_version` | Game version (e.g. `red`) |
+| `starter_base` | Starter Pokémon (e.g. `bulbasaur`) |
+| `player_team_id` | Player team identifier |
+| `sequence_completion_prob` | Combined probability of clearing the full sequence |
+| `sequence_expected_wins` | Expected number of wins across the sequence |
+| `strict_clear_rate` | Binary clear-rate indicator |
+| `rank_in_sequence` | Rank within `(version, starter)` group |
 
-## Verwendung
+## Usage
 
-Die Berechnung erfolgt im Gold-Layer waehrend des normalen Pipeline-Runs:
+Gauntlet simulation runs as part of the normal Gold layer build:
 
 ```bash
 PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers gold
 ```
 
-Optional lokal ohne Spark:
+To run without Spark:
 
 ```bash
 PIPELINE_USE_PYSPARK=0 PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers gold
 ```
 
-## Datenquelle und Layer-Grenze
+## Data source and layer boundary
 
-- Die Gauntlet-Bewertung basiert auf Silver/Gold-Simulationsartefakten, nicht auf Dateisystem-Discovery.
-- Fuer Gold gilt ein strikter Manifest-Contract ueber `data/silver/manifest.json`.
+- Gauntlet evaluation is based on Silver/Gold simulation artifacts, not filesystem discovery.
+- Gold enforces a strict manifest contract via `data/silver/manifest.json`.
 
-## Strategische Auswertung
+## Team tier interpretation
 
-Basierend auf den Gauntlet-Ergebnissen können Teams nach ihrer Tauglichkeit bewertet werden:
-
-- **Stark** (> 30% Gauntlet-Gewinnchance): Teams, die die vollständige Sequenz konsistent bestehen
-- **Mittel** (10-30% Gauntlet-Gewinnchance): Teams mit guter Chancenverteilung
-- **Schwach** (< 10% Gauntlet-Gewinnchance): Spezialisierte Teams gegen einzelne Gegner
-- **Nicht-spielbar** (0% Gauntlet-Gewinnchance): Keine valide Route durch die Sequenz
+| Tier | Gauntlet win chance | Description |
+|------|---------------------|-------------|
+| **Strong** | > 30% | Consistently clears the full sequence |
+| **Average** | 10–30% | Solid chance distribution across bosses |
+| **Weak** | < 10% | Specialised against individual opponents |
+| **Non-viable** | 0% | No valid route through the sequence |
 

@@ -246,13 +246,11 @@ def test_species_default_resolution_examples() -> None:
         "jellicent": _fake_payload("jellicent", 593, species="jellicent"),
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon-species/" in url:
-            key = url.rstrip("/").split("/")[-1]
-            return species_payloads.get(key)
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
-            return pokemon_payloads.get(key)
+    def _fetch(endpoint: str, name: str | int) -> dict | None:
+        if endpoint == "pokemon-species":
+            return species_payloads.get(str(name))
+        if endpoint == "pokemon":
+            return pokemon_payloads.get(str(name))
         return None
 
     expected = {
@@ -282,10 +280,9 @@ def test_exact_resolution_examples_for_variant_forms() -> None:
         "zygarde-50": _fake_payload("zygarde-50", 718, species="zygarde", is_default=False),
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
-            return pokemon_payloads.get(key)
+    def _fetch(endpoint: str, name: str | int) -> dict | None:
+        if endpoint == "pokemon":
+            return pokemon_payloads.get(str(name))
         return None
 
     for requested in ("basculin-blue-striped", "basculin-red-striped", "zygarde-50"):
@@ -312,13 +309,11 @@ def test_resolved_profiles_include_species_classification_flags() -> None:
         }
     }
 
-    def _fetch(url: str) -> dict | None:
-        if "/pokemon-species/" in url:
-            key = url.rstrip("/").split("/")[-1]
-            return species_payloads.get(key)
-        if "/pokemon/" in url:
-            key = url.rstrip("/").split("/")[-1]
-            return pokemon_payloads.get(key)
+    def _fetch(endpoint: str, name: str | int) -> dict | None:
+        if endpoint == "pokemon-species":
+            return species_payloads.get(str(name))
+        if endpoint == "pokemon":
+            return pokemon_payloads.get(str(name))
         return None
 
     profile, failure = _resolve_requested_pokemon_profile("articuno", _fetch)

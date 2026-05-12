@@ -144,12 +144,14 @@ def _progression_level_offset(progression_depth: float) -> int:
 
 def _level_cap_from_progression(*, boss_ace_level: int, progression_depth: float) -> int:
     ace_level = max(1, int(boss_ace_level or DEFAULT_MEMBER_LEVEL))
-    return ace_level
+    offset = _progression_level_offset(progression_depth)
+    return max(1, ace_level - offset)
 
 
 def _effective_member_level(*, level_cap: int, encounter_level_max: int) -> int:
     capped_level_cap = max(1, int(level_cap or DEFAULT_MEMBER_LEVEL))
-    return capped_level_cap
+    capped_encounter = max(1, int(encounter_level_max or DEFAULT_MEMBER_LEVEL))
+    return min(capped_level_cap, capped_encounter)
 
 
 def _generation_for_game_version(game_version: str) -> int | None:

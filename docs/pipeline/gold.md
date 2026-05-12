@@ -12,9 +12,9 @@ Gold is the serving layer. It consumes Silver contracts, runs battle simulations
 
 ## Required inputs
 
-Gold reads strictly from `data/silver/manifest.json` and does not do loose file discovery.
+Gold reads strictly from `data/silver/manifest.json` and does not do loose file discovery. If a required dataset key is missing or its file is stale, Gold fails immediately with `GoldContractError`.
 
-Typical required datasets include:
+Required manifest dataset keys:
 - `pokemon_data`
 - `simulation_inputs_teams`
 - `source_team_members`

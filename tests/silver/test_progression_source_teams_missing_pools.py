@@ -107,7 +107,7 @@ def test_build_progression_source_teams_filters_species_above_level_cap_by_obtai
                 "boss_id": "boss:diamond:roark:aaa",
                 "location": "route-203",
                 "pokemon": "goldeen",
-                "level_min": 10,
+                "level_min": 4,
                 "level_max": 25,
                 "encounter_chance_max": 40,
                 "capture_rate": 225,

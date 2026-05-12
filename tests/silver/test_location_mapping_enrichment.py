@@ -143,7 +143,10 @@ def test_placeholder_location_slugs_are_not_counted_as_missing(tmp_path) -> None
     silver_dir = tmp_path / "silver"
     snapshot_path = bronze_dir / "pokeapi" / "location_pokemon_snapshot.json"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(json.dumps({"location_pokemon_map": {}}), encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps({"location_pokemon_map": {"pallet-town": {"all": [], "by_version": {}}}}),
+        encoding="utf-8",
+    )
 
     area_map, location_pokemon_map = get_location_area_and_pokemon_maps(
         ["cave-1", "route-1"],

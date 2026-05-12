@@ -44,7 +44,7 @@ def test_runtime_policy_profile_non_strict_values_fallback_to_strict(monkeypatch
 
     cfg = load_runtime_battle_policy_config()
     assert cfg.profile == "strict"
-    assert int(cfg.n_battle_trials) == 15
+    assert int(cfg.n_battle_trials) == 500
 
 
 def test_runtime_policy_profile_strict_is_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,7 +53,7 @@ def test_runtime_policy_profile_strict_is_default(monkeypatch: pytest.MonkeyPatc
 
     cfg = load_runtime_battle_policy_config()
     assert cfg.profile == "strict"
-    assert int(cfg.n_battle_trials) == 15
+    assert int(cfg.n_battle_trials) == 500
 
 
 def test_input_integrity_gate_detects_invalid_team_rows(tmp_path: Path) -> None:

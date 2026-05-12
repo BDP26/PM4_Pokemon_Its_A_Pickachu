@@ -119,7 +119,9 @@ def test_no_python_hash_for_deterministic_pipeline_ids() -> None:
         [
             "bash",
             "-lc",
-            "rg -n 'hash\\(' src/pipeline/silver src/pipeline/gold --glob '*.py'",
+            # Exclude Spark's F.hash (deterministic) and pyspark hash functions;
+            # only flag bare Python hash() calls which are non-deterministic across processes.
+            "rg -n 'hash\\(' src/pipeline/silver src/pipeline/gold --glob '*.py' | grep -v 'F\\.hash\\|pyspark.*hash\\|hashlib\\|#.*hash'",
         ],
         cwd=repo_root,
         text=True,

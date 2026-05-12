@@ -118,6 +118,21 @@ PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers gold
 PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers silver --hard-cleanup
 ```
 
+## Running tests
+
+From repo root with the virtual environment active:
+
+```bash
+PYTHONPATH="$PWD" pytest
+```
+
+Run a specific layer's tests:
+
+```bash
+PYTHONPATH="$PWD" pytest tests/silver/
+PYTHONPATH="$PWD" pytest tests/gold/
+```
+
 ## Silver contract gate
 
 When running `layers silver`, the runner executes:
