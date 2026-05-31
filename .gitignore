@@ -266,7 +266,6 @@ $RECYCLE.BIN/
 *.pt
 checkpoints/
 models/
-data/
 *.csv.gz
 *.parquet
 *.feather
@@ -275,23 +274,60 @@ data/
 **/__pycache__/
 **/*.pyc
 
-# Logs
-*.log
+# Project specific - Local temp workspaces, scratch data and exports
+/data/
+/tmp_*/
+/tmp_*.pptx
+/data_/
+/data_.zip
+/Pokemon BigData.zip
+/gold_*.log
+/silver_*.log
+/pipeline_optimized.log
+/src/pipeline/bronze/data/
 
-# IDE temporary files and caches
-.DS_Store
-*.swp
-*.swo
-*~
+# Project specific - Generated output snapshots and archives
+/pokemon_big_data_outputs/*.jsonl
+/pokemon_big_data_outputs/*.json
+/pokemon_big_data_outputs/*.csv
+*.zip
 
-# Project specific - Generated configuration and metadata files
-pipeline_optimized.log
-pokemon_big_data_outputs/black-white_data.jsonl
-pokemon_big_data_outputs/diamond-pearl_data.jsonl
-pokemon_big_data_outputs/location_to_area_map.json
-pokemon_big_data_outputs/gold-silver_data.jsonl
-pokemon_big_data_outputs/PokemonGymLeaders.csv
-pokemon_big_data_outputs/red-blue_data.jsonl
-pokemon_big_data_outputs/ruby-sapphire_data.jsonl
-pokemon_big_data_outputs/unmapped_locations.json
-pokemon_big_data_outputs/x-y_data.jsonl
+# Project specific - Generated docs assets from local scripts
+/docs/pipeline_layer_flowchart.png
+/docs/pipeline_layer_flowchart_presentation.png
+/docs/pipeline_mermaid_left_to_right.png
+/docs/pipeline_presentation_left_to_right_detailed.png
+/docs/PokemonBigData_Praesentation_*.pptx
+/docs/Abschlussbericht_PM4_Pokemon_Big_Data.docx
+/docs/pokemon_team_walk.gif
+/docs/pokemon_team_walk_preview.png
+/docs/pokemon_emerald_team_walk*.gif
+/docs/pokemon_emerald_team_walk*_preview.png
+/docs/pokemon_emerald_team_walk*_late_preview.png
+
+# Project specific - One-off asset and presentation helper scripts
+/scripts/create_mermaid_lr_flowchart_png.ps1
+/scripts/create_pipeline_flowchart_png.ps1
+/scripts/create_pipeline_flowchart_presentation_png.ps1
+/scripts/create_pokemon_emerald_team_walk_gif.ps1
+/scripts/create_pokemon_emerald_team_walk_v2_gif.ps1
+/scripts/create_pokemon_emerald_team_walk_v3_gif.ps1
+/scripts/create_pokemon_emerald_team_walk_v4_gif.ps1
+/scripts/create_pokemon_emerald_team_walk_v5_gif.ps1
+/scripts/create_pokemon_emerald_team_walk_v6_gif.ps1
+/scripts/create_pokemon_team_walk_gif.ps1
+/scripts/create_presentation_lr_detailed_flowchart_png.ps1
+/scripts/insert_flowchart_slide.ps1
+
+# Project specific - Optional LaTeX build artefacts inside report sources
+/docs/overleaf_abschlussbericht/*.aux
+/docs/overleaf_abschlussbericht/*.bbl
+/docs/overleaf_abschlussbericht/*.bcf
+/docs/overleaf_abschlussbericht/*.blg
+/docs/overleaf_abschlussbericht/*.fdb_latexmk
+/docs/overleaf_abschlussbericht/*.fls
+/docs/overleaf_abschlussbericht/*.log
+/docs/overleaf_abschlussbericht/*.out
+/docs/overleaf_abschlussbericht/*.run.xml
+/docs/overleaf_abschlussbericht/*.synctex.gz
+/docs/overleaf_abschlussbericht/*.toc

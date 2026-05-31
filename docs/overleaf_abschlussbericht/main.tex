@@ -1,0 +1,167 @@
+\documentclass[sigconf,nonacm]{acmart}
+
+\setcopyright{none}
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[ngerman]{babel}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{balance}
+\usepackage{url}
+
+\title[PM4 Pokémon Big Data]{PM4 Pokémon: It's a Pikachu\\Abschlussbericht Big Data}
+\author{Projektteam PM4}
+\affiliation{%
+  \institution{Big-Data-Projekt}
+  \country{Schweiz}
+}
+
+\begin{document}
+
+\begin{abstract}
+Das Projekt \emph{PM4 Pokémon: It's a Pikachu} entwickelt eine reproduzierbare Big-Data-Pipeline zur datengetriebenen Empfehlung von Pokémon-Teams entlang verschiedener Spielversionen. Das praktische Problem besteht darin, dass relevante Informationen für strategische Teamentscheidungen über mehrere heterogene Quellen verteilt sind: Walkthrough-Texte beschreiben Progression und erreichbare Orte, APIs liefern Pokémon- und Move-Metadaten, und separate Datensätze enthalten Boss-, Elite-Four- und Champion-Teams. Die entwickelte Lösung kombiniert diese Quellen in einer Medallion-Architektur mit Bronze-, Silver- und Gold-Schicht, normalisiert Entitäten wie Spiele, Orte, Bossgegner, Pokémon, Moves und Teams und erzeugt daraus simulationsfähige Artefakte. In der Gold-Schicht werden Team-gegen-Boss-Kämpfe sowie Elite-Four-/Champion-Sequenzen bewertet, aggregiert und als Ranking- sowie Walkthrough-Payload bereitgestellt. Die wichtigsten Beiträge sind eine nachvollziehbare Datenpipeline, strikte Manifest- und Schema-Contracts, kompakte Team- und Moveset-Generierung zur Reduktion kombinatorischer Explosionen, Monte-Carlo-basierte Ergebnisaggregation und ein interaktiver Walkthrough-Prototyp für Empfehlungen. Die finale Pipeline verarbeitet zwölf Spielversionen, 176 harmonisierte Boss-Einträge, 589 Pokémon-Profile und über 1,37 Mio. Moveset-Kombinationen in Silver und stellt in Gold versionierte Empfehlungsausgaben bereit.
+\end{abstract}
+
+\keywords{Big Data, Medallion Architecture, Pokémon, Datenpipeline, Simulation, Teamempfehlung}
+\maketitle
+
+\section*{Anforderungserfüllung}
+\begin{table*}[t]
+  \caption{Abdeckung der Anforderungen aus der Aufgabenstellung.}
+  \label{tab:anforderungen}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    Anforderung & Umsetzung im Bericht \\
+    \midrule
+    Abstract & Problem, Daten, Methoden, Pipeline und Ergebnisse werden in einem isoliert lesbaren Absatz zusammengefasst. \\
+    Einleitung und Problemstellung & Motivation, fachlicher Kontext, konkrete Eingaben/Ausgaben und Nicht-Trivialität des Projekts werden beschrieben. \\
+    Systemdesign inkl. Diagramm & Bronze-, Silver- und Gold-Schichten werden erläutert und durch ein Architekturdiagramm ergänzt. \\
+    Big-Data-Aspekte & Volume, Variety, Velocity, Parallelisierung und Trade-offs werden explizit diskutiert. \\
+    Experimentelle Evaluation & Datenmengen, Laufzeitindikatoren, Qualitätsprüfungen und Teststrategie werden tabellarisch ausgewertet. \\
+    Diskussion, Related Work, Fazit & Limitierungen, verwandte Systeme und zukünftige Arbeiten sind als eigene Abschnitte enthalten. \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\section{Einleitung}
+Pokémon-Spiele sind auf den ersten Blick ein Unterhaltungsprodukt, enthalten aber eine überraschend datenintensive Optimierungsaufgabe. Spielende müssen entscheiden, welche Pokémon sie zu welchem Zeitpunkt fangen, entwickeln und mit welchen Attacken ausstatten, um eine Folge von Arenaleitern, Elite-Four-Mitgliedern und Champions möglichst zuverlässig zu besiegen. Diese Entscheidungen ähneln in ihrer Struktur klassischen Empfehlungs- und Entscheidungsunterstützungssystemen: Viele unvollständige Datenpunkte müssen in eine nutzbare Rangliste übersetzt werden.
+
+Das Projekt adressiert die Frage, wie sich aus frei verfügbaren, aber heterogenen Pokémon-Daten eine robuste Pipeline bauen lässt, die spielversionsspezifische Teamempfehlungen erzeugt. Nicht trivial ist dabei vor allem die Kombination der Quellen: Walkthrough-Seiten sind textuell und positionsabhängig, API-Daten sind normalisiert aber nicht direkt progressionstauglich, und Boss-Team-Daten verwenden eigene Namen, Schreibweisen und Versionierungslogiken. Zusätzlich entsteht bei Team- und Moveset-Kombinationen schnell eine kombinatorische Explosion.
+
+Der gewählte Ansatz ist eine Medallion-Pipeline. Bronze speichert Rohdaten reproduzierbar, Silver harmonisiert und validiert sie zu stabilen Verträgen, und Gold erzeugt simulations- und nutzerorientierte Ausgaben. Der Beitrag des Projekts liegt damit nicht nur in einem Ranking, sondern in einem End-to-End-System, das Datenaufnahme, Normalisierung, Simulation, Qualitätssicherung und Bereitstellung zusammenführt.
+
+\section{Hintergrund und Problemstellung}
+Die fachliche Domäne verbindet Spielprogression, Kampflogik und Datenintegration. Pro Spielversion werden Bossgegner, erreichbare Orte, verfügbare Pokémon, Evolutionen, Attacken und Teamzusammenstellungen benötigt. Die Pipeline nutzt drei Hauptquellen: Bulbapedia-Walkthroughs für Progression und Orte, PokeAPI für strukturierte Pokémon-, Move-, Species- und Location-Metadaten sowie einen Kaggle-Datensatz für Gym-Leader-, Elite-Four- und Champion-Teams.
+
+Als Eingaben dienen HTML-/API-Payloads, JSON-Snapshots, CSV-Dateien und später Parquet-Artefakte. Die gewünschten Ausgaben sind normalisierte Referenztabellen, simulationsfähige Teamtabellen, Monte-Carlo-Ergebnisse, Boss- und Versionsrankings sowie ein JSON-Payload für eine interaktive Walkthrough-Seite. Einschränkungen ergeben sich aus uneinheitlichen Schreibweisen, fehlenden oder mehrdeutigen Ortsbezügen, versionsabhängigen Startern und Gegnerteams sowie der Rechenlast, die bei vollständiger Kreuzproduktbildung aller Teams und Movesets entstehen würde.
+
+Die zentrale technische Idee besteht darin, die Spielwelt als gerichtete Progression zu modellieren: Vor jedem Bosskampf wird bestimmt, welche Pokémon und Moves bereits plausibel verfügbar sind. Daraus entstehen Kandidatenteams, die anschließend gegen konkrete Boss-Teams und ganze Elite-Four-/Champion-Sequenzen bewertet werden.
+
+\section{Systemdesign}
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth,height=0.78\textheight,keepaspectratio]{pipeline_flowchart_top_down.png}
+  \caption{Top-to-Bottom-Flowchart der Medallion-Pipeline. Die Leserichtung folgt den Projektartefakten von externen Datenquellen über Bronze und Silver bis zu Gold und den finalen Output-Formaten.}
+  \label{fig:pipeline}
+\end{figure*}
+
+\subsection{Architektur}
+Die Architektur trennt Verantwortlichkeiten bewusst nach Datenschichten. Bronze ist für unveränderte oder minimal normalisierte Rohdaten zuständig. Silver ist die zentrale Qualitätsschicht: Sie parst Walkthroughs, harmonisiert Bossnamen, normalisiert Schlüssel, baut Orts- und Pokémon-Mappings, erzeugt Referenztabellen und schreibt ein Manifest als Contract-Grenze. Gold liest strikt aus diesem Manifest, führt Simulationen aus, aggregiert Kennzahlen und erstellt konsumierbare Rankings.
+
+\begin{table*}[t]
+  \caption{Schichten und zentrale Artefakte der Pipeline.}
+  \label{tab:schichten}
+  \begin{tabularx}{\textwidth}{@{}lXX@{}}
+    \toprule
+    Schicht & Zentrale Aufgabe & Beispiele für Outputs \\
+    \midrule
+    Bronze & Reproduzierbare Aufnahme und Speicherung externer Quellen ohne fachliche Verdichtung. & Bulbapedia-JSON, PokeAPI-Location-Snapshot, Kaggle-CSV, Run-Manifest. \\
+    Silver & Normalisierung, Harmonisierung, Validierung und simulationsfähige Contracts. & \texttt{bosses.parquet}, \texttt{encounters.parquet}, \texttt{pokemon\_data.parquet}, \texttt{source\_team\_members}, \texttt{member\_moveset\_combos}, \texttt{manifest.json}. \\
+    Gold & Simulation, Aggregation, Ranking und Bereitstellung für Analyse/Walkthrough. & \texttt{monte\_carlo\_results.parquet}, \texttt{team\_recommendations.parquet}, \texttt{best\_team\_by\_boss}, \texttt{walkthrough\_best\_teams.json}. \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\subsection{Technologien}
+Die Implementierung ist in Python angelegt und nutzt Pandas, PyArrow/Parquet, Requests, BeautifulSoup/lxml, RapidFuzz, KaggleHub, Pokebase/PokeAPI und Pytest. Für Simulationen existiert neben dem lokalen Engine-Pfad ein optionaler Spark-Pfad über PySpark. Die Bereitstellung der Ergebnisse erfolgt zusätzlich über eine statische HTML-/JavaScript-Walkthrough-Seite. Die Projekt-CLI kapselt die Ausführung über \texttt{python -m src.pipeline.run\_pipeline all} beziehungsweise über gezielte Layer-Aufrufe.
+
+\subsection{Big-Data-Aspekte und Trade-offs}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Volume:} Silver erzeugt in einem dokumentierten Lauf 34.385 Source-Teams, 205.807 Team-Member-Zeilen und 1.373.643 Moveset-Kombinationen. Einzelne naive Kreuzprodukte würden laut Logs Milliardenkombinationen erreichen; die Pipeline reduziert dies durch kompakte, progressionstaugliche Kandidatengenerierung.
+  \item \textbf{Variety:} Die Quellen umfassen HTML, REST-/API-JSON, CSV, JSONL und Parquet. Silver überführt diese Formate in einheitliche, manifestierte Artefakte.
+  \item \textbf{Velocity:} Das System ist als Batch-Pipeline konzipiert. Häufige Updates werden über Run-Manifeste, Source-State und reproduzierbare Layer-Reruns unterstützt; Streaming ist für die Domäne nicht zwingend notwendig.
+  \item \textbf{Parallelisierung:} Die lokale Simulation nutzt Worker-basierte Ausführung; Spark ist als skalierbare Alternative vorgesehen, wenn Java- und Spark-Umgebung verfügbar sind.
+  \item \textbf{Trade-off:} Das Projekt bevorzugt nachvollziehbare Contracts und reproduzierbare Zwischenartefakte gegenüber einer monolithischen Direktberechnung. Dadurch entstehen mehr Dateien, aber deutlich bessere Debuggability und Validierbarkeit.
+\end{itemize}
+
+\section{Experimentelle Evaluation}
+Die Evaluation betrachtet Datenumfang, Laufzeitindikatoren, Vertragsvalidierung und die Qualität der erzeugten Outputs. Da die Pipeline mehrere Datenquellen und Schichten kombiniert, ist nicht nur eine einzelne Accuracy-Kennzahl relevant, sondern auch die Frage, ob die Daten vollständig, konsistent und für Ranking-Entscheidungen nutzbar sind.
+
+\begin{table*}[t]
+  \caption{Evaluation anhand vorhandener Projektartefakte und Logs.}
+  \label{tab:evaluation}
+  \begin{tabularx}{\textwidth}{@{}lX@{}}
+    \toprule
+    Metrik & Beobachtung \\
+    \midrule
+    Bronze-Run & 12 Bulbapedia-Versionen, KaggleHub-Gym-Leader-Datensatz und PokeAPI-Location-Index wurden laut Bronze-Manifest ohne Fehler aktualisiert. \\
+    Silver-Umfang & 176 Boss-/Progressionseinträge, 589 Pokémon-Profile, 565 Move-Referenzen, 26.985 learnable-move-Zeilen und 41.546 Encounter-Zeilen im Manifest. \\
+    Team-Generierung & 34.385 Source-Teams, 205.807 Source-Team-Member-Zeilen und 1.373.643 Moveset-Kombinationen im Silver-Log; Laufzeit ca. 522 Sekunden. \\
+    Qualitätssicherung & Relationale Validierung meldet \texttt{is\_valid: true}; Silver-Manifest stellt 25 Datensätze als Gold-Contract bereit. \\
+    Gold-Outputs & Aktuelle Gold-Artefakte enthalten Monte-Carlo-Ergebnisse, Teamrankings, Boss-Best-Teams, Elite-Four-/Champion-Sequenzen und einen Walkthrough-Payload. \\
+    Walkthrough-Payload & 12 Spielversionen und 176 Walkthrough-Einträge; JSON-Payload ca. 41,8 MB. \\
+    Tests & Das Repository enthält 42 Testdateien mit Schwerpunkten auf Bronze-Fetching, Silver-Contracts, Normalisierung, Simulation und Gold-Ranking. \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+Die wichtigsten Experimente sind die Contract- und Plausibilitätsprüfungen: Silver muss vollständige Referenzen, stabile IDs und nutzbare Simulationstabellen erzeugen; Gold darf nicht lose im Dateisystem suchen, sondern muss die manifestierten Daten verwenden. Für Simulationen werden Win-Rates, Monte-Carlo-Aggregationen und Boss-Fight-Counts erzeugt. Die Kampfsimulation nutzt unter anderem Schadensrandomness von 0,85 bis 1,00, eine Krit-Chance von 6,25 Prozent und eine Begrenzung auf 80 Turns pro Duell.
+
+Die Ergebnisse zeigen, dass die gewählte Architektur mit den Datenmengen umgehen kann und dass die eigentliche Komplexität weniger im reinen Dateivolumen liegt, sondern in der Zahl möglicher Teams, Movesets und Gegnerkontexte. Die erfolgreiche Erzeugung von Ranking- und Walkthrough-Artefakten belegt, dass die normalisierten Silver-Contracts für die Gold-Schicht ausreichend sind.
+
+\section{Diskussion, Erkenntnisse und Limitierungen}
+Gut funktioniert hat vor allem die klare Trennung der Schichten. Bronze bleibt auditierbar, Silver bündelt fachliche Bereinigung und Validierung, Gold kann sich auf Simulation und Serving konzentrieren. Die Manifest-Grenze ist dabei besonders wichtig: Sie verhindert, dass spätere Schichten zufällig veraltete oder unvollständige Dateien verwenden. Ebenfalls wirkungsvoll ist die kompakte Kandidatengenerierung, weil sie vollständige Kreuzprodukte vermeidet und trotzdem spielnahe Teams bereitstellt.
+
+Die wichtigste Limitierung liegt in der Datenqualität externer Quellen. Walkthroughs und Community-Datensätze sind wertvoll, aber sie ändern sich, enthalten Schreibvarianten und können Spielversionen unterschiedlich detailliert abdecken. Eine zweite Limitierung betrifft die Kampfsimulation: Sie bildet strategische Grundmechaniken wie Typen, Level, Damage-Ranges und Teamsequenzen ab, ersetzt aber keine vollständige Engine mit allen Statuswerten, Items, Fähigkeiten, Wettereffekten oder komplexen KI-Entscheidungen.
+
+Für ein nächstes Iterationsziel wären drei Erweiterungen sinnvoll: Erstens eine stärkere Provenance-Anzeige pro Empfehlung, damit sichtbar wird, welche Quelle welchen Teil der Empfehlung stützt. Zweitens ein optionaler Spark-Produktionslauf für größere Simulationsräume. Drittens eine stärker interaktive Evaluation, bei der Nutzer eigene Starter, Fangpräferenzen und Risikoprofile einstellen können.
+
+\section{Verwandte Arbeiten}
+PokeAPI stellt strukturierte Pokémon-Metadaten bereit und ist damit eine zentrale Referenz für Species, Moves, Evolutions und Locations. Das Projekt nutzt diese Daten nicht nur direkt, sondern verbindet sie mit Progression und Simulation. Bulbapedia ist eine umfangreiche Community-Wissensbasis; im Projekt werden daraus Walkthrough-Informationen extrahiert und in maschinenlesbare Progressionsartefakte überführt. Der Kaggle-Datensatz zu Gym-Leadern, Elite Four und Champions liefert gegnerische Teamdaten, wird aber erst durch Harmonisierung mit Spielversionen und Boss-IDs simulationsfähig.
+
+Als Vergleichssystem ist Pokémon Showdown relevant, weil es eine sehr vollständige Kampfsimulationsumgebung bietet. Das PM4-Projekt verfolgt jedoch einen anderen Schwerpunkt: Nicht die perfekte Replikation aller Kampfrandfälle steht im Vordergrund, sondern eine Big-Data-Pipeline, die heterogene Quellen in routebezogene Teamempfehlungen übersetzt. Architekturbezogen steht das Projekt in der Tradition von Medallion-/Lakehouse-Ansätzen, bei denen Roh-, Bereinigungs- und Serving-Schichten klar getrennt werden.
+
+\section{Fazit und zukünftige Arbeiten}
+Das Projekt zeigt, wie aus unstrukturierten und strukturierten Pokémon-Daten ein professionelles Entscheidungsunterstützungssystem entstehen kann. Die Pipeline integriert mehrere Quellen, normalisiert sie in einer Medallion-Architektur, schützt die Übergänge über Manifest-Contracts und erzeugt daraus simulationsbasierte Teamempfehlungen. Besonders relevant ist, dass das System nicht nur einzelne Tabellen erzeugt, sondern einen vollständigen Analysefluss von Rohdaten bis zu nutzerorientierten Walkthrough-Ausgaben abbildet.
+
+Zukünftige Arbeiten sollten die Kampflogik weiter verfeinern, zusätzliche Spielmechaniken aufnehmen, den Spark-Pfad für größere Experimente operationalisieren und die Walkthrough-Oberfläche um Nutzerpräferenzen erweitern. Außerdem wäre eine formale Benchmark-Evaluation gegen Baselines wie zufällige Teams, reine Typenvorteilsheuristiken oder manuell kuratierte Teams sinnvoll, um den Mehrwert der Pipeline noch klarer zu quantifizieren.
+
+\balance
+\begin{thebibliography}{9}
+\bibitem{pokeapi}
+PokeAPI Documentation. \url{https://pokeapi.co/docs/v2}
+
+\bibitem{bulbapedia}
+Bulbapedia MediaWiki API-Endpunkt. \url{https://bulbapedia.bulbagarden.net/w/api.php}
+
+\bibitem{kaggle}
+Kaggle-Datensatz: \emph{Pokemon Gen 1--9 Gym Leaders Elite Four}. \url{https://www.kaggle.com/datasets/maxiboo/pokemon-gen-1-9-gym-leaders-elite-four}
+
+\bibitem{showdown}
+Pokémon Showdown / Smogon Battle Simulator. \url{https://github.com/smogon/pokemon-showdown}
+
+\bibitem{databricks}
+Databricks: Medallion Architecture. \url{https://docs.databricks.com/en/lakehouse/medallion.html}
+
+\bibitem{projekt}
+Projektartefakte im Repository: \texttt{README.md}, \texttt{docs/pipeline/*.md}, \texttt{data/*/manifest.json}, Silver-/Gold-Run-Logs und Tests.
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Pokemon Pipeline Layer Flowchart</title>
+  <desc id="desc">Overview of the Bronze, Silver and Gold medallion architecture for the Pokemon data pipeline.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#172033" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#344054"/>
+    </marker>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .title { font: 700 54px Arial, Helvetica, sans-serif; fill: #111827; }
+      .subtitle { font: 400 26px Arial, Helvetica, sans-serif; fill: #4b5563; }
+      .section-title { font: 700 30px Arial, Helvetica, sans-serif; fill: #111827; }
+      .label { font: 700 28px Arial, Helvetica, sans-serif; fill: #111827; }
+      .small { font: 400 22px Arial, Helvetica, sans-serif; fill: #374151; }
+      .tiny { font: 400 19px Arial, Helvetica, sans-serif; fill: #475467; }
+      .note { font: 700 20px Arial, Helvetica, sans-serif; fill: #344054; }
+      .box { stroke-width: 3; rx: 22; filter: url(#shadow); }
+      .source { fill: #ffffff; stroke: #d0d5dd; }
+      .bronze { fill: #fff3e6; stroke: #d97706; }
+      .silver { fill: #eef2f7; stroke: #64748b; }
+      .gold { fill: #fff8cc; stroke: #d4a017; }
+      .output { fill: #e9f7ef; stroke: #16a34a; }
+      .contract { fill: #e8f1ff; stroke: #2563eb; }
+      .arrow { stroke: #344054; stroke-width: 5; fill: none; marker-end: url(#arrow); stroke-linecap: round; stroke-linejoin: round; }
+      .thin-arrow { stroke: #667085; stroke-width: 3; fill: none; marker-end: url(#arrow); stroke-linecap: round; }
+      .pill { fill: #ffffff; stroke: #d0d5dd; stroke-width: 2; rx: 18; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1920" height="1080"/>
+
+  <text class="title" x="96" y="96">Pipeline Layer Übersicht</text>
+  <text class="subtitle" x="96" y="136">Medallion Architecture: Rohdaten → validierte Tabellen → Simulationen & Empfehlungen</text>
+
+  <rect class="box source" x="88" y="230" width="300" height="520"/>
+  <text class="section-title" x="128" y="286">Datenquellen</text>
+
+  <rect class="pill" x="128" y="330" width="220" height="82"/>
+  <text class="label" x="158" y="364">Bulbapedia</text>
+  <text class="tiny" x="158" y="394">Walkthrough Pages</text>
+
+  <rect class="pill" x="128" y="448" width="220" height="82"/>
+  <text class="label" x="158" y="482">PokeAPI</text>
+  <text class="tiny" x="158" y="512">Locations &amp; Metadata</text>
+
+  <rect class="pill" x="128" y="566" width="220" height="82"/>
+  <text class="label" x="158" y="600">Kaggle</text>
+  <text class="tiny" x="158" y="630">Boss Teams</text>
+
+  <rect class="box bronze" x="500" y="230" width="340" height="520"/>
+  <text class="section-title" x="548" y="286">Bronze Layer</text>
+  <text class="small" x="548" y="336">Raw source payloads</text>
+  <text class="small" x="548" y="372">werden reproduzierbar</text>
+  <text class="small" x="548" y="408">gespeichert.</text>
+
+  <line x1="548" y1="458" x2="792" y2="458" stroke="#d97706" stroke-width="3"/>
+  <text class="tiny" x="548" y="506">• Bulbapedia JSON</text>
+  <text class="tiny" x="548" y="542">• PokeAPI Snapshots</text>
+  <text class="tiny" x="548" y="578">• Kaggle CSV</text>
+  <text class="tiny" x="548" y="614">• Config Snapshots</text>
+  <text class="tiny" x="548" y="650">• Bronze Manifest</text>
+
+  <rect class="box silver" x="950" y="190" width="380" height="600"/>
+  <text class="section-title" x="1000" y="246">Silver Layer</text>
+  <text class="small" x="1000" y="296">Normalisieren, mappen,</text>
+  <text class="small" x="1000" y="332">anreichern und validieren.</text>
+
+  <line x1="1000" y1="382" x2="1280" y2="382" stroke="#64748b" stroke-width="3"/>
+  <text class="tiny" x="1000" y="430">• Boss Progression</text>
+  <text class="tiny" x="1000" y="466">• Boss Harmonisierung</text>
+  <text class="tiny" x="1000" y="502">• Location Mapping</text>
+  <text class="tiny" x="1000" y="538">• Pokémon &amp; Moves</text>
+  <text class="tiny" x="1000" y="574">• Team Tabellen</text>
+  <text class="tiny" x="1000" y="610">• Simulation Inputs</text>
+  <text class="tiny" x="1000" y="646">• Diagnostics &amp; Checks</text>
+
+  <rect class="contract" x="1000" y="688" width="280" height="58" rx="18"/>
+  <text class="note" x="1034" y="724">Silver Manifest = Vertrag</text>
+
+  <rect class="box gold" x="1440" y="230" width="340" height="520"/>
+  <text class="section-title" x="1490" y="286">Gold Layer</text>
+  <text class="small" x="1490" y="336">Simulationen ausführen</text>
+  <text class="small" x="1490" y="372">und Analyseoutputs</text>
+  <text class="small" x="1490" y="408">bereitstellen.</text>
+
+  <line x1="1490" y1="458" x2="1732" y2="458" stroke="#d4a017" stroke-width="3"/>
+  <text class="tiny" x="1490" y="506">• Battle Simulations</text>
+  <text class="tiny" x="1490" y="542">• Monte Carlo Results</text>
+  <text class="tiny" x="1490" y="578">• Team Rankings</text>
+  <text class="tiny" x="1490" y="614">• Best Teams by Boss</text>
+  <text class="tiny" x="1490" y="650">• Walkthrough Payload</text>
+
+  <rect class="box output" x="520" y="870" width="1240" height="118"/>
+  <text class="section-title" x="570" y="926">Präsentations- und Analyseoutputs</text>
+  <text class="small" x="570" y="964">Team Recommendations · Best Team by Boss · Walkthrough View · Gold Manifest</text>
+
+  <path class="arrow" d="M 388 490 L 500 490"/>
+  <path class="arrow" d="M 840 490 L 950 490"/>
+  <path class="arrow" d="M 1330 490 L 1440 490"/>
+  <path class="thin-arrow" d="M 670 750 C 670 828 780 882 920 890"/>
+  <path class="thin-arrow" d="M 1140 790 C 1140 840 1140 850 1140 870"/>
+  <path class="thin-arrow" d="M 1610 750 C 1610 826 1510 880 1370 890"/>
+
+  <text class="note" x="420" y="462">ingest</text>
+  <text class="note" x="872" y="462">transform</text>
+  <text class="note" x="1358" y="462">serve</text>
+
+  <text class="tiny" x="96" y="1024">Projekt: PM4 - Pokemon It's A Pikachu</text>
+  <text class="tiny" x="1420" y="1024">Bronze → Silver → Gold</text>
+</svg>
