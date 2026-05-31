@@ -4,8 +4,6 @@
 
 *Wer Pokémon spielt, kennt das Problem: Vor dem nächsten Arenakampf fragt man sich, ob das eigene Team stark genug ist. Oft entscheidet man aus dem Bauch heraus oder folgt Tipps aus dem Internet. In unserem Big-Data-Projekt wollten wir genauer wissen, welche Teams in einer bestimmten Spielsituation wirklich die besten Chancen haben.*
 
----
-
 ## Wenn Bauchgefühl nicht mehr reicht
 
 Für alle, die Pokémon nicht oder nur am Rand kennen: Am Anfang eines Spiels wählt man zuerst eines von drei Starter-Pokémon. Danach baut man im Verlauf der Reise ein Team aus bis zu sechs Pokémon auf.
@@ -20,8 +18,6 @@ Genau daraus entstand unsere Projektfrage:
 
 Uns interessierten also nicht einfach "starke Pokémon", sondern Teams, die in einem konkreten Spielabschnitt sinnvoll sind, zum Beispiel vor einem Arenaleiter, der Elite Four oder dem Champion.
 
----
-
 ## Ein Beispiel aus Pokémon Diamond
 
 Besonders gut zeigen lässt sich das an **Pokémon Diamond**. In diesem Spiel kämpft man sich durch acht Arenen, später durch die Elite Four und am Ende gegen Champion Cynthia. Für Spielende ist das immer wieder dieselbe Situation: Vor dem nächsten wichtigen Kampf muss man entscheiden, welche sechs Pokémon man mitnimmt. Ein reines Pflanzen-Team, das gegen eine Wasser-Arena hervorragend funktioniert, ist in einer Feuer-Arena viel schwächer.
@@ -33,8 +29,6 @@ Genau dafür haben wir einen **Walkthrough Commander** gebaut. Dort wählt man e
 ![Walkthrough Commander mit Team-Empfehlungen](bloginput/Site_View.png)
 *Abbildung 1: Der Walkthrough Commander zeigt passende Team-Empfehlungen für den jeweiligen Spielabschnitt.*
 
----
-
 ## Aus vielen Quellen wurde ein Gesamtbild
 
 Damit so eine Empfehlung überhaupt möglich ist, mussten wir Daten aus mehreren Quellen zusammenführen:
@@ -44,8 +38,6 @@ Damit so eine Empfehlung überhaupt möglich ist, mussten wir Daten aus mehreren
 - **[Kaggle](https://www.kaggle.com/)** für Teams von Arenaleitern, Elite Four und Champions
 
 Die eigentliche Schwierigkeit war nicht das Finden der Daten, sondern das Zusammenpassen. Ein Gegner aus einer Quelle musste mit dem richtigen Team aus einer anderen Quelle und den passenden Pokémon-Daten aus einer dritten Quelle verbunden werden. Das klingt unspektakulär, war aber zentral. Wenn Namen, Orte oder Spielversionen nicht sauber zusammenpassen, werden auch die Empfehlungen unzuverlässig.
-
----
 
 ## Wie gross das Ganze wurde
 
@@ -63,8 +55,6 @@ Diese Zahlen sind nicht nur eine technische Randnotiz. Sie zeigen vor allem, war
 
 Für Spielende bedeutet das: Was sich im Spiel wie eine spontane Bauchentscheidung anfühlt, ist in Wirklichkeit eine Auswahl aus sehr vielen Varianten. Genau deshalb lässt sich die Frage nach dem "besten Team" nicht sinnvoll nur aus Erfahrung beantworten. Man muss viele Möglichkeiten systematisch vergleichen.
 
----
-
 ## Wie wir Kämpfe berechnet haben
 
 Das Herzstück des Projekts war unsere Kampfsimulation. Die Idee dahinter ist einfach:
@@ -81,8 +71,6 @@ Ein einfaches Beispiel:
 
 Diese Zahl ist aussagekräftiger als ein einzelner Testkampf. Denn in Pokémon hängt viel vom konkreten Ablauf ab: Wer greift zuerst an? Welche Attacke wird eingesetzt? Welche Typenvorteile kommen zum Tragen? Darum wollten wir nicht nur wissen, **ob** ein Team gewinnen kann, sondern **wie zuverlässig** es gewinnt.
 
----
-
 ## Warum Typen fast alles verändern
 
 Wer Pokémon kennt, weiss: Typen entscheiden oft über Sieg oder Niederlage. Feuer ist stark gegen Pflanze, Wasser gegen Feuer und Elektro gegen Wasser. Spannend wird es bei Pokémon mit zwei Typen. Dann müssen beide zusammen betrachtet werden. Ein Elektro-Angriff ist zum Beispiel stark gegen Wasser, hat gegen Boden aber keine Wirkung. Gegen ein Wasser/Boden-Pokémon bringt Elektro deshalb insgesamt nichts.
@@ -96,13 +84,9 @@ Elektro gegen Wasser/Boden
 
 Gerade deshalb ist eine datenbasierte Auswertung nützlich. Ein Team kann in einem Kampf sehr stark sein und im nächsten deutlich schlechter abschneiden, obwohl es auf den ersten Blick ähnlich gut wirkt.
 
----
-
 ## Ein Team für einen Kampf ist nicht automatisch gut für alle
 
 Besonders deutlich wurde das bei der **Elite Four** und beim **Champion**. Dort reicht es nicht, für einen einzigen Gegner gut vorbereitet zu sein. Ein Team muss mehrere starke Kämpfe hintereinander überstehen. Darum betrachteten wir nicht nur einzelne Duelle, sondern auch ganze Serien von Kämpfen. So wurde sichtbar, ob ein Team nur gegen einen bestimmten Gegner stark ist oder ob es über mehrere Kämpfe hinweg zuverlässig funktioniert. Das ist ein wichtiger Unterschied: Das beste Team für die nächste Arena ist nicht automatisch auch das beste Team für das Ende des Spiels.
-
----
 
 ## Was man aus den Ergebnissen mitnehmen kann
 
@@ -123,13 +107,9 @@ Das heisst auch: Ein Team, das früher im Spiel sehr stark wirkt, muss später n
 
 Die Empfehlungen sind trotzdem keine perfekte Vorhersage für jeden echten Spielverlauf. Bestimmte Spielmechaniken haben wir vereinfacht, etwa sehr spezielle Kampfsituationen oder Hilfsmittel wie Items. Die Resultate sind deshalb am besten als **Orientierung** zu verstehen, nicht als Garantie.
 
----
-
 ## Auch der Starter macht einen Unterschied
 
 Ein spannender Punkt war die Wahl des Starter-Pokémon. Je nachdem, ob man sich am Anfang für Pflanze, Feuer oder Wasser entscheidet, verändert sich der weitere Spielverlauf teilweise leicht. Das eigene Team entwickelt sich anders, und in manchen Spielen wirken sich diese Entscheidungen sogar indirekt auf spätere Gegner aus. Deshalb kann sich auch die Empfehlung ändern. Mit anderen Worten: Selbst innerhalb desselben Spiels gibt es nicht nur eine einzige richtige Lösung.
-
----
 
 ## Was im Projekt besonders schwierig war
 
@@ -144,8 +124,6 @@ Schwierig waren vor allem diese Punkte:
 
 Gerade diese Punkte haben gezeigt, dass hinter einer scheinbar einfachen Empfehlung überraschend viel Detailarbeit steckt.
 
----
-
 ## Fazit
 
 Unser Projekt zeigt, dass selbst eine bekannte Spielwelt wie Pokémon spannende Datenfragen aufwirft. Aus verschiedenen Quellen, vielen Berechnungen und unzähligen Teamvarianten entstanden konkrete Empfehlungen für reale Spielsituationen.
@@ -156,12 +134,8 @@ Oder kürzer gesagt:
 
 > **Pokémon bleibt ein Spiel, aber eines mit erstaunlich viel Strategie.**
 
----
-
 ## Ausblick
 
 Spannend wäre als Nächstes vor allem, noch mehr Spiele einzubeziehen und die Ergebnisse noch einfacher zugänglich zu machen. Statt einer statischen Seite könnte daraus später ein interaktives Werkzeug werden, das Spielenden direkt bei der Teamwahl hilft. So würde aus dem Projekt langfristig ein praktischer Pokémon-Berater entstehen: nicht für das perfekte Spielen, eher als Unterstützung beim Team-Building.
-
----
 
 *Erstellt im Rahmen des Moduls DS.PM4 an der ZHAW, Studiengang Data Science.*
