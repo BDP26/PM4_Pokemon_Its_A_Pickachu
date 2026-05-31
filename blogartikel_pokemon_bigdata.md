@@ -1,4 +1,4 @@
-# Welches Pokémon-Team ist wirklich das beste? Was unser Big-Data-Projekt herausgefunden hat
+# Daten statt Bauchgefühl: Wie man das beste Pokémon-Team findet
 
 ![Pixel-Art-Szene als Einstieg in das Pokémon-Big-Data-Projekt](bloginput/pokemon_team_walk.gif)
 
