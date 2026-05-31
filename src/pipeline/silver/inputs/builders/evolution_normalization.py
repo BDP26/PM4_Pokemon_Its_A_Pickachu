@@ -235,8 +235,9 @@ def normalize_candidate_pool_for_level(
     removed_invalid = 0
 
     for species, chance, lvl_max, capture in candidates:
-        # Evolution legality is determined at source-team generation level.
-        effective_level = max(1, int(member_level or 1))
+        # Use the same level capping as legal_species_pool_for_level: a pokemon
+        # caught at level_max cannot have evolved past that level when caught.
+        effective_level = max(1, min(int(member_level or 1), int(lvl_max or member_level or 1)))
         normalized_species, applied = normalize_species_for_level(
             species,
             member_level=effective_level,
@@ -289,8 +290,9 @@ def legal_species_pool_for_level(
     """Return the species set that remains legal after forced evolutions at the given level."""
     legal_species: set[str] = set()
     for species, _, lvl_max, _ in candidates:
-        # Evolution legality is determined at source-team generation level.
-        effective_level = max(1, int(member_level or 1))
+        # Effective level is capped by encounter level_max: a pokemon caught at level 20
+        # cannot have evolved past level 20 even if the player_level_cap is higher.
+        effective_level = max(1, min(int(member_level or 1), int(lvl_max or member_level or 1)))
         normalized_species, _ = normalize_species_for_level(
             species,
             member_level=effective_level,

@@ -29,7 +29,6 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
                 "required_dataset_keys": [
                     "boss_records",
                     "pokemon_data",
-                    "move_data",
                     "simulation_inputs_teams",
                     "source_team_members",
                     "member_moveset_combos",
@@ -187,22 +186,6 @@ def create_silver_manifest(silver_dir: Path = SILVER_DIR) -> None:
             "format": "JSONL",
             "description": "Line-delimited view of normalized team compositions"
         }
-
-    move_data_file = simulation_dir / "move_data.parquet"
-    move_count = 0
-    if move_data_file.exists():
-        try:
-            move_count = len(read_parquet(move_data_file))
-        except Exception:
-            move_count = 0
-        manifest["datasets"]["move_data"] = {
-            "file": _relative_to(silver_dir, move_data_file),
-            "count": move_count,
-            "format": "Parquet",
-            "description": "Validated move metadata stored separately from team records",
-        }
-
-    logger.info("[silver_manifest] found %s move data", move_count)
 
     sharded_team_members = sorted(simulation_dir.glob("source_team_members_*.parquet"))
     team_members_count = 0

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.pipeline.silver.simulation.type_matchups import _stable_pair_seed, _stable_sequence_seed
+from src.pipeline.gold.simulation.team_battle_simulations import _stable_pair_seed, _stable_sequence_seed
 
 
 def test_stable_pair_seed_is_deterministic() -> None:

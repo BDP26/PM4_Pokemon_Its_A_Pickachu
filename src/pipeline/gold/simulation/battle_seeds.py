@@ -66,7 +66,8 @@ def build_battle_seeds(
 
         for _, player_match in boss_matchups.iterrows():
             player_id = player_match.get("team_id_attacker")
-            if player_id is None or boss_id is None:
+            # Filter out null/empty team IDs to prevent downstream inconsistencies
+            if not player_id or not boss_id or str(player_id).strip() == "" or str(boss_id).strip() == "":
                 if len(skipped_examples) < 5:
                     skipped_examples.append({"reason": "null_team_id", "row": player_match.to_dict()})
                 continue

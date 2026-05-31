@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 
 from src.pipeline.common.io import write_json, write_parquet
-from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, _is_version_compatible, build_team_battle_simulations
-from src.pipeline.silver.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
+from src.pipeline.gold.simulation.team_battle_simulations import BattleSimulationConfig, _is_version_compatible, build_team_battle_simulations
+from src.pipeline.gold.simulation.monte_carlo_optimizer import run_monte_carlo_team_optimizer
 
 
 def _write_reference_profiles(silver_dir: Path) -> None:
@@ -92,6 +92,7 @@ def test_cross_version_pairing_is_blocked(tmp_path: Path) -> None:
     build_team_battle_simulations(
         teams_data=_teams(),
         silver_dir=silver_dir,
+        output_dir=silver_dir,
         bronze_dir=bronze_dir,
         runtime_config=BattleSimulationConfig(n_battle_trials=3, require_exact_version_match=True),
     )
@@ -110,6 +111,7 @@ def test_only_intended_gym_matchups_are_simulated(tmp_path: Path) -> None:
     build_team_battle_simulations(
         teams_data=_teams(),
         silver_dir=silver_dir,
+        output_dir=silver_dir,
         bronze_dir=bronze_dir,
         runtime_config=BattleSimulationConfig(n_battle_trials=1, require_exact_version_match=True),
     )
@@ -164,7 +166,7 @@ def test_runtime_n_trials_propagates_to_outputs(tmp_path: Path) -> None:
             }
         ],
     )
-    run_monte_carlo_team_optimizer(silver_dir=tmp_path, n_trials=50, rng_seed=11)
+    run_monte_carlo_team_optimizer(silver_dir=tmp_path, gold_dir=tmp_path, n_trials=50, rng_seed=11)
     out = pd.read_parquet(simulation_dir / "monte_carlo_results.parquet")
     assert set(["scenario_id", "player_team_id", "boss_team_id", "mc_win_rate"]).issubset(set(out.columns))
     assert out.iloc[0]["scenario_id"] == "A_vs_B"
@@ -261,6 +263,7 @@ def test_conditional_striaton_selection_pairs_exactly_one_boss(tmp_path: Path) -
     build_team_battle_simulations(
         teams_data=teams,
         silver_dir=silver_dir,
+        output_dir=silver_dir,
         bronze_dir=bronze_dir,
         runtime_config=BattleSimulationConfig(n_battle_trials=1, require_exact_version_match=True),
     )

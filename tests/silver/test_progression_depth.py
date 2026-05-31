@@ -188,7 +188,7 @@ def test_build_boss_level_table_with_mapping_uses_bronze_fallback_for_missing_bo
 def test_progression_source_teams_use_precomputed_progression_depth_for_level_caps() -> None:
     encounters_df = pd.DataFrame(
         [
-            {"boss_id": "red-brock", "location": "pewter-gym", "pokemon": "geodude", "level_min": 10, "level_max": 15, "encounter_chance_max": 100, "capture_rate": 120, "game": "red"},
+            {"boss_id": "red-brock", "location": "pewter-gym", "pokemon": "geodude", "level_min": 3, "level_max": 8, "encounter_chance_max": 100, "capture_rate": 120, "game": "red"},
             {"boss_id": "red-misty", "location": "route-24", "pokemon": "psyduck", "level_min": 18, "level_max": 25, "encounter_chance_max": 100, "capture_rate": 190, "game": "red"},
             {"boss_id": "red-misty", "location": "route-24", "pokemon": "geodude", "level_min": 10, "level_max": 15, "encounter_chance_max": 10, "capture_rate": 120, "game": "red"},
         ]

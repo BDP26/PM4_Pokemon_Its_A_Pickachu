@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from src.pipeline.common.io import write_json, write_parquet
-from src.pipeline.silver.simulation import type_matchups
-from src.pipeline.silver.simulation.type_matchups import BattleSimulationConfig, build_team_battle_simulations
+from src.pipeline.gold.simulation import team_battle_simulations as type_matchups
+from src.pipeline.gold.simulation.team_battle_simulations import BattleSimulationConfig, build_team_battle_simulations
 
 
 def _write_reference_parquets(silver_dir: Path) -> None:
@@ -232,8 +232,7 @@ def test_fallback_only_when_pm4_allow_simulation_fallbacks_is_set(monkeypatch) -
         type_matchups._get_pokemon_profile("unknown", warnings)
 
     monkeypatch.setenv("PM4_ALLOW_SIMULATION_FALLBACKS", "1")
-    profile, degraded = type_matchups._get_pokemon_profile("unknown", warnings)
-    assert degraded is True
+    profile = type_matchups._get_pokemon_profile("unknown", warnings)
     assert profile["name"] == "unknown"
 
 

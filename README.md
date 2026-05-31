@@ -2,6 +2,11 @@
 
 Pokemon data pipeline with a medallion architecture (`bronze -> silver -> gold`) plus battle simulation and team ranking.
 
+## Authors
+
+- Hamidi Egzon
+- Priyanth Vijayasures
+
 ## What this project does
 
 The pipeline combines three external sources:
@@ -10,9 +15,9 @@ The pipeline combines three external sources:
 - Kaggle gym/elite/champion team data
 
 It turns them into:
-- Clean reference tables (`silver`)
+- Canonical reference tables (`silver/references`)
 - Simulation inputs (`silver/simulation`)
-- Ranked team outputs and walkthrough payloads (`gold`)
+- Ranked recommendation outputs and walkthrough payloads (`gold`)
 
 ## Architecture at a glance
 
@@ -23,17 +28,77 @@ It turns them into:
 | `gold` | `data/gold/` | Run simulations, aggregate metrics, and produce analytics-ready datasets. |
 
 Detailed layer docs:
-- [docs/pipeline/bronze.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/bronze.md)
-- [docs/pipeline/silver.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/silver.md)
-- [docs/pipeline/gold.md](/Users/priyanthvijayasures/Documents/000_Schule/Bachelor Data Science/6. Semester/PM4/PM4_Pokemon_Its_A_Pickachu/docs/pipeline/gold.md)
+- [docs/pipeline/bronze.md](docs/pipeline/bronze.md)
+- [docs/pipeline/silver.md](docs/pipeline/silver.md)
+- [docs/pipeline/gold.md](docs/pipeline/gold.md)
+- [docs/pipeline/elite_four_gauntlet.md](docs/pipeline/elite_four_gauntlet.md)
 
 ## Setup
 
-1. Create and activate a Python 3.11+ virtual environment.
+1. Create and activate a Python 3.11+ virtual environment named `.venv`.
+
+### macOS / Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Windows (PowerShell)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
 2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
+```
+
+3. Verify that commands use `.venv` Python:
+
+```bash
+which python
+python -V
+```
+
+## Environment setup
+
+Set runtime environment variables once per terminal session before running the pipeline.
+
+### macOS / Linux (bash, zsh)
+
+```bash
+export PYTHONPATH="$PWD"
+export PIPELINE_USE_PYSPARK=1
+```
+
+Optional (if Spark should be disabled):
+
+```bash
+export PIPELINE_USE_PYSPARK=0
+```
+
+If Java is installed but not detected for Spark:
+
+```bash
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+### Windows (PowerShell)
+
+```powershell
+$env:PYTHONPATH = "$PWD"
+$env:PIPELINE_USE_PYSPARK = "1"
+```
+
+Optional (if Spark should be disabled):
+
+```powershell
+$env:PIPELINE_USE_PYSPARK = "0"
 ```
 
 ## Run the pipeline
@@ -42,36 +107,61 @@ From repo root:
 
 ```bash
 # all layers in order
-PYTHONPATH=src python -m src.pipeline.run_pipeline all
+PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline all
 
-# selected layers
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers bronze
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers silver
-PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
+# one or more selected layers
+PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers bronze
+PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers silver
+PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers gold
 
-# simulation smoke checks for gold outputs
-PYTHONPATH=src python -m src.pipeline.run_pipeline validate-simulation
+# optional cleanup flag for silver
+PYTHONPATH="$PWD" .venv/bin/python -m src.pipeline.run_pipeline layers silver --hard-cleanup
 ```
+
+## Running tests
+
+From repo root with the virtual environment active:
+
+```bash
+PYTHONPATH="$PWD" pytest
+```
+
+Run a specific layer's tests:
+
+```bash
+PYTHONPATH="$PWD" pytest tests/silver/
+PYTHONPATH="$PWD" pytest tests/gold/
+```
+
+## Silver contract gate
+
+When running `layers silver`, the runner executes:
+1. `build_silver_from_bronze`
+2. `src.pipeline.silver.validation.validate_silver_contract --fail-on-error`
+
+This means Silver only succeeds if the persisted physical contract validates.
 
 ## Spark usage in this codebase
 
-The team battle simulation has two engines:
+Gold team battle simulation supports two engines:
 - Local Python engine
 - PySpark engine
 
 Engine selection:
-- `PIPELINE_USE_PYSPARK=1` (default): try Spark
+- `PIPELINE_USE_PYSPARK=1` (default): attempt Spark
 - `PIPELINE_USE_PYSPARK=0`: force local engine
 
 Example:
 
 ```bash
-PIPELINE_USE_PYSPARK=0 PYTHONPATH=src python -m src.pipeline.run_pipeline layers gold
+PIPELINE_USE_PYSPARK=0 PYTHONPATH="$PWD" python -m src.pipeline.run_pipeline layers gold
 ```
+
+Spark UI is configured for localhost (`127.0.0.1`) and usually binds on port `4040`.
 
 ## Running Spark locally
 
-Spark is used through `pyspark~=3.5.3` and requires Java.
+Spark is used through `pyspark~=3.5.x` and requires Java.
 
 ### macOS
 
@@ -106,15 +196,16 @@ python -c "import pyspark; print(pyspark.__version__)"
 
 ### Spark troubleshooting
 
-- If Spark startup fails, set `PIPELINE_USE_PYSPARK=0` to run with the local engine.
-- If port `4040` is already used, stop the existing Spark app or rerun after it exits.
-- Always restart your terminal after changing `JAVA_HOME`/`Path`.
+- If Spark startup fails, use `PIPELINE_USE_PYSPARK=0` and run Gold on local engine.
+- If port `4040` is in use, check `4041`, `4042`, ... or stop the previous Spark app.
+- After interruption, kill stale Spark Java processes before retry.
+- Restart your terminal after changing `JAVA_HOME` / `PATH`.
 
 ## Key contracts
 
 - Gold reads inputs strictly from `data/silver/manifest.json`.
-- Missing required datasets cause fail-fast `GoldContractError`.
-- Canonical Monte Carlo columns are:
+- Missing required datasets fail fast with `GoldContractError`.
+- Core Monte Carlo columns in Gold simulation output:
   - `scenario_id`
   - `player_team_id`
   - `boss_team_id`
@@ -122,10 +213,11 @@ python -c "import pyspark; print(pyspark.__version__)"
 
 ## Useful outputs
 
-- `data/silver/manifest.json`: Silver output contract
+- `data/silver/manifest.json`: Silver output contract boundary
 - `data/gold/simulation/monte_carlo_results.parquet`: simulation win-rates
 - `data/gold/team_recommendations.parquet`: ranked team recommendations
 - `data/gold/walkthrough_best_teams.json`: payload for walkthrough view
+- `data/gold/manifest.json`: Gold dataset inventory
 
 ## Walkthrough page
 

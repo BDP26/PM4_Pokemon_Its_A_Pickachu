@@ -67,15 +67,7 @@ def canonical_scenario_context_id(
 
 
 def row_player_boss_ids(row: dict[str, Any]) -> tuple[str, str]:
-    """Extract canonical player/boss ids from either canonical or legacy matchup keys."""
-    player_team_id = str(
-        row.get("player_team_id")
-        or row.get("team_id_attacker")
-        or ""
-    ).strip()
-    boss_team_id = str(
-        row.get("boss_team_id")
-        or row.get("team_id_defender")
-        or ""
-    ).strip()
+    """Extract canonical player/boss ids from canonical matchup keys."""
+    player_team_id = str(row.get("player_team_id") or "").strip()
+    boss_team_id = str(row.get("boss_team_id") or "").strip()
     return player_team_id, boss_team_id

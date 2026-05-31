@@ -1,6 +1,5 @@
 from typing import Any
 from functools import lru_cache
-from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
 
 STARTER_CHOICES_BY_VERSION: dict[str, list[str]] = {
     "red": ["bulbasaur", "charmander", "squirtle"],
@@ -89,6 +88,8 @@ def _starter_family_rules(base_starter: str) -> dict[str, dict[str, Any]]:
     if static_rules:
         return static_rules
     try:
+        from src.pipeline.silver.inputs.connectors.pokeapi_evolution import get_species_evolution_rules
+
         return get_species_evolution_rules(base)
     except Exception:
         return {

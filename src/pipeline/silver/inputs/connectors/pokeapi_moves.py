@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 _MOVE_PROFILE_CACHE: dict[str, dict[str, Any]] = {}
 _LEARNABLE_BY_GAME_SPECIES: dict[tuple[str, str], dict[str, int]] = {}
 _LEARNABLE_CACHE: dict[tuple[str, int, str], tuple[str, ...]] = {}
+_API_SPECIES_MOVE_LEVELS_BY_GROUP_CACHE: dict[str, dict[str, dict[str, int]]] = {}
 _CACHE_SILVER_DIR: str | None = None
+_PROGRESS_LOG_INTERVAL = 25
 def _normalize_learned_level(raw_level: Any) -> int:
     try:
         level = int(raw_level or 0)
@@ -59,6 +61,7 @@ def _clear_loaded_caches() -> None:
     _MOVE_PROFILE_CACHE.clear()
     _LEARNABLE_BY_GAME_SPECIES.clear()
     _LEARNABLE_CACHE.clear()
+    _API_SPECIES_MOVE_LEVELS_BY_GROUP_CACHE.clear()
     _CACHE_SILVER_DIR = None
 
 
@@ -201,6 +204,7 @@ def _cached_pokebase_payload(endpoint: str, resource_name_or_id: str | int | Non
 
 def _api_move_profile(move_name: str) -> dict[str, Any]:
     normalized = normalize_move_name(move_name)
+    logger.info("[silver/moves] fetching canonical move profile move=%s", normalized)
     try:
         move = pb.move(normalized)
     except Exception as exc:  # noqa: BLE001
@@ -264,9 +268,11 @@ def _api_move_profile(move_name: str) -> dict[str, Any]:
     }
 
 
-def _api_learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
+def _api_learnable_move_levels_by_version_group_for_species(species: str) -> dict[str, dict[str, int]]:
     species_slug = normalize_species_slug(species)
-    version_group = GAME_TO_VERSION_GROUP.get(game_version, game_version)
+    cached = _API_SPECIES_MOVE_LEVELS_BY_GROUP_CACHE.get(species_slug)
+    if cached is not None:
+        return {group: dict(moves) for group, moves in cached.items()}
 
     resolved_payload = None
     for candidate in _species_lookup_candidates(species_slug):
@@ -281,9 +287,10 @@ def _api_learnable_move_levels_for_species(species: str, game_version: str) -> d
             continue
 
     if resolved_payload is None:
+        _API_SPECIES_MOVE_LEVELS_BY_GROUP_CACHE[species_slug] = {}
         return {}
 
-    discovered: dict[str, int] = {}
+    discovered_by_group: dict[str, dict[str, int]] = {}
     move_slots = getattr(resolved_payload, "moves", None)
     if move_slots is None and isinstance(resolved_payload, dict):
         move_slots = resolved_payload.get("moves", [])
@@ -305,14 +312,25 @@ def _api_learnable_move_levels_for_species(species: str, game_version: str) -> d
                 detail_group = str(getattr(getattr(detail, "version_group", None), "name", "") or "").strip().lower()
                 learn_method = str(getattr(getattr(detail, "move_learn_method", None), "name", "") or "").strip().lower()
                 learned_at_raw = getattr(detail, "level_learned_at", None)
-            if detail_group != version_group:
-                continue
             if learn_method != "level-up":
                 continue
+            if not detail_group:
+                continue
             learned_at = _normalize_learned_level(learned_at_raw)
-            discovered[move_name] = min(discovered.get(move_name, learned_at), learned_at)
+            slot = discovered_by_group.setdefault(detail_group, {})
+            slot[move_name] = min(slot.get(move_name, learned_at), learned_at)
 
-    return discovered
+    _API_SPECIES_MOVE_LEVELS_BY_GROUP_CACHE[species_slug] = {
+        group: dict(moves)
+        for group, moves in discovered_by_group.items()
+    }
+    return {group: dict(moves) for group, moves in discovered_by_group.items()}
+
+
+def _api_learnable_move_levels_for_species(species: str, game_version: str) -> dict[str, int]:
+    version_group = GAME_TO_VERSION_GROUP.get(game_version, game_version)
+    by_group = _api_learnable_move_levels_by_version_group_for_species(species)
+    return dict(by_group.get(version_group, {}))
 
 
 def bootstrap_move_reference_cache(
@@ -387,14 +405,17 @@ def bootstrap_move_reference_cache(
                 all_referenced_moves.add(move_name)
         learnable_rows.extend(rows)
 
-    for game_version, species_slug in missing_pairs:
+    missing_pairs_total = len(missing_pairs)
+    for index, (game_version, species_slug) in enumerate(missing_pairs, start=1):
+        if index == 1 or index == missing_pairs_total or index % _PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "[silver/moves] bootstrap species progress %s/%s species=%s game_version=%s",
+                index,
+                missing_pairs_total,
+                species_slug,
+                game_version,
+            )
         move_levels = _api_learnable_move_levels_for_species(species_slug, game_version)
-        logger.info(
-            "[silver/moves] bootstrap species game_version=%s species=%s move_count=%s",
-            game_version,
-            species_slug,
-            len(move_levels),
-        )
         for move_name, learned_level in sorted(move_levels.items()):
             normalized_move = normalize_move_name(move_name)
             if not normalized_move:
@@ -412,16 +433,25 @@ def bootstrap_move_reference_cache(
 
     all_referenced_moves.update(required_moves)
     move_rows_by_name = dict(existing_move_rows_by_name)
-    for move_name in sorted(all_referenced_moves):
+    referenced_moves_sorted = sorted(all_referenced_moves)
+    referenced_moves_total = len(referenced_moves_sorted)
+    for index, move_name in enumerate(referenced_moves_sorted, start=1):
         if move_name in move_rows_by_name:
             continue
+        if index == 1 or index == referenced_moves_total or index % _PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "[silver/moves] bootstrap move profile progress %s/%s move=%s",
+                index,
+                referenced_moves_total,
+                move_name,
+            )
         move_rows_by_name[move_name] = _build_move_row_from_profile(move_name, _api_move_profile(move_name))
 
     move_rows = [move_rows_by_name[move_name] for move_name in sorted(move_rows_by_name)]
     _validate_move_reference_rows(move_rows)
 
     if learnable_rows:
-        write_parquet(learnable_path, learnable_rows, partition_cols=["game_version", "pokemon_species"])
+        write_parquet(learnable_path, learnable_rows, partition_cols=["game_version"])
     if move_rows:
         write_parquet(move_reference_path, move_rows)
 
@@ -540,14 +570,18 @@ def persist_move_reference_cache(
     learnable_rows: list[dict[str, Any]] = []
     all_referenced_moves: set[str] = set(required_moves)
 
-    for game_version, species_slug in sorted(target_pairs):
+    sorted_target_pairs = sorted(target_pairs)
+    target_pairs_total = len(sorted_target_pairs)
+    for index, (game_version, species_slug) in enumerate(sorted_target_pairs, start=1):
+        if index == 1 or index == target_pairs_total or index % _PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "[silver/moves] persist species progress %s/%s species=%s game_version=%s",
+                index,
+                target_pairs_total,
+                species_slug,
+                game_version,
+            )
         move_levels = _LEARNABLE_BY_GAME_SPECIES.get((game_version, species_slug), {})
-        logger.info(
-            "[silver/moves] persist species game_version=%s species=%s move_count=%s",
-            game_version,
-            species_slug,
-            len(move_levels),
-        )
         for move_name, learned_level in sorted(move_levels.items()):
             normalized_move = normalize_move_name(move_name)
             if not normalized_move:
@@ -572,7 +606,16 @@ def persist_move_reference_cache(
                 existing_move_rows_by_name[move_name] = row
 
     move_rows_by_name = dict(existing_move_rows_by_name)
-    for move_name in sorted(all_referenced_moves):
+    referenced_moves_sorted = sorted(all_referenced_moves)
+    referenced_moves_total = len(referenced_moves_sorted)
+    for index, move_name in enumerate(referenced_moves_sorted, start=1):
+        if index == 1 or index == referenced_moves_total or index % _PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "[silver/moves] persist move profile progress %s/%s move=%s",
+                index,
+                referenced_moves_total,
+                move_name,
+            )
         profile = _move_profile(move_name, silver_dir=silver_dir)
         move_rows_by_name[move_name] = _build_move_row_from_profile(move_name, profile)
 
@@ -586,7 +629,7 @@ def persist_move_reference_cache(
         write_parquet(
             references_dir / "learnable_moves.parquet",
             learnable_rows,
-            partition_cols=["game_version", "pokemon_species"],
+            partition_cols=["game_version"],
         )
     if move_rows:
         write_parquet(references_dir / "move_reference.parquet", move_rows)
